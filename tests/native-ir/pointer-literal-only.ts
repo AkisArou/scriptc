@@ -1,4 +1,4 @@
-import type { usize } from "@native-typescript/scabi-c-v1-fixture";
+import type { usize } from "@scriptc/native-abi-fixture";
 
 function pointerSize(): usize {
   return 1n as usize;

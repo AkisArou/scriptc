@@ -190,9 +190,10 @@ export interface NativeFrontendExport {
 }
 
 /** Embedder-supplied native semantics for one frontend run. This contract is
- * deliberately manifest-neutral: SCABI and target planning live above
- * ScriptC, while this layer sees only exact source identities, the target ABI
- * facts needed to interpret generic types, and Native IR. */
+ * deliberately composition-neutral: package identity, provenance, and target
+ * planning live above ScriptC, while this layer sees only exact source
+ * identities, the target ABI facts needed to interpret generic types, and
+ * Native IR. */
 export interface NativeFrontendInput {
   /** ABI facts selected by the embedder. Pointer-sized Native IR types are
    * resolved against this width; aggregate lowering additionally keys on the

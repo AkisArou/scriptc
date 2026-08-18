@@ -21,7 +21,7 @@ import {
   i64,
   u32,
   u64,
-} from "@native-typescript/scabi-c-v1-fixture";
+} from "@scriptc/native-abi-fixture";
 import { exit } from "scriptc-native-test";
 
 let failures = 0 as i32;

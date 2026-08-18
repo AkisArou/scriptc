@@ -2,7 +2,7 @@ import {
   errorHandleFail,
   fixtureErrorsOutstanding,
   type i32,
-} from "@native-typescript/scabi-c-v1-fixture";
+} from "@scriptc/native-abi-fixture";
 import { exit } from "scriptc-native-test";
 
 function run(): i32 {
@@ -17,7 +17,7 @@ function run(): i32 {
     if (
       error instanceof Error &&
       error.message ===
-        "@native-typescript/scabi-c-v1-fixture.errorHandleFail: fixture failure 7"
+        "@scriptc/native-abi-fixture.errorHandleFail: fixture failure 7"
     ) {
       caught = 1 as i32;
     }

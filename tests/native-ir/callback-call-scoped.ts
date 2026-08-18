@@ -1,5 +1,5 @@
-import type { i32 } from "@native-typescript/scabi-c-v1-fixture";
-import { callScoped } from "@native-typescript/scabi-c-v1-fixture";
+import type { i32 } from "@scriptc/native-abi-fixture";
+import { callScoped } from "@scriptc/native-abi-fixture";
 import { exit, verifyCallScoped } from "scriptc-native-test";
 
 const captured = 42 as i32;

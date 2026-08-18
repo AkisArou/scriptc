@@ -17,7 +17,7 @@ import {
   type i64,
   type u64,
   type usize,
-} from "@native-typescript/scabi-c-v1-fixture";
+} from "@scriptc/native-abi-fixture";
 import {
   exit,
   isizeIdentity,

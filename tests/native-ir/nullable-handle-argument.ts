@@ -4,7 +4,7 @@ import {
   type Counter,
   type CounterBase,
   type i32,
-} from "@native-typescript/scabi-c-v1-fixture";
+} from "@scriptc/native-abi-fixture";
 import { createNullableCounter, exit } from "scriptc-native-test";
 
 function run(): i32 {

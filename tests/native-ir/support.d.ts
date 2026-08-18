@@ -10,7 +10,7 @@ import type {
   usize,
   Counter,
   Padded,
-} from "@native-typescript/scabi-c-v1-fixture";
+} from "@scriptc/native-abi-fixture";
 
 declare const nativeScalar: unique symbol;
 export type isize = bigint & { readonly [nativeScalar]: "isize" };
@@ -34,7 +34,7 @@ export declare function verifyPadded(
   value: Padded,
   tag: u8,
   scalarValue: u64,
-  ratio: import("@native-typescript/scabi-c-v1-fixture").f64,
+  ratio: import("@scriptc/native-abi-fixture").f64,
 ): i32;
 export declare function verifyUtf8Hash(actual: u64): i32;
 export declare function verifyBytesHash(actual: u64): i32;

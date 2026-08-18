@@ -2,7 +2,7 @@ import {
   FixtureValue,
   i32Identity,
   type i32,
-} from "@native-typescript/scabi-c-v1-fixture";
+} from "@scriptc/native-abi-fixture";
 import { exit } from "scriptc-native-test";
 
 const observed = i32Identity(FixtureValue.answer);

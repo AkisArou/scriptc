@@ -86,7 +86,7 @@ export function nativeTargetDiag(detail: string, entryPath: string): ScrDiagnost
     message: `Native IR target mismatch: ${detail}`,
     loc: { file: entryPath, start: 0, end: 0 },
     hint:
-      "translate native bindings from a SCABI manifest built for the same target selected by ScriptC",
+      "supply native bindings whose target ABI facts were probed for the same target ScriptC selected",
   };
 }
 

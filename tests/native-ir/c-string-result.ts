@@ -3,7 +3,7 @@ import {
   counterVerify,
   createCounter,
   type i32,
-} from "@native-typescript/scabi-c-v1-fixture";
+} from "@scriptc/native-abi-fixture";
 import { exit } from "scriptc-native-test";
 
 function run(): i32 {
@@ -26,7 +26,7 @@ function run(): i32 {
     if (
       error instanceof Error &&
       error.message ===
-        "@native-typescript/scabi-c-v1-fixture.Counter.requiredLabel returned null"
+        "@scriptc/native-abi-fixture.Counter.requiredLabel returned null"
     ) {
       return counterVerify(
         0 as i32,

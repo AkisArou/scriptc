@@ -1,4 +1,4 @@
-import type { i32 } from "@native-typescript/scabi-c-v1-fixture";
+import type { i32 } from "@scriptc/native-abi-fixture";
 
 /** A host-callable exact Native IR export: no JavaScript-number ABI
  * conversion is permitted at either side of this function. */

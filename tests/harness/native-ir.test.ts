@@ -1,7 +1,7 @@
 /* Native IR is tested below the TypeScript frontend on purpose: this suite
  * proves the serialized compiler/backend contract independently of any
- * particular binding manifest or declaration package. Native TypeScript's
- * SCABI fixture can replace the tiny standalone C source through the two
+ * particular binding manifest or declaration package. An embedder's own
+ * generated fixture can replace the tiny standalone C source through the two
  * SCRIPTC_NATIVE_IR_FIXTURE_* variables without changing the IR program. */
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -24,7 +24,7 @@ const repoRoot = join(import.meta.dirname, "../..");
 const scratch = mkdtempSync(join(tmpdir(), "scriptc-native-ir-"));
 const sanitize = process.env["SCRIPTC_SAN"] === "1";
 const loc: SrcLoc = { file: "native-ir.ts", start: 0, end: 0 };
-const nativePackage = "@native-typescript/scabi-c-v1-fixture";
+const nativePackage = "@scriptc/native-abi-fixture";
 const I8 = nativeScalarType("i8");
 const U8 = nativeScalarType("u8");
 const I16 = nativeScalarType("i16");
@@ -66,7 +66,7 @@ const RETAINED_I32_CONTRACT = {
   lifetime: "until-cancelled",
   registrationOwner: { kind: "result" },
   cancellationBinding:
-    "native-typescript.fixture.c-v1@0.0.0#subscription_destroy",
+    "scriptc.fixture.c-v1@0.0.0#subscription_destroy",
   allowedInvocationExecutors: [
     "same-as-caller",
     "any-attached-thread",
@@ -100,13 +100,13 @@ const CALL_F32_CALLBACK = {
   result: I32,
   context: { placement: "last" },
 } as const;
-const PADDED_ID = "native-typescript.fixture.c-v1@0.0.0#type:padded";
+const PADDED_ID = "scriptc.fixture.c-v1@0.0.0#type:padded";
 const PADDED = { kind: "nativeStruct", typeId: PADDED_ID } as const;
-const PAIR32_ID = "native-typescript.fixture.c-v1@0.0.0#type:pair32";
+const PAIR32_ID = "scriptc.fixture.c-v1@0.0.0#type:pair32";
 const PAIR32 = { kind: "nativeStruct", typeId: PAIR32_ID } as const;
-const PAIR_F64_ID = "native-typescript.fixture.c-v1@0.0.0#type:pair_f64";
+const PAIR_F64_ID = "scriptc.fixture.c-v1@0.0.0#type:pair_f64";
 const PAIR_F64 = { kind: "nativeStruct", typeId: PAIR_F64_ID } as const;
-const NESTED_PAIR32_ID = "native-typescript.fixture.c-v1@0.0.0#type:nested_pair32";
+const NESTED_PAIR32_ID = "scriptc.fixture.c-v1@0.0.0#type:nested_pair32";
 const NESTED_PAIR32 = { kind: "nativeStruct", typeId: NESTED_PAIR32_ID } as const;
 const DIRECT_I64_AGGREGATE_ABI = {
   result: {
@@ -197,14 +197,14 @@ const PADDED_ABI = {
     },
   ],
 } as const;
-const COUNTER_BASE_ID = "native-typescript.fixture.c-v1@0.0.0#type:counter_base";
+const COUNTER_BASE_ID = "scriptc.fixture.c-v1@0.0.0#type:counter_base";
 const COUNTER_BASE = { kind: "nativeHandle", typeId: COUNTER_BASE_ID } as const;
-const COUNTER_MIDDLE_ID = "native-typescript.fixture.c-v1@0.0.0#type:counter_middle";
+const COUNTER_MIDDLE_ID = "scriptc.fixture.c-v1@0.0.0#type:counter_middle";
 const COUNTER_MIDDLE = { kind: "nativeHandle", typeId: COUNTER_MIDDLE_ID } as const;
-const COUNTER_ID = "native-typescript.fixture.c-v1@0.0.0#type:counter";
+const COUNTER_ID = "scriptc.fixture.c-v1@0.0.0#type:counter";
 const COUNTER = { kind: "nativeHandle", typeId: COUNTER_ID } as const;
 const SUBSCRIPTION_ID =
-  "native-typescript.fixture.c-v1@0.0.0#type:subscription";
+  "scriptc.fixture.c-v1@0.0.0#type:subscription";
 const SUBSCRIPTION = {
   kind: "nativeHandle",
   typeId: SUBSCRIPTION_ID,
@@ -291,7 +291,7 @@ const COUNTER_MIDDLE_DEFINITION = {
   cycleCollection: "none",
   upcasts: [{ kind: "identity", target: COUNTER_BASE_ID }],
 } as const satisfies NativeFrontendInput["types"][number];
-const NUMBER_PAIR32_ID = "native-typescript.fixture.c-v1@0.0.0#type:number-pair32";
+const NUMBER_PAIR32_ID = "scriptc.fixture.c-v1@0.0.0#type:number-pair32";
 const NUMBER_PAIR32 = { kind: "nativeStruct", typeId: NUMBER_PAIR32_ID } as const;
 /* Same physical layout and ABI as Pair32 under a distinct identity: the
  * marker changes how source reads the fields, never what the bytes are. */
@@ -320,13 +320,14 @@ const COUNTER_BASE_DEFINITION = {
   cycleCollection: "none",
   upcasts: [],
 } as const satisfies NativeFrontendInput["types"][number];
-const VAULT_ID = "native-typescript.fixture.c-v1@0.0.0#type:vault";
+const VAULT_ID = "scriptc.fixture.c-v1@0.0.0#type:vault";
 const VAULT = { kind: "nativeHandle", typeId: VAULT_ID } as const;
-const ASKER_ID = "native-typescript.fixture.c-v1@0.0.0#type:asker";
+const ASKER_ID = "scriptc.fixture.c-v1@0.0.0#type:asker";
 const ASKER = { kind: "nativeHandle", typeId: ASKER_ID } as const;
 /* A retained callback the emitter asks for an answer: registered once,
  * invoked on the caller's thread, and its result is the emitting call's
- * result. Same shape as every gboolean-returning toolkit signal. */
+ * result. Same shape as an event handler that reports whether it consumed
+ * the event. */
 const ASK_I32_CALLBACK = {
   callingConvention: "c",
   parameters: [I32],
@@ -337,7 +338,7 @@ const ASK_I32_SOURCE = nativeCallbackArgumentType(ASK_I32_CALLBACK);
 const ASK_I32_CONTRACT = {
   lifetime: "until-cancelled",
   registrationOwner: { kind: "result" },
-  cancellationBinding: "native-typescript.fixture.c-v1@0.0.0#asker_destroy",
+  cancellationBinding: "scriptc.fixture.c-v1@0.0.0#asker_destroy",
   allowedInvocationExecutors: ["same-as-caller"],
   deliveryExecutor: "same-as-caller",
   synchronousReturn: true,
@@ -348,15 +349,15 @@ const ASK_I32_CONTRACT = {
   shutdown: "drain",
 } as const satisfies IrNativeCallbackContract;
 /* The same question answered with an ordinary TypeScript boolean over the
- * fixture's exact i32 storage — the shape a gboolean-returning signal takes,
- * where a handler says whether it consumed an event. */
+ * fixture's exact i32 storage — the shape an event handler takes when its
+ * integer result means whether it consumed the event. */
 const ASK_BOOL_SOURCE = {
   ...ASK_I32_SOURCE,
   ret: { kind: "bool", falseValue: "0", trueValue: "1" },
 } as const;
 const ASK_BOOL_CONTRACT = {
   ...ASK_I32_CONTRACT,
-  cancellationBinding: "native-typescript.fixture.c-v1@0.0.0#answerer_destroy",
+  cancellationBinding: "scriptc.fixture.c-v1@0.0.0#answerer_destroy",
 } as const satisfies IrNativeCallbackContract;
 const VAULT_DEFINITION = {
   kind: "handle",
@@ -448,14 +449,14 @@ const localNativeInput: NativeFrontendInput = {
     { declaration: { module: nativePackage, name: "Vault" }, type: VAULT },
   ],
   constants: [{
-    id: "native-typescript.fixture.c-v1@0.0.0#fixture_answer",
+    id: "scriptc.fixture.c-v1@0.0.0#fixture_answer",
     declaration: { module: nativePackage, name: "FixtureValue.answer" },
     type: I32,
     value: "42",
   }],
   operations: [
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#fixture_value_combine",
+      id: "scriptc.fixture.c-v1@0.0.0#fixture_value_combine",
       declaration: { module: nativePackage, name: "FixtureValue.combine" },
       kind: "integer-reduce",
       operator: "|",
@@ -472,14 +473,14 @@ const localNativeInput: NativeFrontendInput = {
       ["f64", nativeScalarType("f64"), true],
     ] as const).flatMap(([name, type, both]) => [
       {
-        id: `native-typescript.fixture.c-v1@0.0.0#${name}_to_number`,
+        id: `scriptc.fixture.c-v1@0.0.0#${name}_to_number`,
         declaration: { module: nativePackage, name: `${name}.toNumber` },
         kind: "to-number" as const,
         type,
       },
       ...(both
         ? [{
-            id: `native-typescript.fixture.c-v1@0.0.0#${name}_from_number`,
+            id: `scriptc.fixture.c-v1@0.0.0#${name}_from_number`,
             declaration: { module: nativePackage, name: `${name}.fromNumber` },
             kind: "from-number" as const,
             type,
@@ -520,7 +521,7 @@ const localNativeInput: NativeFrontendInput = {
       ["f64", "numberF64Identity", "nts_f64_identity"],
       ["f32", "numberF32Identity", "nts_f32_identity"],
     ] as const).map(([scalar, declaration, symbol]) => ({
-      id: `native-typescript.fixture.c-v1@0.0.0#number_${scalar}_identity`,
+      id: `scriptc.fixture.c-v1@0.0.0#number_${scalar}_identity`,
       declaration: { module: nativePackage, name: declaration },
       entry: { kind: "c-symbol" as const, symbol },
       callingConvention: "c" as const,
@@ -546,7 +547,7 @@ const localNativeInput: NativeFrontendInput = {
       /* Exact in, number out: the only way to hand the checked egress a value
        * no double denotes, since a number ingress can only deliver ones that
        * round-trip. */
-      id: "native-typescript.fixture.c-v1@0.0.0#wide_to_number",
+      id: "scriptc.fixture.c-v1@0.0.0#wide_to_number",
       declaration: { module: nativePackage, name: "wideToNumber" },
       entry: { kind: "c-symbol", symbol: "nts_i64_passthrough" },
       callingConvention: "c",
@@ -564,7 +565,7 @@ const localNativeInput: NativeFrontendInput = {
       },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#number_pair32_transform",
+      id: "scriptc.fixture.c-v1@0.0.0#number_pair32_transform",
       declaration: { module: nativePackage, name: "numberPair32Transform" },
       entry: { kind: "c-symbol", symbol: "nts_pair32_transform" },
       callingConvention: "c",
@@ -585,7 +586,7 @@ const localNativeInput: NativeFrontendInput = {
       },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#subscribe_number",
+      id: "scriptc.fixture.c-v1@0.0.0#subscribe_number",
       declaration: { module: nativePackage, name: "subscribeNumber" },
       entry: { kind: "c-symbol", symbol: "nts_subscription_create" },
       callingConvention: "c",
@@ -620,13 +621,13 @@ const localNativeInput: NativeFrontendInput = {
           kind: "owned",
           transfer: "to-runtime",
           destructor:
-            "native-typescript.fixture.c-v1@0.0.0#subscription_destroy",
+            "scriptc.fixture.c-v1@0.0.0#subscription_destroy",
         },
         projection: DIRECT_RESULT,
       },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#call_scoped_number",
+      id: "scriptc.fixture.c-v1@0.0.0#call_scoped_number",
       declaration: { module: nativePackage, name: "callScopedNumber" },
       entry: { kind: "c-symbol", symbol: "nts_call_scoped" },
       callingConvention: "c",
@@ -670,7 +671,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       /* The float flavor of the same shape: the payload slot is 32 bits and
        * the handler receives the double it widens to. */
-      id: "native-typescript.fixture.c-v1@0.0.0#call_scoped_f32",
+      id: "scriptc.fixture.c-v1@0.0.0#call_scoped_f32",
       declaration: { module: nativePackage, name: "callScopedFloat" },
       entry: { kind: "c-symbol", symbol: "nts_call_scoped_f32" },
       callingConvention: "c",
@@ -714,7 +715,7 @@ const localNativeInput: NativeFrontendInput = {
     ...exactIntegerBindings.map(({ scalar, declaration, symbol }) => {
       const type = nativeScalarType(scalar);
       return {
-        id: `native-typescript.fixture.c-v1@0.0.0#${scalar}_identity`,
+        id: `scriptc.fixture.c-v1@0.0.0#${scalar}_identity`,
         declaration: { module: nativePackage, name: declaration },
         entry: { kind: "c-symbol" as const, symbol },
         callingConvention: "c" as const,
@@ -730,7 +731,7 @@ const localNativeInput: NativeFrontendInput = {
       ["nativeTrue", "nts_boolean_true"],
       ["nativeInvalidBoolean", "nts_boolean_invalid"],
     ] as const).map(([declaration, symbol]) => ({
-      id: `native-typescript.fixture.c-v1@0.0.0#${declaration}`,
+      id: `scriptc.fixture.c-v1@0.0.0#${declaration}`,
       declaration: {
         module: nativePackage,
         name: declaration,
@@ -757,7 +758,7 @@ const localNativeInput: NativeFrontendInput = {
       },
     })),
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#nativeNot",
+      id: "scriptc.fixture.c-v1@0.0.0#nativeNot",
       declaration: { module: nativePackage, name: "nativeNot" },
       entry: { kind: "c-symbol", symbol: "nts_boolean_not" },
       callingConvention: "c",
@@ -785,7 +786,7 @@ const localNativeInput: NativeFrontendInput = {
       },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#padded_roundtrip",
+      id: "scriptc.fixture.c-v1@0.0.0#padded_roundtrip",
       declaration: { module: nativePackage, name: "paddedRoundtrip" },
       entry: { kind: "c-symbol", symbol: "nts_padded_roundtrip" },
       callingConvention: "c",
@@ -796,7 +797,7 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: PADDED, passMode: "value", ownership: { kind: "value" as const }, projection: DIRECT_RESULT },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#pair32_transform",
+      id: "scriptc.fixture.c-v1@0.0.0#pair32_transform",
       declaration: { module: nativePackage, name: "pair32Transform" },
       entry: { kind: "c-symbol", symbol: "nts_pair32_transform" },
       callingConvention: "c",
@@ -807,7 +808,7 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: PAIR32, passMode: "value", ownership: { kind: "value" as const }, projection: DIRECT_RESULT },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#pair_f64_transform",
+      id: "scriptc.fixture.c-v1@0.0.0#pair_f64_transform",
       declaration: { module: nativePackage, name: "pairF64Transform" },
       entry: { kind: "c-symbol", symbol: "nts_pair_f64_transform" },
       callingConvention: "c",
@@ -818,7 +819,7 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: PAIR_F64, passMode: "value", ownership: { kind: "value" as const }, projection: DIRECT_RESULT },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#pair_f64_verify",
+      id: "scriptc.fixture.c-v1@0.0.0#pair_f64_verify",
       declaration: { module: nativePackage, name: "pairF64Verify" },
       entry: { kind: "c-symbol", symbol: "nts_pair_f64_verify" },
       callingConvention: "c",
@@ -829,7 +830,7 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: I32, passMode: "value", ownership: { kind: "value" as const }, projection: DIRECT_RESULT },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#nested_pair32_transform",
+      id: "scriptc.fixture.c-v1@0.0.0#nested_pair32_transform",
       declaration: { module: nativePackage, name: "nestedPair32Transform" },
       entry: { kind: "c-symbol", symbol: "nts_nested_pair32_transform" },
       callingConvention: "c",
@@ -840,7 +841,7 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: NESTED_PAIR32, passMode: "value", ownership: { kind: "value" as const }, projection: DIRECT_RESULT },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#hash_utf8",
+      id: "scriptc.fixture.c-v1@0.0.0#hash_utf8",
       declaration: { module: nativePackage, name: "hashUtf8" },
       entry: { kind: "c-symbol", symbol: "nts_hash_utf8" },
       callingConvention: "c",
@@ -867,7 +868,7 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: U64, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#c_string_observe",
+      id: "scriptc.fixture.c-v1@0.0.0#c_string_observe",
       declaration: { module: nativePackage, name: "cStringObserve" },
       entry: { kind: "c-symbol", symbol: "nts_c_string_observe" },
       callingConvention: "c",
@@ -887,7 +888,7 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#nullable_c_string_observe",
+      id: "scriptc.fixture.c-v1@0.0.0#nullable_c_string_observe",
       declaration: { module: nativePackage, name: "nullableCStringObserve" },
       entry: { kind: "c-symbol", symbol: "nts_nullable_c_string_observe" },
       callingConvention: "c",
@@ -907,7 +908,7 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#hash_bytes",
+      id: "scriptc.fixture.c-v1@0.0.0#hash_bytes",
       declaration: { module: nativePackage, name: "hashBytes" },
       entry: { kind: "c-symbol", symbol: "nts_hash_bytes" },
       callingConvention: "c",
@@ -934,7 +935,7 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: U64, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#call_scoped",
+      id: "scriptc.fixture.c-v1@0.0.0#call_scoped",
       declaration: { module: nativePackage, name: "callScoped" },
       entry: { kind: "c-symbol", symbol: "nts_call_scoped" },
       callingConvention: "c",
@@ -971,7 +972,7 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#error_handle_fail",
+      id: "scriptc.fixture.c-v1@0.0.0#error_handle_fail",
       declaration: { module: nativePackage, name: "errorHandleFail" },
       entry: { kind: "c-symbol", symbol: "nts_error_handle_fail" },
       callingConvention: "c",
@@ -993,7 +994,7 @@ const localNativeInput: NativeFrontendInput = {
       },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#fixture_errors_outstanding",
+      id: "scriptc.fixture.c-v1@0.0.0#fixture_errors_outstanding",
       declaration: { module: nativePackage, name: "fixtureErrorsOutstanding" },
       entry: { kind: "c-symbol", symbol: "nts_fixture_errors_outstanding" },
       callingConvention: "c",
@@ -1004,7 +1005,7 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#fail_errno",
+      id: "scriptc.fixture.c-v1@0.0.0#fail_errno",
       declaration: { module: nativePackage, name: "failErrno" },
       entry: { kind: "c-symbol", symbol: "nts_fail_errno" },
       callingConvention: "c",
@@ -1020,7 +1021,7 @@ const localNativeInput: NativeFrontendInput = {
       /* A callee that takes ownership of a handle argument: the reference
        * moves at the call and the handle is spent afterwards, which is the
        * shape `gtk_widget_add_controller` has. */
-      id: "native-typescript.fixture.c-v1@0.0.0#vault_create",
+      id: "scriptc.fixture.c-v1@0.0.0#vault_create",
       declaration: { module: nativePackage, name: "createVault" },
       entry: { kind: "c-symbol", symbol: "nts_vault_create" },
       callingConvention: "c",
@@ -1034,13 +1035,13 @@ const localNativeInput: NativeFrontendInput = {
         ownership: {
           kind: "owned",
           transfer: "to-runtime",
-          destructor: "native-typescript.fixture.c-v1@0.0.0#vault_destroy",
+          destructor: "scriptc.fixture.c-v1@0.0.0#vault_destroy",
         },
         projection: DIRECT_RESULT,
       },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#vault_adopt",
+      id: "scriptc.fixture.c-v1@0.0.0#vault_adopt",
       declaration: { module: nativePackage, name: "Vault.adopt" },
       entry: { kind: "c-symbol", symbol: "nts_vault_adopt" },
       callingConvention: "c",
@@ -1070,7 +1071,7 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#vault_value",
+      id: "scriptc.fixture.c-v1@0.0.0#vault_value",
       declaration: { module: nativePackage, name: "Vault.value" },
       entry: { kind: "c-symbol", symbol: "nts_vault_value" },
       callingConvention: "c",
@@ -1083,7 +1084,7 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#vault_destroy",
+      id: "scriptc.fixture.c-v1@0.0.0#vault_destroy",
       declaration: { module: nativePackage, name: "Vault.dispose" },
       entry: { kind: "c-symbol", symbol: "nts_vault_destroy" },
       callingConvention: "c",
@@ -1103,7 +1104,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       /* Registration for a callback the emitter asks. The handle it returns
        * owns the registration, and disposing it is the cancellation. */
-      id: "native-typescript.fixture.c-v1@0.0.0#asker_create",
+      id: "scriptc.fixture.c-v1@0.0.0#asker_create",
       declaration: { module: nativePackage, name: "askFor" },
       entry: { kind: "c-symbol", symbol: "nts_asker_create" },
       callingConvention: "c",
@@ -1135,7 +1136,7 @@ const localNativeInput: NativeFrontendInput = {
         ownership: {
           kind: "owned",
           transfer: "to-runtime",
-          destructor: "native-typescript.fixture.c-v1@0.0.0#asker_destroy",
+          destructor: "scriptc.fixture.c-v1@0.0.0#asker_destroy",
         },
         projection: DIRECT_RESULT,
       },
@@ -1144,7 +1145,7 @@ const localNativeInput: NativeFrontendInput = {
       /* The boolean flavor of the same registration, over the same C
        * symbols: the handler answers true or false and the emitter reads the
        * exact storage value each one means. */
-      id: "native-typescript.fixture.c-v1@0.0.0#answerer_create",
+      id: "scriptc.fixture.c-v1@0.0.0#answerer_create",
       declaration: { module: nativePackage, name: "answerWith" },
       entry: { kind: "c-symbol", symbol: "nts_answerer_create" },
       callingConvention: "c",
@@ -1176,13 +1177,13 @@ const localNativeInput: NativeFrontendInput = {
         ownership: {
           kind: "owned",
           transfer: "to-runtime",
-          destructor: "native-typescript.fixture.c-v1@0.0.0#answerer_destroy",
+          destructor: "scriptc.fixture.c-v1@0.0.0#answerer_destroy",
         },
         projection: DIRECT_RESULT,
       },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#answerer_destroy",
+      id: "scriptc.fixture.c-v1@0.0.0#answerer_destroy",
       declaration: { module: nativePackage, name: "Answerer.dispose" },
       entry: { kind: "c-symbol", symbol: "nts_answerer_destroy" },
       callingConvention: "c",
@@ -1200,7 +1201,7 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#asker_ask",
+      id: "scriptc.fixture.c-v1@0.0.0#asker_ask",
       declaration: { module: nativePackage, name: "Asker.ask" },
       entry: { kind: "c-symbol", symbol: "nts_asker_ask" },
       callingConvention: "c",
@@ -1214,7 +1215,7 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#asker_asked",
+      id: "scriptc.fixture.c-v1@0.0.0#asker_asked",
       declaration: { module: nativePackage, name: "Asker.asked" },
       entry: { kind: "c-symbol", symbol: "nts_asker_asked" },
       callingConvention: "c",
@@ -1227,7 +1228,7 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#asker_destroy",
+      id: "scriptc.fixture.c-v1@0.0.0#asker_destroy",
       declaration: { module: nativePackage, name: "Asker.dispose" },
       entry: { kind: "c-symbol", symbol: "nts_asker_destroy" },
       callingConvention: "c",
@@ -1245,7 +1246,7 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#subscription_create",
+      id: "scriptc.fixture.c-v1@0.0.0#subscription_create",
       declaration: { module: nativePackage, name: "subscribe" },
       entry: { kind: "c-symbol", symbol: "nts_subscription_create" },
       callingConvention: "c",
@@ -1282,13 +1283,13 @@ const localNativeInput: NativeFrontendInput = {
           kind: "owned",
           transfer: "to-runtime",
           destructor:
-            "native-typescript.fixture.c-v1@0.0.0#subscription_destroy",
+            "scriptc.fixture.c-v1@0.0.0#subscription_destroy",
         },
         projection: DIRECT_RESULT,
       },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#subscription_destroy",
+      id: "scriptc.fixture.c-v1@0.0.0#subscription_destroy",
       declaration: { module: nativePackage, name: "Subscription.dispose" },
       entry: { kind: "c-symbol", symbol: "nts_subscription_destroy" },
       callingConvention: "c",
@@ -1312,7 +1313,7 @@ const localNativeInput: NativeFrontendInput = {
     },
     ...(["emit", "emitForeign"] as const).map((method) => ({
       id:
-        `native-typescript.fixture.c-v1@0.0.0#subscription_${method === "emit" ? "emit" : "emit_foreign"}`,
+        `scriptc.fixture.c-v1@0.0.0#subscription_${method === "emit" ? "emit" : "emit_foreign"}`,
       declaration: { module: nativePackage, name: `Subscription.${method}` },
       entry: {
         kind: "c-symbol" as const,
@@ -1347,7 +1348,7 @@ const localNativeInput: NativeFrontendInput = {
       },
     })),
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#counter_add",
+      id: "scriptc.fixture.c-v1@0.0.0#counter_add",
       declaration: { module: nativePackage, name: "Counter.add" },
       entry: { kind: "c-symbol", symbol: "nts_counter_add" },
       callingConvention: "c",
@@ -1361,7 +1362,7 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#counter_create",
+      id: "scriptc.fixture.c-v1@0.0.0#counter_create",
       declaration: { module: nativePackage, name: "createCounter" },
       entry: { kind: "c-symbol", symbol: "nts_counter_create" },
       callingConvention: "c",
@@ -1377,13 +1378,13 @@ const localNativeInput: NativeFrontendInput = {
         ownership: {
           kind: "owned",
           transfer: "to-runtime",
-          destructor: "native-typescript.fixture.c-v1@0.0.0#counter_destroy",
+          destructor: "scriptc.fixture.c-v1@0.0.0#counter_destroy",
         },
         projection: DIRECT_RESULT,
       },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#counter_destroy",
+      id: "scriptc.fixture.c-v1@0.0.0#counter_destroy",
       declaration: { module: nativePackage, name: "Counter.dispose" },
       entry: { kind: "c-symbol", symbol: "nts_counter_destroy" },
       callingConvention: "c",
@@ -1396,7 +1397,7 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#counter_destroyed_count",
+      id: "scriptc.fixture.c-v1@0.0.0#counter_destroyed_count",
       declaration: { module: nativePackage, name: "counterDestroyedCount" },
       entry: { kind: "c-symbol", symbol: "nts_counter_destroyed_count" },
       callingConvention: "c",
@@ -1407,7 +1408,7 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#counter_value_or",
+      id: "scriptc.fixture.c-v1@0.0.0#counter_value_or",
       declaration: { module: nativePackage, name: "counterValueOr" },
       entry: { kind: "c-symbol", symbol: "nts_counter_value_or" },
       callingConvention: "c",
@@ -1442,8 +1443,8 @@ const localNativeInput: NativeFrontendInput = {
     {
       /* The same optional slot declared over the base of the hierarchy: a
        * Counter argument is two identity upcasts below the arm it has to
-       * take, which is the shape every nullable GObject input has. */
-      id: "native-typescript.fixture.c-v1@0.0.0#counter_base_value_or",
+       * take, which is the shape any nullable base-typed object input has. */
+      id: "scriptc.fixture.c-v1@0.0.0#counter_base_value_or",
       declaration: { module: nativePackage, name: "counterBaseValueOr" },
       entry: { kind: "c-symbol", symbol: "nts_counter_base_value_or" },
       callingConvention: "c",
@@ -1473,7 +1474,7 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#counter_value",
+      id: "scriptc.fixture.c-v1@0.0.0#counter_value",
       declaration: { module: nativePackage, name: "CounterBase.value" },
       entry: { kind: "c-symbol", symbol: "nts_counter_value" },
       callingConvention: "c",
@@ -1486,7 +1487,7 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#counter_label",
+      id: "scriptc.fixture.c-v1@0.0.0#counter_label",
       declaration: { module: nativePackage, name: "Counter.label" },
       entry: { kind: "c-symbol", symbol: "nts_counter_label" },
       callingConvention: "c",
@@ -1504,7 +1505,7 @@ const localNativeInput: NativeFrontendInput = {
       },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#counter_required_label",
+      id: "scriptc.fixture.c-v1@0.0.0#counter_required_label",
       declaration: { module: nativePackage, name: "Counter.requiredLabel" },
       entry: { kind: "c-symbol", symbol: "nts_counter_required_label" },
       callingConvention: "c",
@@ -1522,7 +1523,7 @@ const localNativeInput: NativeFrontendInput = {
       },
     },
     {
-      id: "native-typescript.fixture.c-v1@0.0.0#counter_verify",
+      id: "scriptc.fixture.c-v1@0.0.0#counter_verify",
       declaration: { module: nativePackage, name: "counterVerify" },
       entry: { kind: "c-symbol", symbol: "nts_counter_verify" },
       callingConvention: "c",
@@ -1725,7 +1726,7 @@ function frontendNativeInput(): NativeFrontendInput {
           ownership: {
             kind: "owned",
             transfer: "to-runtime",
-            destructor: "native-typescript.fixture.c-v1@0.0.0#counter_destroy",
+            destructor: "scriptc.fixture.c-v1@0.0.0#counter_destroy",
           },
           projection: DIRECT_RESULT,
         },
@@ -1771,7 +1772,7 @@ function frontendNativeInput(): NativeFrontendInput {
           ownership: {
             kind: "owned",
             transfer: "to-runtime",
-            destructor: "native-typescript.fixture.c-v1@0.0.0#counter_destroy",
+            destructor: "scriptc.fixture.c-v1@0.0.0#counter_destroy",
           },
           projection: DIRECT_RESULT,
         },
@@ -1900,8 +1901,8 @@ function frontendNativeInput(): NativeFrontendInput {
 }
 
 /** A few compiler-focused cases intentionally extend the in-tree fixture
- * with declarations and C symbols that an embedder-owned SCABI fixture does
- * not promise. Keep those cases in the ordinary fork suite, but do not treat
+ * with declarations and C symbols that an embedder-supplied fixture does
+ * not promise. Keep those cases in the ordinary suite, but do not treat
  * absent test-only symbols as failures of an externally supplied frontend
  * program. */
 const localFixtureTest = process.env["SCRIPTC_NATIVE_FRONTEND_INPUT"] === undefined
@@ -1913,7 +1914,7 @@ function nativeExternalTypes(): Record<string, string> {
     process.env["SCRIPTC_NATIVE_IR_DECLARATIONS"] ??
     join(repoRoot, "tests/native-ir/package.d.ts");
   return {
-    "@native-typescript/scabi-c-v1-fixture": declarations,
+    "@scriptc/native-abi-fixture": declarations,
     "scriptc-native-test": join(repoRoot, "tests/native-ir/support.d.ts"),
   };
 }
@@ -1948,7 +1949,7 @@ describe.each(["llvm", "c"] as const)("exact Native IR library exports, %s emiss
           types: [],
           bindings: [],
           exports: [{
-            id: "native-typescript.fixture.c-v1@0.0.0#ts_add_i32",
+            id: "scriptc.fixture.c-v1@0.0.0#ts_add_i32",
             sourceExport: "ntsTsAddI32",
             declaration: {
               module: nativePackage,
@@ -2031,7 +2032,7 @@ int main(void) {
       const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
       expect(mod.lib?.nativeExports).toEqual([
         expect.objectContaining({
-          id: "native-typescript.fixture.c-v1@0.0.0#ts_add_i32",
+          id: "scriptc.fixture.c-v1@0.0.0#ts_add_i32",
           symbol: "nts_ts_add_i32",
           fnName: "ntsTsAddI32",
           returns: I32,
@@ -2059,7 +2060,7 @@ function exactI32Module(value = "42"): IrModule {
     nativeBindings: [
       {
         id: "fixture.i32_identity",
-        declaration: { module: "@native-typescript/scabi-c-v1-fixture", name: "i32Identity" },
+        declaration: { module: "@scriptc/native-abi-fixture", name: "i32Identity" },
         sourceAccess: "call",
         entry: { kind: "c-symbol", symbol: "nts_i32_identity" },
         callingConvention: "c",
@@ -2610,7 +2611,7 @@ test("Native IR rejects invalid binding identity, exact types, and i32 literals"
     ...duplicateDeclaration.nativeBindings![0]!.declaration,
   };
   expect(validateModule(duplicateDeclaration).map((error) => error.message)).toContain(
-    'duplicate Native IR declaration "@native-typescript/scabi-c-v1-fixture"::"i32Identity"',
+    'duplicate Native IR declaration "@scriptc/native-abi-fixture"::"i32Identity"',
   );
 
   const outOfRange = exactI32Module("2147483648");
@@ -2632,7 +2633,7 @@ test("Native IR rejects invalid binding identity, exact types, and i32 literals"
 test("Native IR rejects malformed borrowed UTF-8 C-string results", () => {
   const native = structuredClone(localNativeInput);
   const binding = native.bindings.find(
-    (candidate) => candidate.id === "native-typescript.fixture.c-v1@0.0.0#counter_label",
+    (candidate) => candidate.id === "scriptc.fixture.c-v1@0.0.0#counter_label",
   );
   if (binding === undefined) throw new Error("test fixture lost its C-string-result binding");
   const mod = exactI32Module();
@@ -2645,7 +2646,7 @@ test("Native IR rejects malformed borrowed UTF-8 C-string results", () => {
   Reflect.deleteProperty(missingProjection.nativeBindings![0]!.result, "projection");
   expect(() => validateModule(missingProjection)).not.toThrow();
   expect(validateModule(missingProjection).map((error) => error.message)).toContain(
-    'Native IR binding "native-typescript.fixture.c-v1@0.0.0#counter_label" has no valid result projection',
+    'Native IR binding "scriptc.fixture.c-v1@0.0.0#counter_label" has no valid result projection',
   );
 
   const missingAnchor = structuredClone(mod);
@@ -2653,7 +2654,7 @@ test("Native IR rejects malformed borrowed UTF-8 C-string results", () => {
   if (ownership.kind !== "borrowed") throw new Error("test fixture lost its borrowed result");
   ownership.anchor = "missing";
   expect(validateModule(missingAnchor).map((error) => error.message)).toContain(
-    'Native IR binding "native-typescript.fixture.c-v1@0.0.0#counter_label" has an invalid UTF-8 C-string result projection',
+    'Native IR binding "scriptc.fixture.c-v1@0.0.0#counter_label" has an invalid UTF-8 C-string result projection',
   );
 
   const mutablePointer = structuredClone(mod);
@@ -2661,7 +2662,7 @@ test("Native IR rejects malformed borrowed UTF-8 C-string results", () => {
   if (resultType.kind !== "nativePointer") throw new Error("test fixture lost its pointer result");
   resultType.const = false;
   expect(validateModule(mutablePointer).map((error) => error.message)).toContain(
-    'Native IR binding "native-typescript.fixture.c-v1@0.0.0#counter_label" has an invalid UTF-8 C-string result projection',
+    'Native IR binding "scriptc.fixture.c-v1@0.0.0#counter_label" has an invalid UTF-8 C-string result projection',
   );
 });
 
@@ -3011,7 +3012,7 @@ test("the frontend refuses to reinterpret an ordinary object as a native struct"
 });
 
 describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (backend) => {
-  test("round-trips the SCABI identity result as the observable process status", async () => {
+  test("round-trips the identity result as the observable process status", async () => {
     const mod = exactI32Module();
     expect(validateModule(mod)).toEqual([]);
     const outDir = join(scratch, backend);
@@ -3055,18 +3056,18 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
     const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
     expect(validateModule(mod)).toEqual([]);
     expect(mod.nativeBindings?.map((binding) => binding.id).sort()).toEqual([
-      "native-typescript.fixture.c-v1@0.0.0#i16_identity",
-      "native-typescript.fixture.c-v1@0.0.0#i32_identity",
-      "native-typescript.fixture.c-v1@0.0.0#i64_identity",
-      "native-typescript.fixture.c-v1@0.0.0#i8_identity",
-      "native-typescript.fixture.c-v1@0.0.0#u16_identity",
-      "native-typescript.fixture.c-v1@0.0.0#u32_identity",
-      "native-typescript.fixture.c-v1@0.0.0#u64_identity",
-      "native-typescript.fixture.c-v1@0.0.0#u8_identity",
-      "native-typescript.fixture.c-v1@0.0.0#usize_identity",
       "scriptc-test@1#exit",
       "scriptc-test@1#isize-identity",
       "scriptc-test@1#verify-exact-integers",
+      "scriptc.fixture.c-v1@0.0.0#i16_identity",
+      "scriptc.fixture.c-v1@0.0.0#i32_identity",
+      "scriptc.fixture.c-v1@0.0.0#i64_identity",
+      "scriptc.fixture.c-v1@0.0.0#i8_identity",
+      "scriptc.fixture.c-v1@0.0.0#u16_identity",
+      "scriptc.fixture.c-v1@0.0.0#u32_identity",
+      "scriptc.fixture.c-v1@0.0.0#u64_identity",
+      "scriptc.fixture.c-v1@0.0.0#u8_identity",
+      "scriptc.fixture.c-v1@0.0.0#usize_identity",
     ]);
     const json = serializeModule(mod);
     expect(json).toContain('"kind": "nativeScalarLit"');
@@ -3156,8 +3157,8 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
     });
   });
 
-  /* The registration and its C symbols are fork-local: an embedder-owned
-   * SCABI fixture does not promise them. */
+  /* The registration and its C symbols are in-tree only: an embedder-supplied
+   * fixture does not promise them. */
   localFixtureTest("moves a handle's reference into the callee", async () => {
     const outDir = join(scratch, `handle-transfer-${backend}`);
     const result = await compile(
@@ -3328,7 +3329,7 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
     const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
     expect(validateModule(mod)).toEqual([]);
     expect(mod.nativeBindings?.some(
-      ({ id }) => id === "native-typescript.fixture.c-v1@0.0.0#fixture_value_combine",
+      ({ id }) => id === "scriptc.fixture.c-v1@0.0.0#fixture_value_combine",
     )).toBe(false);
     expect(serializeModule(mod).match(/"kind": "nativeIntegerBin"/gu)).toHaveLength(2);
     const run = spawnSync(result.binaryPath);
@@ -3365,7 +3366,7 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
   });
 
   localFixtureTest("lowers native class construction and static factories through a namespace import", async () => {
-    const destructor = "native-typescript.fixture.c-v1@0.0.0#counter_destroy";
+    const destructor = "scriptc.fixture.c-v1@0.0.0#counter_destroy";
     const resultType = {
       type: COUNTER,
       passMode: "pointer" as const,
@@ -3398,7 +3399,7 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
           bindings: [
             ...native.bindings,
             {
-              id: "native-typescript.fixture.c-v1@0.0.0#counter_construct",
+              id: "scriptc.fixture.c-v1@0.0.0#counter_construct",
               declaration: { module: nativePackage, name: "NativeCounter" },
               entry: {
                 kind: "c-symbol",
@@ -3417,7 +3418,7 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
               result: resultType,
             },
             {
-              id: "native-typescript.fixture.c-v1@0.0.0#counter_with_initial_value",
+              id: "scriptc.fixture.c-v1@0.0.0#counter_with_initial_value",
               declaration: {
                 module: nativePackage,
                 name: "NativeCounter.withInitialValue",
@@ -3444,9 +3445,9 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
     if (!result.ok || result.irPath === undefined) return;
     const mod = deserializeModule(readFileSync(result.irPath, "utf8"));
     expect(mod.nativeBindings?.map((binding) => binding.id).sort()).toEqual([
-      "native-typescript.fixture.c-v1@0.0.0#counter_construct",
-      "native-typescript.fixture.c-v1@0.0.0#counter_destroy",
-      "native-typescript.fixture.c-v1@0.0.0#counter_with_initial_value",
+      "scriptc.fixture.c-v1@0.0.0#counter_construct",
+      "scriptc.fixture.c-v1@0.0.0#counter_destroy",
+      "scriptc.fixture.c-v1@0.0.0#counter_with_initial_value",
     ]);
     expect(spawnSync(result.binaryPath).status).toBe(0);
   });
@@ -3907,7 +3908,7 @@ describe.each(["c", "llvm"] as const)("Native IR borrowed UTF-8, %s backend", (b
     expect(validateModule(mod)).toEqual([]);
     expect(mod.nativeBindings).toContainEqual(
       expect.objectContaining({
-        id: "native-typescript.fixture.c-v1@0.0.0#hash_utf8",
+        id: "scriptc.fixture.c-v1@0.0.0#hash_utf8",
         arguments: [{ name: "data", type: { kind: "string" } }],
         parameters: [
           expect.objectContaining({ projection: { kind: "utf8Data", argument: 0 } }),
@@ -3955,7 +3956,7 @@ describe.each(["c", "llvm"] as const)("Native IR checked UTF-8 C strings, %s bac
     expect(validateModule(mod)).toEqual([]);
     expect(mod.nativeBindings).toContainEqual(
       expect.objectContaining({
-        id: "native-typescript.fixture.c-v1@0.0.0#c_string_observe",
+        id: "scriptc.fixture.c-v1@0.0.0#c_string_observe",
         arguments: [{ name: "data", type: { kind: "string" } }],
         parameters: [
           expect.objectContaining({ projection: { kind: "utf8CString", argument: 0 } }),
@@ -3995,7 +3996,7 @@ describe.each(["c", "llvm"] as const)("Native IR checked UTF-8 C strings, %s bac
     expect(validateModule(mod)).toEqual([]);
     expect(mod.nativeBindings).toContainEqual(
       expect.objectContaining({
-        id: "native-typescript.fixture.c-v1@0.0.0#nullable_c_string_observe",
+        id: "scriptc.fixture.c-v1@0.0.0#nullable_c_string_observe",
         arguments: [{ name: "data", type: { kind: "nullableString" } }],
         parameters: [
           expect.objectContaining({ projection: { kind: "utf8CString", argument: 0 } }),
@@ -4038,7 +4039,7 @@ describe.each(["c", "llvm"] as const)("Native IR borrowed UTF-8 C-string results
     expect(validateModule(mod)).toEqual([]);
     expect(mod.nativeBindings).toContainEqual(
       expect.objectContaining({
-        id: "native-typescript.fixture.c-v1@0.0.0#counter_label",
+        id: "scriptc.fixture.c-v1@0.0.0#counter_label",
         result: {
           type: { kind: "nativePointer", pointee: "i8", const: true, addressSpace: 0 },
           passMode: "pointer",
@@ -4086,7 +4087,7 @@ describe.each(["c", "llvm"] as const)("Native IR borrowed bytes, %s backend", (b
     expect(validateModule(mod)).toEqual([]);
     expect(mod.nativeBindings).toContainEqual(
       expect.objectContaining({
-        id: "native-typescript.fixture.c-v1@0.0.0#hash_bytes",
+        id: "scriptc.fixture.c-v1@0.0.0#hash_bytes",
         arguments: [{ name: "data", type: { kind: "bytes", elem: "u8" } }],
         parameters: [
           expect.objectContaining({ projection: { kind: "bytesData", argument: 0 } }),
@@ -4138,7 +4139,7 @@ describe.each(["c", "llvm"] as const)("Native IR call-scoped callbacks, %s backe
     expect(validateModule(mod)).toEqual([]);
     expect(mod.nativeBindings).toContainEqual(
       expect.objectContaining({
-        id: "native-typescript.fixture.c-v1@0.0.0#call_scoped",
+        id: "scriptc.fixture.c-v1@0.0.0#call_scoped",
         arguments: [
           {
             name: "callback",
@@ -4271,7 +4272,7 @@ describe.each(["c", "llvm"] as const)(
       expect(validateModule(mod)).toEqual([]);
       expect(mod.nativeBindings).toContainEqual(
         expect.objectContaining({
-          id: "native-typescript.fixture.c-v1@0.0.0#subscription_create",
+          id: "scriptc.fixture.c-v1@0.0.0#subscription_create",
           arguments: [
             {
               name: "callback",
@@ -4337,7 +4338,7 @@ describe.each(["c", "llvm"] as const)(
       expect(validateModule(mod)).toEqual([]);
       expect(mod.nativeBindings).toContainEqual(
         expect.objectContaining({
-          id: "native-typescript.fixture.c-v1@0.0.0#error_handle_fail",
+          id: "scriptc.fixture.c-v1@0.0.0#error_handle_fail",
           error: {
             kind: "errorHandle",
             messageSymbol: "nts_fixture_error_message",
@@ -4415,7 +4416,7 @@ describe.each(["c", "llvm"] as const)("Native IR errno errors, %s backend", (bac
     expect(validateModule(mod)).toEqual([]);
     expect(mod.nativeBindings).toContainEqual(
       expect.objectContaining({
-        id: "native-typescript.fixture.c-v1@0.0.0#fail_errno",
+        id: "scriptc.fixture.c-v1@0.0.0#fail_errno",
         error: { kind: "errno", failureValue: "-1" },
         result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
       }),
@@ -4520,7 +4521,7 @@ describe.each(["c", "llvm"] as const)("Native IR opaque handles, %s backend", (b
     expect(mod.nativeTypes).toContainEqual(
       expect.objectContaining({
         kind: "handle",
-        id: "native-typescript.fixture.c-v1@0.0.0#type:counter",
+        id: "scriptc.fixture.c-v1@0.0.0#type:counter",
       }),
     );
     const run = spawnSync(result.binaryPath);

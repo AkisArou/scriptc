@@ -305,8 +305,9 @@ export type IrNativeCallbackContract =
   /**
    * A retained callback the native side ASKS rather than tells: it is
    * registered once and its answer is the value the emitting call returns.
-   * Every gboolean-returning toolkit signal has this shape — a handler that
-   * says whether it consumed an event cannot say so after the event is gone.
+   * An event handler that reports whether it consumed the event has this
+   * shape, and it is common across C toolkits and window systems: such a
+   * handler cannot say so after the event is gone.
    *
    * So delivery is synchronous, which is admissible for exactly one reason:
    * the invocation is same-as-caller, on the thread that owns the runtime. A

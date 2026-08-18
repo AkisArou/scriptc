@@ -1,5 +1,5 @@
-import type { Padded, f64, i32, u8, u64 } from "@native-typescript/scabi-c-v1-fixture";
-import { paddedRoundtrip } from "@native-typescript/scabi-c-v1-fixture";
+import type { Padded, f64, i32, u8, u64 } from "@scriptc/native-abi-fixture";
+import { paddedRoundtrip } from "@scriptc/native-abi-fixture";
 import { exit, verifyPadded } from "scriptc-native-test";
 
 function roundtripAgain(value: Padded): Padded {

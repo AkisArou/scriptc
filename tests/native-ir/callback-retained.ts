@@ -1,4 +1,4 @@
-import { subscribe, type i32 } from "@native-typescript/scabi-c-v1-fixture";
+import { subscribe, type i32 } from "@scriptc/native-abi-fixture";
 import {
   callbacksActive,
   callbacksConfigure,

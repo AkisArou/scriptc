@@ -3,7 +3,7 @@ import {
   counterVerify,
   createCounter,
   type i32,
-} from "@native-typescript/scabi-c-v1-fixture";
+} from "@scriptc/native-abi-fixture";
 import { exit } from "scriptc-native-test";
 
 function useCounter(): i32 {

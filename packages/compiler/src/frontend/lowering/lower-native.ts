@@ -322,8 +322,8 @@ function validateDeclaration(
   };
   /* A declaration may be MERGED with ambient interface declarations — how a
    * .d.ts says a class also has another type's members
-   * (`export interface Box extends Orientable {}`, the shape a GObject class
-   * implementing an interface projects as). Such a declaration contributes
+   * (`export interface Box extends Orientable {}`, the shape a class that
+   * implements an interface projects as). Such a declaration contributes
    * signature members whose own bindings resolve on their own, adds no
    * construction and no body, so it neither supplies a call declaration nor
    * disqualifies the ones that do. */

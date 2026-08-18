@@ -14,7 +14,7 @@ import {
   wideToNumber,
   type i32,
   type i64,
-} from "@native-typescript/scabi-c-v1-fixture";
+} from "@scriptc/native-abi-fixture";
 import { exit } from "scriptc-native-test";
 
 let failures = 0;

@@ -1,5 +1,5 @@
-import type { Padded, f64, u8, u64 } from "@native-typescript/scabi-c-v1-fixture";
-import { paddedRoundtrip } from "@native-typescript/scabi-c-v1-fixture";
+import type { Padded, f64, u8, u64 } from "@scriptc/native-abi-fixture";
+import { paddedRoundtrip } from "@scriptc/native-abi-fixture";
 
 const ordinaryObject = {
   tag: 7 as u8,

@@ -1,5 +1,5 @@
-import type { NestedPair32, Pair32, i32, i64 } from "@native-typescript/scabi-c-v1-fixture";
-import { nestedPair32Transform } from "@native-typescript/scabi-c-v1-fixture";
+import type { NestedPair32, Pair32, i32, i64 } from "@scriptc/native-abi-fixture";
+import { nestedPair32Transform } from "@scriptc/native-abi-fixture";
 import { exit } from "scriptc-native-test";
 
 const result = nestedPair32Transform({

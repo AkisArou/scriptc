@@ -1,8 +1,8 @@
 /* A retained callback the native side ASKS rather than tells. It is
  * registered once and invoked during the emitting call, and the value it
- * answers with is that call's result — the shape every gboolean-returning
- * toolkit signal has, where a handler says whether it consumed an event and
- * cannot say so after the event is gone.
+ * answers with is that call's result — the shape an event handler has when
+ * its result says whether it consumed the event, which it cannot say after
+ * the event is gone.
  *
  * Nothing here is queued: the assertions after each ask see the answer and
  * the handler's writes immediately, which is the whole difference from the
@@ -11,7 +11,7 @@ import {
   answerWith,
   askFor,
   type i32,
-} from "@native-typescript/scabi-c-v1-fixture";
+} from "@scriptc/native-abi-fixture";
 import {
   callbacksConfigure,
   callbacksShutdown,

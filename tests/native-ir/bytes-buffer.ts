@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { hashBytes } from "@native-typescript/scabi-c-v1-fixture";
+import { hashBytes } from "@scriptc/native-abi-fixture";
 import { exit, verifyBytesHash } from "scriptc-native-test";
 
 let evaluations = 0;

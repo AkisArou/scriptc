@@ -203,8 +203,8 @@ int32_t nts_call_scoped_f32(
 
 /* A retained callback the emitter ASKS rather than tells. It is registered
  * once, invoked on the caller's thread, and the value it answers with is the
- * value the emitter returns — the shape every gboolean-returning GTK signal
- * has, where the handler says whether it consumed the event. Nothing here is
+ * value the emitter returns — the shape an event handler has when its
+ * integer result says whether it consumed the event. Nothing here is
  * queued: the answer has to exist before the emitting call returns. */
 typedef int32_t (*NtsAskCallback)(int32_t value, void *context);
 
@@ -251,8 +251,8 @@ int32_t nts_fail_errno(int32_t error_number) {
   return -1;
 }
 
-/* An opaque error object returned instead of raised, the shape GLib's GError
- * takes once a generated adapter has absorbed its out-parameter. NULL is
+/* An opaque error object returned instead of raised, the shape a C error
+ * object takes once a generated adapter has absorbed its out-parameter. NULL is
  * success. The live counter proves the runtime releases it exactly once,
  * including when an exception is already pending. */
 typedef struct NtsFixtureError {

@@ -12,7 +12,7 @@ import {
   createCounter,
   createVault,
   type i32,
-} from "@native-typescript/scabi-c-v1-fixture";
+} from "@scriptc/native-abi-fixture";
 import { exit } from "scriptc-native-test";
 
 let failures = 0 as i32;

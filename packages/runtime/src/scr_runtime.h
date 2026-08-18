@@ -3117,8 +3117,9 @@ typedef struct ScrNativeHandleType {
    * they had before receiver-owned registrations existed. */
   bool cycle_collected;
   /* True when the binding declares that a foreign pointer names one object for
-   * as long as it is held — GObject, not a C struct whose address may be
-   * reused after free. Such handles are interned: projecting the same pointer
+   * as long as it is held — a reference-counted object with a stable address,
+   * not a plain struct whose address may be reused after free. Such handles
+   * are interned: projecting the same pointer
    * twice yields the same managed cell, so equality answers about the object
    * rather than about which call produced the reference. A type that does not
    * declare it keeps exactly the path it had. */

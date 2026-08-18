@@ -7,7 +7,7 @@ import {
   callScopedNumber,
   subscribeNumber,
   type i32,
-} from "@native-typescript/scabi-c-v1-fixture";
+} from "@scriptc/native-abi-fixture";
 import {
   callbacksConfigure,
   callbacksShutdown,

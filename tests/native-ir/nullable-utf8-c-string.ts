@@ -1,4 +1,4 @@
-import { nullableCStringObserve, type i32 } from "@native-typescript/scabi-c-v1-fixture";
+import { nullableCStringObserve, type i32 } from "@scriptc/native-abi-fixture";
 import { exit } from "scriptc-native-test";
 
 function selected(present: boolean): string | null {

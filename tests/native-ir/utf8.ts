@@ -1,4 +1,4 @@
-import { hashUtf8 } from "@native-typescript/scabi-c-v1-fixture";
+import { hashUtf8 } from "@scriptc/native-abi-fixture";
 import { exit, verifyUtf8Hash } from "scriptc-native-test";
 
 let evaluations = 0;

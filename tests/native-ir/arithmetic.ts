@@ -8,7 +8,7 @@ import type {
   i64,
   u64,
   usize,
-} from "@native-typescript/scabi-c-v1-fixture";
+} from "@scriptc/native-abi-fixture";
 import { exit, type isize, verifyExactIntegers } from "scriptc-native-test";
 
 const signed8Sum = ((127 as i8) + (1 as i8)) as i8;

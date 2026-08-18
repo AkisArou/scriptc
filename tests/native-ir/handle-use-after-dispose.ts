@@ -1,4 +1,4 @@
-import { createCounter, type i32 } from "@native-typescript/scabi-c-v1-fixture";
+import { createCounter, type i32 } from "@scriptc/native-abi-fixture";
 import { exit } from "scriptc-native-test";
 
 function run(): i32 {

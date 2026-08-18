@@ -1,5 +1,5 @@
-import type { Pair32, i32 } from "@native-typescript/scabi-c-v1-fixture";
-import { pair32Transform } from "@native-typescript/scabi-c-v1-fixture";
+import type { Pair32, i32 } from "@scriptc/native-abi-fixture";
+import { pair32Transform } from "@scriptc/native-abi-fixture";
 import { exit } from "scriptc-native-test";
 
 const result = pair32Transform({
