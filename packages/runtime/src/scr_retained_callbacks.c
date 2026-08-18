@@ -10,6 +10,11 @@
 static SCR_TL ScrOwnerGateway *scr_retained_gateway;
 static SCR_TL ScrCallbackTable *scr_retained_table;
 static SCR_TL bool scr_retained_accepting;
+/* Registrations a thread the script does not own may raise. Only these hold
+ * the process loop open: a registration only its own thread can raise cannot
+ * produce work while that thread sits in the loop, so counting it would keep
+ * a finished program running forever. */
+static SCR_TL size_t scr_retained_foreign;
 
 static void *scr_retained_closure_retain(void *opaque) {
   return scr_closure_retain((ScrClosure *)opaque);
@@ -64,6 +69,59 @@ ScrCallbackToken *scr_retained_callbacks_register(
     scr_trap("scriptc: failed to associate retained callback source owner\n");
   }
   return token;
+}
+
+/* A registration nothing in the program owns. It is the same table entry an
+ * owner-scoped registration gets, with no source owner set and no owner edge
+ * claiming it — which is exactly what makes it findable by the value it holds
+ * when a release names that value back. */
+ScrCallbackToken *scr_retained_callbacks_register_process(
+    ScrClosure *closure, const void *signature, bool foreign) {
+  /* Configuration is the CALLER's to arrange, so this unit stays ignorant of
+   * whichever loop is driving it: a host configures the service itself, and
+   * generated code installs the default wake just before registering. The
+   * register below traps precisely if neither happened. */
+  ScrCallbackToken *token =
+      scr_retained_callbacks_register(closure, signature, NULL);
+  if (foreign) scr_retained_foreign++;
+  return token;
+}
+
+/* Whether a thread the script does not own may still raise something. */
+bool scr_retained_callbacks_foreign_pending(void) {
+  return scr_retained_foreign > 0;
+}
+
+/* Emitted BEFORE the native removal call, so releasing a value that was never
+ * registered traps before native code can act on the pointer pair, and so the
+ * registration stops admitting new invocations while the library is unhooking
+ * it. The registration stays readable until the call returns: a library is
+ * entitled to flush its handler one last time on the way out. */
+ScrCallbackToken *scr_retained_callbacks_require_process(ScrClosure *closure) {
+  ScrCallbackToken *token = scr_retained_table == NULL
+      ? NULL
+      : scr_callback_table_find_anchor(scr_retained_table, closure);
+  if (token == NULL) {
+    scr_trap("scriptc: releasing a native callback registration that does not exist\n");
+  }
+  if (!scr_callback_table_begin_close(scr_retained_table, token)) {
+    scr_trap("scriptc: retained callback registration could not begin close\n");
+  }
+  return token;
+}
+
+/* The other half, after the native call returns: the library has guaranteed
+ * quiescence, so the entry retires and its closure reference goes back. */
+void scr_retained_callbacks_release_process(ScrCallbackToken *token,
+                                            bool foreign) {
+  if (scr_retained_table == NULL || token == NULL) {
+    scr_trap("scriptc: retained callback service is unavailable\n");
+  }
+  if (foreign && scr_retained_foreign > 0) scr_retained_foreign--;
+  if (!scr_callback_table_cancellation_complete(scr_retained_table, token)) {
+    scr_trap("scriptc: retained callback cancellation could not complete\n");
+  }
+  (void)scr_callback_table_collect(scr_retained_table);
 }
 
 ScrNativeHandle *scr_retained_callbacks_retain_owner(ScrCallbackToken *token) {

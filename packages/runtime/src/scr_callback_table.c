@@ -103,6 +103,32 @@ void *scr_callback_table_acquire(ScrCallbackTable *table, size_t slot,
   return table->retain_anchor(entry->anchor);
 }
 
+/* The token of a live registration whose anchor is this value and which no
+ * owner has claimed — the lookup a release-by-value performs.
+ *
+ * Registrations are NOT deduplicated by anchor: registering one closure twice
+ * makes two registrations, and a release retires one of them. So the first
+ * match wins, and which one it is cannot matter — they are interchangeable by
+ * construction, holding the same anchor and the same signature.
+ *
+ * An owner-claimed entry is skipped on purpose. A registration a handle owns
+ * is ended by that handle's disposal, and letting a value release it would be
+ * a second way to end one life. */
+ScrCallbackToken *scr_callback_table_find_anchor(ScrCallbackTable *table,
+                                                 void *anchor) {
+  if (table == NULL || anchor == NULL) return NULL;
+  for (size_t slot = 0; slot < table->length; slot++) {
+    ScrCallbackTableEntry *entry = &table->entries[slot];
+    if (entry->token == NULL || entry->retired || entry->owner_claimed) continue;
+    if (entry->anchor != anchor || entry->source_context != NULL) continue;
+    if (scr_callback_token_state(entry->token) != SCR_CALLBACK_TOKEN_ACTIVE) {
+      continue;
+    }
+    return entry->token;
+  }
+  return NULL;
+}
+
 static ScrCallbackTableEntry *scr_callback_table_entry(
     ScrCallbackTable *table, ScrCallbackToken *token) {
   if (table == NULL || token == NULL ||

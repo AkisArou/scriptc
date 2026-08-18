@@ -37,13 +37,16 @@ function stableTestMemo<T>(
   return pending;
 }
 
-const RUNTIME_SOURCES = ["scr_number.c", "scr_string.c", "scr_bigint.c", "scr_array.c", "scr_bytes.c", "scr_bytes_io.c", "scr_map.c", "scr_closure.c", "scr_ffi.c", "scr_object.c", "scr_union.c", "scr_exception.c", "scr_error.c", "scr_console.c", "scr_lib.c", "scr_path.c", "scr_url.c", "scr_json.c", "scr_async.c", "scr_child.c", "scr_cycle.c"];
+const RUNTIME_SOURCES = ["scr_number.c", "scr_string.c", "scr_bigint.c", "scr_array.c", "scr_bytes.c", "scr_bytes_io.c", "scr_map.c", "scr_closure.c", "scr_object.c", "scr_union.c", "scr_exception.c", "scr_error.c", "scr_console.c", "scr_lib.c", "scr_path.c", "scr_url.c", "scr_json.c", "scr_async.c", "scr_child.c", "scr_cycle.c"];
 const RETAINED_CALLBACK_SOURCES = [
   "scr_owner_gateway.c",
   "scr_callback_token.c",
   "scr_callback_table.c",
   "scr_callback_handle.c",
   "scr_retained_callbacks.c",
+  /* The default wake, for an executable with no embedder to supply one. It
+   * stands aside when a host has already configured the service. */
+  "scr_owner_loop.c",
 ] as const;
 
 /** The pinned quickjs-ng snapshot under packages/runtime/vendor/quickjs-ng
@@ -359,10 +362,6 @@ export interface CcOptions {
    * scr_watch.c into the binary — the net gating precedent, so watch-free
    * binaries keep their exact link line. */
   watch?: boolean;
-  /** The executable manifest has a format-5 foreign callback descriptor:
-   * compiles the MPSC queue/self-pipe unit. Other FFI and non-FFI binaries
-   * keep their existing runtime size class. */
-  foreignFfi?: boolean;
   /** The program uses node:test (moduleUsesNodeTest on the IR): compiles
    * scr_test.c into the binary — the net gating precedent, so test-free
    * binaries keep their exact link line. */
@@ -1552,7 +1551,7 @@ async function ensureTlsArchive(
  * fiber/loop and child-process units, plus the library-mode TU. */
 const LIB_RUNTIME_SOURCES = [
   ...RUNTIME_SOURCES.filter(
-    (f) => f !== "scr_async.c" && f !== "scr_child.c" && f !== "scr_ffi.c",
+    (f) => f !== "scr_async.c" && f !== "scr_child.c",
   ),
   "scr_library.c",
 ];
@@ -1642,6 +1641,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
           "scr_callback_table.c",
           "scr_callback_handle.c",
           "scr_retained_callbacks.c",
+          "scr_owner_loop.c",
         ]
       : []),
   ];
@@ -4572,7 +4572,6 @@ export async function compileC(opts: CcOptions): Promise<void> {
     ...(opts.http2 ?? false ? [rt(join(rtDir, "scr_http2.c"))] : []),
     ...(opts.dgram ? [rt(join(rtDir, "scr_dgram.c"))] : []),
     ...(opts.watch ? [rt(join(rtDir, "scr_watch.c"))] : []),
-    ...(opts.foreignFfi ? [rt(join(rtDir, "scr_ffi_queue.c"))] : []),
     ...(opts.nodeTest ? [rt(join(rtDir, "scr_test.c"))] : []),
     // The CA-store unit rides its own gate OR the tls one: scr_tls.c
     // references its default-set override unconditionally.

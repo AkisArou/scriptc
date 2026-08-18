@@ -1037,7 +1037,6 @@ export class CEmitter {
       // fs.watch programs fill the loop's watch hooks the same way —
       // scr_watch.c links only when this line is emitted.
       ...(moduleUsesFsWatch(this.mod) ? [`  scr_watch_install();`] : []),
-      ...(this.ffiHasForeignCallback ? [`  scr_ffi_install();`] : []),
       // The embedded npm tables must be registered before %main: the %init
       // functions it calls import from them. Static data only — the engine
       // still boots lazily, on the first island entry. Compressed module
@@ -2019,70 +2018,6 @@ export class CEmitter {
        * payload is copied into a transport slot on the producing thread and
        * the invocation is posted; the dispatch thunk below materializes
        * script values later, on the loop, where making them is legal. */
-      if (adapter.foreign) {
-        const dispatch = `${adapter.symbol}_dispatch`;
-        const slotOf = (index: number): string => `sc_call, ${index}`;
-        const stage: string[] = [];
-        const read: string[] = [];
-        for (const [sourceIndex, argument] of adapter.contract.sourceArguments.entries()) {
-          const source = adapter.source.params[sourceIndex]!;
-          if (argument.kind === "callback-parameter-span") {
-            const copy = source.kind === "byteSpan" ? "bytes" : "string";
-            stage.push(
-              `  scr_ffi_call_copy_${copy}(${slotOf(argument.data)}, ` +
-                `(const uint8_t *)sc_a${argument.data}, sc_a${argument.length});`,
-            );
-            read.push(
-              source.kind === "byteSpan"
-                ? `scr_bytes_from_data(scr_ffi_call_get_data(${slotOf(argument.data)}), scr_ffi_call_get_len(${slotOf(argument.data)}))`
-                : `scr_str_from_utf8_lossy(scr_ffi_call_get_data(${slotOf(argument.data)}), scr_ffi_call_get_len(${slotOf(argument.data)}))`,
-            );
-            continue;
-          }
-          if (argument.kind !== "callback-parameter") {
-            throw new Error("backend bug: a foreign registration cannot inject a registration owner");
-          }
-          const slot = argument.parameter;
-          if (source.kind === "cstring") {
-            stage.push(cstringNullTrapC(slot));
-            stage.push(`  scr_ffi_call_copy_cstring(${slotOf(slot)}, sc_a${slot});`);
-            read.push(
-              `scr_str_from_utf8_lossy(scr_ffi_call_get_data(${slotOf(slot)}), scr_ffi_call_get_len(${slotOf(slot)}))`,
-            );
-            continue;
-          }
-          if (source.kind === "bool") {
-            stage.push(
-              `  scr_ffi_call_set_bool(${slotOf(slot)}, (uint8_t)(sc_a${slot} != ${source.falseValue}));`,
-            );
-            read.push(`scr_ffi_call_get_bool(${slotOf(slot)})`);
-            continue;
-          }
-          /* Every remaining payload is a number on the source side. The
-           * transport keeps the widest slot it has and the widening back is
-           * exact, which is why the validator admits only the scalars that
-           * fit one. */
-          stage.push(`  scr_ffi_call_set_f64(${slotOf(slot)}, (double)sc_a${slot});`);
-          read.push(`scr_ffi_call_get_f64(${slotOf(slot)})`);
-        }
-        out.push(
-          ...(adapter.table === null ? [] : [`static ScrFfiTable ${adapter.table};`]),
-          ...(adapter.global === null ? [] : [`static ScrClosure *${adapter.global};`]),
-          `static void ${dispatch}(ScrClosure *sc_cb, ScrFfiCall *sc_call) {`,
-          `  (${cFnPtrCast(nativeCallbackSourceSignature(adapter.source))}sc_cb->fn)(` +
-            `sc_cb${read.length > 0 ? `, ${read.join(", ")}` : ""});`,
-          `}`,
-          `static ${ret} ${adapter.symbol}(${nativeParams.join(", ")}) {`,
-          `  ScrClosure *sc_cb = ${adapter.global ?? "(ScrClosure *)sc_ctx"};`,
-          `  if (sc_cb == NULL) scr_trap("scriptc: native callback invoked after its registration was released\\n");`,
-          `  ScrFfiCall *sc_call = scr_ffi_call_new(&${adapter.table}, sc_cb, &${dispatch}, ${signature.parameters.length});`,
-          ...stage,
-          `  scr_ffi_post(sc_call);`,
-          `}`,
-          ``,
-        );
-        continue;
-      }
       /* A retained callback the native side asks for an answer runs now, on
        * the caller's thread, because the answer has to exist before the
        * emitting call returns. Reading the closure is legal for exactly that
@@ -2090,7 +2025,7 @@ export class CEmitter {
        * table lookup is the same one a queued delivery performs — just
        * without the queue between the question and the answer. */
       if (
-        nativeCallbackIsOwnerScoped(adapter.contract) &&
+        adapter.contract.owner.kind !== "call" &&
         adapter.contract.synchronousReturn
       ) {
         const signatureId = `${adapter.symbol}_signature`;
@@ -2111,37 +2046,52 @@ export class CEmitter {
          * representation: the handler says yes or no, and the contract says
          * which value each one is. */
         const answer = sourceType.ret;
+        /* A registration nothing owns is told rather than asked, so it may
+         * answer nothing at all. The rest of this trampoline is the same
+         * either way: the closure is read through the token and released. */
+        const voids = signature.result.kind === "void";
         const answerType = answer.kind === "bool" ? "bool" : ret;
         const answered = answer.kind === "bool"
           ? `sc_answer ? ${cNativeScalarLiteral(signature.result as IrNativeScalarType, answer.trueValue, this.mod.nativeTarget?.pointerBits)} : ${cNativeScalarLiteral(signature.result as IrNativeScalarType, answer.falseValue, this.mod.nativeTarget?.pointerBits)}`
           : "sc_answer";
+        /* A signature with no userdata slot carries its token in a
+         * replaceable global instead, because there is nothing to hand it. */
+        const bail = voids ? "return;" : "return 0;";
         out.push(
           `static const unsigned char ${signatureId};`,
+          ...(adapter.global === null
+            ? []
+            : [`static ScrCallbackToken *${adapter.global};`]),
           `static ${ret} ${adapter.symbol}(${nativeParams.join(", ")}) {`,
-          `  ScrCallbackToken *sc_token = (ScrCallbackToken *)sc_ctx;`,
+          `  ScrCallbackToken *sc_token = ${adapter.global ?? "(ScrCallbackToken *)sc_ctx"};`,
           /* A disposed registration answers with the ABI zero rather than
            * reading a closure that is gone; so does an already-unwinding
            * turn, which must not start another handler. */
-          `  if (scr_callback_token_state(sc_token) != SCR_CALLBACK_TOKEN_ACTIVE) return 0;`,
-          `  if (scr_exc_pending()) return 0;`,
+          `  if (sc_token == NULL) ${bail}`,
+          `  if (scr_callback_token_state(sc_token) != SCR_CALLBACK_TOKEN_ACTIVE) ${bail}`,
+          `  if (scr_exc_pending()) ${bail}`,
           `  ScrClosure *sc_cb = (ScrClosure *)scr_callback_table_acquire(`,
           `      (ScrCallbackTable *)scr_callback_token_owner_context(sc_token),`,
           `      scr_callback_token_slot(sc_token),`,
           `      scr_callback_token_generation(sc_token), &${signatureId});`,
-          `  if (sc_cb == NULL) return 0;`,
-          `  ${answerType} sc_answer = ${call};`,
-          `  scr_closure_release(sc_cb);`,
-          /* An exception stays pending and the toolkit gets the ABI zero: it
-           * has no frame to unwind through, and the next runtime turn is
-           * what reports an uncaught error either way. */
-          `  if (scr_exc_pending()) return 0;`,
-          `  return ${answered};`,
+          `  if (sc_cb == NULL) ${bail}`,
+          ...(voids
+            ? [`  ${call};`, `  scr_closure_release(sc_cb);`, `  return;`]
+            : [
+                `  ${answerType} sc_answer = ${call};`,
+                `  scr_closure_release(sc_cb);`,
+                /* An exception stays pending and the toolkit gets the ABI
+                 * zero: it has no frame to unwind through, and the next
+                 * runtime turn reports an uncaught error either way. */
+                `  if (scr_exc_pending()) return 0;`,
+                `  return ${answered};`,
+              ]),
           `}`,
           ``,
         );
         continue;
       }
-      if (nativeCallbackIsOwnerScoped(adapter.contract)) {
+      if (adapter.contract.owner.kind !== "call") {
         const invocation = `${adapter.symbol}_invocation`;
         const signatureId = `${adapter.symbol}_signature`;
         const invoke = `${adapter.symbol}_invoke`;
@@ -2269,31 +2219,21 @@ export class CEmitter {
         );
         continue;
       }
-      /* A process-scoped registration and a call-scoped callback reach their
-       * closure the same way — through the context slot the library hands
-       * back — and differ only in how long that is true. The ledger is what
-       * keeps a process-scoped one alive between calls; the trampoline
-       * itself has nothing to do differently. */
-      const expired = adapter.contract.owner.kind === "process"
-        ? "scriptc: native callback invoked after its registration was released"
-        : "scriptc: native callback invoked outside its call-scoped lifetime";
+      /* Everything that outlives its call is handled above, through a token.
+       * What is left is the call-scoped callback, which reaches its closure
+       * directly: the context slot IS the closure pointer. */
       out.push(
-        ...(adapter.table === null ? [] : [`static ScrFfiTable ${adapter.table};`]),
-        /* A signature with no userdata slot cannot be handed its closure. A
-         * call-scoped one borrows a thread-local for its own dynamic extent;
-         * a process-scoped one has no call to borrow and dispatches through
-         * a replaceable global. Either way the NULL check below is what makes
-         * an invocation outside the registration's life a precise trap rather
-         * than a jump through a stale pointer. */
+        /* A signature with no userdata slot cannot be handed its closure, so
+         * the call lends one through a thread-local for its own dynamic
+         * extent. The NULL check below is what makes an invocation outside
+         * that extent a precise trap rather than a jump through a stale
+         * pointer. */
         ...(adapter.tls === null
           ? []
           : [`static _Thread_local ScrClosure *${adapter.tls};`]),
-        ...(adapter.global === null
-          ? []
-          : [`static ScrClosure *${adapter.global};`]),
         `static ${ret} ${adapter.symbol}(${nativeParams.join(", ")}) {`,
-        `  ScrClosure *sc_cb = ${adapter.tls ?? adapter.global ?? "(ScrClosure *)sc_ctx"};`,
-        `  if (sc_cb == NULL) scr_trap("${expired}\\n");`,
+        `  ScrClosure *sc_cb = ${adapter.tls ?? "(ScrClosure *)sc_ctx"};`,
+        `  if (sc_cb == NULL) scr_trap("scriptc: native callback invoked outside its call-scoped lifetime\\n");`,
         `  if (scr_exc_pending()) ${signature.result.kind === "void" ? "return;" : "return 0;"}`,
       );
       /* A borrowed payload pointer is only valid for the duration of this

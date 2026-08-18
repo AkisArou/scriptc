@@ -2293,49 +2293,60 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
          * before native code acts on the bogus pointer pair, and the
          * registration must stay live for a library that flushes one last
          * time on the way out. */
+        /* A registration nothing owns lives in the same table an owner-scoped
+         * one does, with no owner set — which is what makes it findable by
+         * the value it holds when a release names that value back. The token
+         * it gets is the context the library is handed, so the release passes
+         * back the very pair the registration passed. */
         const processRegistrations = binding.arguments.flatMap((argument, argumentIndex) => {
           if (argument.callback?.owner.kind !== "process") return [];
           const adapter = E.nativeCallbackAdapter(binding.id, argumentIndex);
-          if (adapter.table === null) {
-            throw new Error(`emitter bug: process-scoped registration without a ledger in ${binding.id}`);
-          }
           return [{
-            table: adapter.table,
-            global: adapter.global,
-            foreign: adapter.foreign,
+            adapter,
+            argumentIndex,
             closure: args[argumentIndex]!.name,
           }];
         });
         const processReleases = binding.parameters.flatMap((parameter) => {
           if (parameter.projection.kind !== "callbackRelease") return [];
-          const adapter = E.nativeCallbackAdapter(
-            parameter.projection.registration.binding,
-            parameter.projection.registration.argument,
-          );
-          if (adapter.table === null) {
-            throw new Error(`emitter bug: released registration without a ledger in ${binding.id}`);
-          }
           return [{
-            table: adapter.table,
-            foreign: adapter.foreign,
+            argumentIndex: parameter.projection.argument,
+            adapter: E.nativeCallbackAdapter(
+              parameter.projection.registration.binding,
+              parameter.projection.registration.argument,
+            ),
             closure: args[parameter.projection.argument]!.name,
           }];
         });
         for (const registration of processRegistrations) {
-          /* A replaceable slot registers in two halves. The first pins the
-           * incoming closure and arms an EMPTY slot — so a library that fires
-           * on subscribe reaches the new closure — but leaves a live
-           * registration dispatching, because a setter may flush the outgoing
-           * one last time mid-replace. The second half, after the call,
-           * repoints the slot and retires what it superseded. */
+          /* A program with no embedder has nobody to configure the delivery
+           * service, so it configures itself here — immediately before the
+           * first registration, never at startup, because a host that owns
+           * its loop configures during its own startup and must win. */
+          E.line(`scr_owner_loop_install();`);
+          const token = `sc_t${E.tempCounter++}`;
           E.line(
-            registration.global !== null
-              ? `scr_ffi_retain_slot(&${registration.table}, &${registration.global}, ${registration.closure});`
-              : `scr_ffi_retain${registration.foreign ? "_foreign" : ""}(&${registration.table}, ${registration.closure});`,
+            `ScrCallbackToken *${token} = scr_retained_callbacks_register_process(` +
+              `${registration.closure}, &${registration.adapter.symbol}_signature, ` +
+              `${registration.adapter.foreign});`,
           );
+          retainedTokens.set(registration.argumentIndex, token);
+          /* A replaceable slot arms only while empty. A setter may flush the
+           * outgoing handler one last time mid-replace, and it must reach a
+           * live registration when it does; the slot is repointed after the
+           * call returns. */
+          if (registration.adapter.global !== null) {
+            E.line(
+              `if (${registration.adapter.global} == NULL) ${registration.adapter.global} = ${token};`,
+            );
+          }
         }
         for (const release of processReleases) {
-          E.line(`scr_ffi_require${release.foreign ? "_foreign" : ""}(&${release.table}, ${release.closure});`);
+          const token = `sc_t${E.tempCounter++}`;
+          E.line(
+            `ScrCallbackToken *${token} = scr_retained_callbacks_require_process(${release.closure});`,
+          );
+          retainedTokens.set(release.argumentIndex, token);
         }
         const operation = cStringLiteral(
           Buffer.from(`${binding.declaration.module}.${binding.declaration.name}`, "utf8"),
@@ -2604,14 +2615,19 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         const afterCall = [
           ...rawContexts.map((saved) => `${saved.tls} = ${saved.previous};`).reverse(),
           ...processRegistrations.flatMap((registration) =>
-            registration.global === null
+            registration.adapter.global === null
               ? []
-              : [`scr_ffi_commit_slot(&${registration.table}, ${registration.closure});`]
+              : [`${registration.adapter.global} = ${retainedTokens.get(registration.argumentIndex)};`]
           ),
-          ...processReleases.map(
-            (release) =>
-              `scr_ffi_release${release.foreign ? "_foreign" : ""}(&${release.table}, ${release.closure});`,
-          ),
+          ...processReleases.flatMap((release) => [
+            ...(release.adapter.global === null
+              ? []
+              /* The slot must not outlive the registration it names. */
+              : [`if (${release.adapter.global} == ${retainedTokens.get(release.argumentIndex)}) ` +
+                 `${release.adapter.global} = NULL;`]),
+            `scr_retained_callbacks_release_process(` +
+              `${retainedTokens.get(release.argumentIndex)}, ${release.adapter.foreign});`,
+          ]),
         ];
         if (afterCall.length > 0) {
           if (binding.result.type.kind === "void") {

@@ -301,7 +301,14 @@ static unsigned __stdcall sf_foreign_burst_worker(void *opaque) {
 static void *sf_foreign_burst_worker(void *opaque) {
 #endif
   sf_foreign_burst_state *state = opaque;
-  for (int i = 0; i < 500; i++) {
+  /* Long enough that the burst cannot fit inside one timer clamp. The script
+   * side asserts a 0 ms interval still ticks while these drain, which is a
+   * claim about FAIRNESS — one delivery per loop turn, other stations reached
+   * in between — and at 500 per thread it stopped being one: the whole burst
+   * finished in about a millisecond, so whether the timer had come due was a
+   * coin flip decided by how fast the transport happened to be rather than by
+   * whether it yielded. */
+  for (int i = 0; i < 5000; i++) {
     state->callback((double)state->id, (double)i, state->context);
   }
 #ifdef _WIN32

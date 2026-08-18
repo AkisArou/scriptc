@@ -247,7 +247,7 @@ const foreignBurstTick = (threadId: number, sequence: number) => {
   foreignBurstNext[threadId] = foreignBurstNext[threadId] + 1;
   foreignBurstCount++;
   foreignBurstSum += threadId * 500 + sequence;
-  if (foreignBurstCount === 1000) {
+  if (foreignBurstCount === 10000) {
     nativeForeignBurstStop(foreignBurstTick);
     clearInterval(foreignTimer);
     console.log(

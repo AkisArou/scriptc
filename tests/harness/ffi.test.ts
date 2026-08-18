@@ -79,7 +79,7 @@ const expected = [
   "lead:6|lead:7",
   "first:11|first:-1|second:12",
   "caught string callback boom: materialized",
-  "1000 499500 true 0",
+  "10000 27495000 true 0",
   "1:foreign-copy|2:foreign-copy|3:foreign-copy",
   "",
 ].join("\n");

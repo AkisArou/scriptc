@@ -1219,9 +1219,6 @@ function executableNativeBuildPlan(
     dgram: moduleUsesDgram(module),
     watch: moduleUsesFsWatch(module),
     nodeTest: moduleUsesNodeTest(module),
-    // The link switch for scr_ffi_queue.c: a foreign-thread FFI callback
-    // descriptor anywhere in the profile.
-    foreignFfi: moduleHasForeignRegistration(module),
     tls: moduleUsesTls(module),
     tlsCa: moduleUsesTlsCa(module),
     ...((ffi?.libraries.length ?? 0) + (opts.nativeLinkInputs?.length ?? 0) > 0

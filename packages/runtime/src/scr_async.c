@@ -2735,16 +2735,11 @@ bool scr_loop_run(ScrPromise *top_level) {
    * exhaustion. Disarm posting before exit listeners/global teardown so a
    * straggling native thread becomes a safe silent drop. */
   if (scr_ffi_stop_fn != NULL) scr_ffi_stop_fn();
-  /* Retained native FFI registrations are deliberately NOT torn down
-   * here: process 'exit' listeners run after the loop returns (inline in
-   * main, before any atexit handler) and may legitimately release a
-   * registration or pump a native library one last time — exactly like
-   * the process.exit() path, where the ledger is also still intact. On
-   * returns that reach atexit, the sweep scr_ffi_retain registered (LIFO
-   * before the RC audit) then drops the ledger's references. It does NOT
-   * run on process.exit(): scr_process_exit ends in _Exit, skipping every
-   * atexit handler — the sweep and the RC audit alike — and leaves the
-   * ledger to the OS. */
+  /* Retained native registrations are deliberately NOT torn down here:
+   * process 'exit' listeners run after the loop returns (inline in main,
+   * before any atexit handler) and may legitimately release a registration
+   * or pump a native library one last time — exactly like the
+   * process.exit() path, where the table is also still intact. */
   /* Unref'd children the loop never reaped: release the
    * registry's references (their listeners never fire — the process is
    * exiting, Node's behavior; the OS reparents the children). */
