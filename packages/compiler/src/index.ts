@@ -32,7 +32,6 @@ import { isJsSourceFileName, isRelativeSpecifier } from "./frontend/shared.js";
 import { lowerToIr, type LowerOptions, type LowerResult } from "./frontend/lowering/lowerer.js";
 import type { CoverageInput, NpmStaticStatus } from "./coverage/report.js";
 import { loadFfiProfile, type FfiProfile } from "./ffi/profile.js";
-import { moduleHasForeignRegistration } from "./ir/nodes.js";
 import type { NativeFrontendExport, NativeFrontendInput } from "./frontend/native.js";
 import {
   defineExecutableCompilationPlan,

@@ -19,11 +19,6 @@ export interface NativeCallbackAdapter {
    * one, which is the ordinary case and needs no storage at all: the context
    * slot IS the closure pointer, so nesting and reentrancy cost nothing. */
   readonly tls: string | null;
-  /** The counted registration ledger a process-scoped registration lives in,
-   * and which a release names back. Null for every other owner: a call-scoped
-   * callback has nothing to outlive the call, and an owner-scoped one is
-   * pinned by the object that owns it. */
-  readonly table: string | null;
   /** The process-global slot a contextless process-scoped registration is
    * dispatched through, since there is no userdata to carry the closure and
    * no call whose extent a thread-local could borrow. Replaceable: setting a
@@ -92,20 +87,15 @@ export function allocateNativeCallbackAdapters(
         (slot) => slot.kind === "nativeContext",
       );
       let symbol: string;
-      let table: string | null;
       let global: string | null;
       do {
         const index = suffix++;
         symbol = `sc_native_cb_${index}`;
-        table = processScoped ? `sc_native_cb_table_${index}` : null;
         global = processScoped && !takesContext ? `sc_native_cb_slot_${index}` : null;
       } while (
-        reserved.has(symbol) ||
-        (table !== null && reserved.has(table)) ||
-        (global !== null && reserved.has(global))
+        reserved.has(symbol) || (global !== null && reserved.has(global))
       );
       reserved.add(symbol);
-      if (table !== null) reserved.add(table);
       if (global !== null) reserved.add(global);
       const contract =
         binding.arguments[parameter.projection.argument]?.callback;
@@ -135,7 +125,6 @@ export function allocateNativeCallbackAdapters(
           source,
           contract,
           tls: takesContext || processScoped ? null : `${symbol}_closure`,
-          table,
           global,
           foreign: processScoped &&
             (contract.allowedInvocationExecutors as readonly string[])

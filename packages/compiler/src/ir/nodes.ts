@@ -464,20 +464,6 @@ export function moduleHasProcessScopedRegistration(mod: IrModule): boolean {
   );
 }
 
-/** Whether a thread the script does not own may raise a registration in this
- * module. Such a delivery needs the transport installed and the process loop
- * held open, even when the program has no timer or async surface of its own —
- * the wake can arrive at any time. The profile's own predicate answers the
- * same question about the descriptors it still serves. */
-export function moduleHasForeignRegistration(mod: IrModule): boolean {
-  return (mod.nativeBindings ?? []).some((binding) =>
-    binding.arguments.some((argument) =>
-      argument.callback?.owner.kind === "process" &&
-      (argument.callback.allowedInvocationExecutors as readonly string[])
-        .includes("any-attached-thread")
-    )
-  );
-}
 
 /**
  * The script-facing signature a source projection describes: the prototype
