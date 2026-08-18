@@ -2024,7 +2024,25 @@ function mergeSidecarIntSlots(
 }
 
 export async function compileLibrary(opts: CompileLibraryOptions): Promise<CompileLibraryResult> {
+  const timingOn = process.env["SCRIPTC_TIMING"] === "1";
+  const timingStart = performance.now();
+  let timingLast = timingStart;
+  const timing = (phase: string, detail: Record<string, unknown> = {}): void => {
+    if (!timingOn) return;
+    const now = performance.now();
+    process.stderr.write(
+      `scriptc timing ${JSON.stringify({
+        phase,
+        phase_ms: Math.round((now - timingLast) * 10) / 10,
+        total_ms: Math.round((now - timingStart) * 10) / 10,
+        rss_mb: Math.round(process.memoryUsage().rss / 1024 / 1024),
+        ...detail,
+      })}\n`,
+    );
+    timingLast = now;
+  };
   const loadedProfile = loadLibraryProfile(resolve(opts.profilePath));
+  timing("profile-load");
   if (!loadedProfile.ok) {
     return { ok: false, diagnostics: loadedProfile.diagnostics, sourceTexts: new Map() };
   }
@@ -2114,6 +2132,10 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
   // island/dynamic tier to offer (SC4006's ground), so eligibility needs
   // no flag and a miss is a refusal, never a fallback.
   const fe = runFrontend(entryPath, "lib", opts.externalTypes, opts.native);
+  timing("frontend-load", {
+    entry_bytes: fe.entryText().length,
+    source_files: fe.sourceTexts().size,
+  });
   let lowered: LowerResult;
   let entryText: string;
   let sourceTexts: Map<string, string>;
@@ -2224,6 +2246,9 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
           ]),
         ],
       });
+      timing("lower", {
+        lib_roots: profile.exports.length + contractSurfaceRoots.length,
+      });
     } catch (e) {
       if (!isCheckerPanic(e)) throw e;
       return fail([checkerPanicDiag(e.message.split("\n", 1)[0]!, { file: entryPath, start: 0, end: 0 })]);
@@ -2236,6 +2261,7 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
     fe.dispose();
   }
   const mod = lowered.module!;
+  timing("frontend-dispose");
 
   const fail = (diagnostics: ScrDiagnostic[]): CompileLibraryResult => ({
     ok: false,
@@ -2315,6 +2341,7 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
     if (!merged.ok) return fail([merged.diagnostic]);
     intCfg = merged.config;
   }
+  timing("contract-sidecar", { source_files: sourceTexts.size });
 
   // Ask 4: the integer-boundary inference — every value that can reach a
   // profile-declared i64/u64 slot must PROVE representability, wholeness,
@@ -2330,9 +2357,11 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
       return fail(refusals.map((v) => libIntBoundaryDiag(v.path, v.cls, v.obligation!, v.detail!, v.fix!, v.loc)));
     }
   }
+  timing("integer-proof");
 
   const validation = validateModule(mod);
   if (validation.length > 0) return fail(validation.map((v) => iceDiag(v.message, v.loc)));
+  timing("ir-validate");
 
   await mkdir(opts.outDir, { recursive: true });
   const stem = basename(entryPath).replace(/\.(ts|js|mjs|cjs)$/, "");
@@ -2340,8 +2369,10 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
   if (profile.emission === "llvm") {
     try {
       const ll = emitLlvmModule(mod);
+      timing("llvm-emit", { output_bytes: Buffer.byteLength(ll) });
       cPath = join(opts.outDir, `${stem}.lib.ll`);
       await writeFile(cPath, ll);
+      timing("llvm-write");
     } catch (err) {
       if (!(err instanceof LlvmUnsupportedError)) throw err;
       // The profile PINS the emission — fail-loudly, never a lane change.
@@ -2382,6 +2413,7 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
     outPath: archivePath,
     cacheIdentity: "scriptc-generated-library-v1",
     sanitize: opts.sanitize ?? false,
+    optimization: profile.optimization,
     ...(localizeSymbols !== undefined ? { localizeSymbols } : {}),
     ...(profile.instancePerThread ? { threadInstances: true } : {}),
     regex: moduleUsesRegex(mod),
@@ -2396,6 +2428,7 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
     nativeHandle: (mod.nativeTypes ?? []).some((definition) => definition.kind === "handle"),
     retainedCallbacks: moduleUsesRetainedCallbacks(mod),
   });
+  timing("native-archive");
 
   // The sidecar lands beside the compiled object, written by the same
   // invocation (profile-declared name; the neutral default when the
@@ -2408,6 +2441,7 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
         : `${archivePath}.contract.json`;
     await writeFile(sidecarPath, sidecarJson);
   }
+  timing("complete");
   return {
     ok: true,
     archivePath,
