@@ -9,7 +9,7 @@ import { OVERFLOW_MEMBER } from "./emit-shapes.js";
 import { dynDestrCheckHelper, dynIterNHelper, dynKeyGetHelper } from "./emit-walkers.js";
 import { genResultThunkFor } from "./emit-async.js";
 import { nativeCallbackCancellationArgument } from "../native-callbacks.js";
-import { nativeCallbackIsOwnerScoped } from "../../ir/nodes.js";
+import { nativeCallLifecycle } from "../native-callbacks.js";
 
 function streamTypedRefCommitAdapter(
   E: CEmitter,
@@ -2259,94 +2259,44 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
            * serves it. */
           E.ffiHasRetainedCallback;
         const retainedTokens = new Map<number, string>();
-        const retainedOwnerArguments = new Set<number>();
-        binding.arguments.forEach((argument, argumentIndex) => {
-          if (
-            argument.type.kind !== "func" ||
-            argument.callback === undefined ||
-            !nativeCallbackIsOwnerScoped(argument.callback)
-          ) {
-            return;
-          }
-          const adapter = E.nativeCallbackAdapter(binding.id, argumentIndex);
+        /* What this call must do around itself, decided once for both
+         * backends. Each step names an argument; the value it produces gets a
+         * temporary here. */
+        const lifecycle = nativeCallLifecycle(
+          binding,
+          (bindingId, argument) => E.nativeCallbackAdapter(bindingId, argument),
+        );
+        const retainedOwnerArguments = lifecycle.registrationOwnerArguments;
+        for (const step of lifecycle.setup) {
+          const closure = args[step.argument]!.name;
           const token = `sc_t${E.tempCounter++}`;
-          const sourceOwner = argument.callback.sourceArguments.some(
-              (source) => source.kind === "registration-owner") &&
-              argument.callback.owner.kind === "argument"
-            ? args[argument.callback.owner.argument]!.name
-            : "NULL";
-          E.line(
-            `ScrCallbackToken *${token} = scr_retained_callbacks_register(` +
-              `${args[argumentIndex]!.name}, &${adapter.symbol}_signature, ${sourceOwner});`,
-          );
-          retainedTokens.set(argumentIndex, token);
-          if (argument.callback.owner.kind === "argument") {
-            retainedOwnerArguments.add(
-              argument.callback.owner.argument,
-            );
-          }
-        });
-        /* A registration nothing owns is pinned in its ledger before the
-         * native call, so a library that fires on subscribe already reaches a
-         * rooted closure. A release is VALIDATED before the call and unpinned
-         * after it: releasing a value that was never registered must trap
-         * before native code acts on the bogus pointer pair, and the
-         * registration must stay live for a library that flushes one last
-         * time on the way out. */
-        /* A registration nothing owns lives in the same table an owner-scoped
-         * one does, with no owner set — which is what makes it findable by
-         * the value it holds when a release names that value back. The token
-         * it gets is the context the library is handed, so the release passes
-         * back the very pair the registration passed. */
-        const processRegistrations = binding.arguments.flatMap((argument, argumentIndex) => {
-          if (argument.callback?.owner.kind !== "process") return [];
-          const adapter = E.nativeCallbackAdapter(binding.id, argumentIndex);
-          return [{
-            adapter,
-            argumentIndex,
-            closure: args[argumentIndex]!.name,
-          }];
-        });
-        const processReleases = binding.parameters.flatMap((parameter) => {
-          if (parameter.projection.kind !== "callbackRelease") return [];
-          return [{
-            argumentIndex: parameter.projection.argument,
-            adapter: E.nativeCallbackAdapter(
-              parameter.projection.registration.binding,
-              parameter.projection.registration.argument,
-            ),
-            closure: args[parameter.projection.argument]!.name,
-          }];
-        });
-        for (const registration of processRegistrations) {
-          /* A program with no embedder has nobody to configure the delivery
-           * service, so it configures itself here — immediately before the
-           * first registration, never at startup, because a host that owns
-           * its loop configures during its own startup and must win. */
-          E.line(`scr_owner_loop_install();`);
-          const token = `sc_t${E.tempCounter++}`;
-          E.line(
-            `ScrCallbackToken *${token} = scr_retained_callbacks_register_process(` +
-              `${registration.closure}, &${registration.adapter.symbol}_signature, ` +
-              `${registration.adapter.foreign});`,
-          );
-          retainedTokens.set(registration.argumentIndex, token);
-          /* A replaceable slot arms only while empty. A setter may flush the
-           * outgoing handler one last time mid-replace, and it must reach a
-           * live registration when it does; the slot is repointed after the
-           * call returns. */
-          if (registration.adapter.global !== null) {
+          if (step.kind === "registerOwned") {
+            const adapter = E.nativeCallbackAdapter(binding.id, step.argument);
             E.line(
-              `if (${registration.adapter.global} == NULL) ${registration.adapter.global} = ${token};`,
+              `ScrCallbackToken *${token} = scr_retained_callbacks_register(` +
+                `${closure}, &${adapter.symbol}_signature, ` +
+                `${step.ownerArgument === null ? "NULL" : args[step.ownerArgument]!.name});`,
+            );
+          } else if (step.kind === "registerProcess") {
+            const adapter = E.nativeCallbackAdapter(binding.id, step.argument);
+            /* A program with no embedder has nobody to configure the delivery
+             * service, so it configures itself here — immediately before the
+             * first registration, never at startup, because a host that owns
+             * its loop configures during its own startup and must win. */
+            E.line(`scr_owner_loop_install();`);
+            E.line(
+              `ScrCallbackToken *${token} = scr_retained_callbacks_register_process(` +
+                `${closure}, &${adapter.symbol}_signature, ${step.foreign});`,
+            );
+            if (step.armSlot !== null) {
+              E.line(`if (${step.armSlot} == NULL) ${step.armSlot} = ${token};`);
+            }
+          } else {
+            E.line(
+              `ScrCallbackToken *${token} = scr_retained_callbacks_require_process(${closure});`,
             );
           }
-        }
-        for (const release of processReleases) {
-          const token = `sc_t${E.tempCounter++}`;
-          E.line(
-            `ScrCallbackToken *${token} = scr_retained_callbacks_require_process(${release.closure});`,
-          );
-          retainedTokens.set(release.argumentIndex, token);
+          retainedTokens.set(step.argument, token);
         }
         const operation = cStringLiteral(
           Buffer.from(`${binding.declaration.module}.${binding.declaration.name}`, "utf8"),
@@ -2596,39 +2546,37 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
          * result is bound here rather than left as an expression for the
          * branches below to place. Saving the previous value is what makes a
          * nested or reentrant call through the same binding stack correctly. */
-        const rawContexts = binding.arguments.flatMap((argument, argumentIndex) => {
-          /* A value that UNMAKES a registration has no adapter of its own —
-           * the trampoline it passes back belongs to the binding that made
-           * the registration, and that binding lent whatever it had to. */
-          if (argument.type.kind !== "func" || argument.callback === undefined) return [];
-          const adapter = E.nativeCallbackAdapter(binding.id, argumentIndex);
-          if (adapter.tls === null) return [];
+        /* Armed after every conversion, so a conversion that throws cannot
+         * leave a slot pointing at a closure nothing will clear. */
+        const saved = new Map<number, string>();
+        for (const lend of lifecycle.lends) {
           const previous = `sc_t${E.tempCounter++}`;
-          E.line(`ScrClosure *${previous} = ${adapter.tls};`);
-          E.line(`${adapter.tls} = ${args[argumentIndex]!.name};`);
-          return [{ tls: adapter.tls, previous }];
-        });
+          E.line(`ScrClosure *${previous} = ${lend.slot};`);
+          E.line(`${lend.slot} = ${args[lend.argument]!.name};`);
+          saved.set(lend.argument, previous);
+        }
         /* Everything that has to happen the moment the native call returns,
-         * innermost first: the lent closure slots go back, and only then is a
-         * released registration unpinned — the library may flush it one last
-         * time on the way out, and the pin is what keeps that legal. */
-        const afterCall = [
-          ...rawContexts.map((saved) => `${saved.tls} = ${saved.previous};`).reverse(),
-          ...processRegistrations.flatMap((registration) =>
-            registration.adapter.global === null
-              ? []
-              : [`${registration.adapter.global} = ${retainedTokens.get(registration.argumentIndex)};`]
-          ),
-          ...processReleases.flatMap((release) => [
-            ...(release.adapter.global === null
-              ? []
-              /* The slot must not outlive the registration it names. */
-              : [`if (${release.adapter.global} == ${retainedTokens.get(release.argumentIndex)}) ` +
-                 `${release.adapter.global} = NULL;`]),
-            `scr_retained_callbacks_release_process(` +
-              `${retainedTokens.get(release.argumentIndex)}, ${release.adapter.foreign});`,
-          ]),
-        ];
+         * in the order the lifecycle gives: the lent slots go back innermost
+         * first, and only then is a released registration unpinned — the
+         * library may flush it one last time on the way out, and the pin is
+         * what keeps that legal. */
+        const afterCall = lifecycle.teardown.flatMap((step) => {
+          const token = retainedTokens.get(step.argument);
+          switch (step.kind) {
+            case "restoreClosure":
+              return [`${step.slot} = ${saved.get(step.argument)};`];
+            case "commitSlot":
+              return [`${step.slot} = ${token};`];
+            case "releaseProcess":
+              return [
+                /* The slot must not outlive the registration it names. */
+                ...(step.clearSlot === null
+                  ? []
+                  : [`if (${step.clearSlot} == ${token}) ${step.clearSlot} = NULL;`]),
+                `scr_retained_callbacks_release_process(${token}, ${step.foreign});`,
+              ];
+          }
+        });
         if (afterCall.length > 0) {
           if (binding.result.type.kind === "void") {
             E.line(`${call};${E.srcComment(e.loc)}`);

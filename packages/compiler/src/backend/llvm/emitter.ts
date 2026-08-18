@@ -86,10 +86,10 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, islandPromisePayloadTag, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, moduleHasProcessScopedRegistration, nativeCallbackIsOwnerScoped, nativeCallbackSourceScriptType, nativeDestructorBindingIds, nativeIntegerInfo, nativeIntegerOpTraps, nativeScalarWidensToNumber, NPM_COMPRESS_MIN, provenNumberLiteral, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID, isFfiReleaseParam } from "../../ir/nodes.js";
+import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, islandPromisePayloadTag, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, moduleHasProcessScopedRegistration, nativeCallbackSourceScriptType, nativeDestructorBindingIds, nativeIntegerInfo, nativeIntegerOpTraps, nativeScalarWidensToNumber, NPM_COMPRESS_MIN, provenNumberLiteral, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID, isFfiReleaseParam } from "../../ir/nodes.js";
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
-import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, nativeCallbackPayloads, nativeTrampolineForm, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
+import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, nativeCallLifecycle, nativeCallbackPayloads, nativeTrampolineForm, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
 import { computeMayThrow } from "../emission/may-throw.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleNativeHandleTag, mangleNativeStruct, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
@@ -7165,104 +7165,59 @@ class LlEmitter {
            * serves it. */
           this.ffiHasRetainedCallback;
         const retainedTokens = new Map<number, string>();
-        const retainedOwnerArguments = new Set<number>();
-        binding.arguments.forEach((argument, argumentIndex) => {
-          if (
-            argument.type.kind !== "func" ||
-            argument.callback === undefined ||
-            !nativeCallbackIsOwnerScoped(argument.callback)
-          ) {
-            return;
-          }
-          const adapter = this.nativeCallbackAdapter(binding.id, argumentIndex);
-          this.declare(
-            `declare ptr @scr_retained_callbacks_register(ptr, ptr, ptr)`,
-          );
-          const sourceOwner = argument.callback.sourceArguments.some(
-              (source) => source.kind === "registration-owner") &&
-              argument.callback.owner.kind === "argument"
-            ? args[argument.callback.owner.argument]!.name
-            : "null";
+        /* What this call must do around itself, decided once for both
+         * backends. Each step names an argument; the value it produces gets a
+         * temporary here. Kept in lockstep with the C backend by sharing the
+         * decision rather than by agreeing to. */
+        const lifecycle = nativeCallLifecycle(
+          binding,
+          (bindingId, argument) => this.nativeCallbackAdapter(bindingId, argument),
+        );
+        const retainedOwnerArguments = lifecycle.registrationOwnerArguments;
+        for (const step of lifecycle.setup) {
+          const closure = args[step.argument]!.name;
           const token = B.tmp();
-          B.line(
-            `${token} = call ptr @scr_retained_callbacks_register(` +
-              `ptr ${args[argumentIndex]!.name}, ptr @${adapter.symbol}_signature, ` +
-              `ptr ${sourceOwner})`,
-          );
-          retainedTokens.set(argumentIndex, token);
-          if (argument.callback.owner.kind === "argument") {
-            retainedOwnerArguments.add(
-              argument.callback.owner.argument,
+          if (step.kind === "registerOwned") {
+            const adapter = this.nativeCallbackAdapter(binding.id, step.argument);
+            this.declare(`declare ptr @scr_retained_callbacks_register(ptr, ptr, ptr)`);
+            B.line(
+              `${token} = call ptr @scr_retained_callbacks_register(` +
+                `ptr ${closure}, ptr @${adapter.symbol}_signature, ` +
+                `ptr ${step.ownerArgument === null ? "null" : args[step.ownerArgument]!.name})`,
+            );
+          } else if (step.kind === "registerProcess") {
+            const adapter = this.nativeCallbackAdapter(binding.id, step.argument);
+            /* A program with no embedder configures the delivery service
+             * here, immediately before the first registration — never at
+             * startup, because a host that owns its loop configures during
+             * its own startup and must win. */
+            this.declare(`declare zeroext i1 @scr_owner_loop_install()`);
+            B.line(`call zeroext i1 @scr_owner_loop_install()`);
+            this.declare(`declare ptr @scr_retained_callbacks_register_process(ptr, ptr, i1)`);
+            B.line(
+              `${token} = call ptr @scr_retained_callbacks_register_process(` +
+                `ptr ${closure}, ptr @${adapter.symbol}_signature, i1 ${step.foreign})`,
+            );
+            if (step.armSlot !== null) {
+              const held = B.tmp();
+              const empty = B.tmp();
+              const armed = B.newLabel("slot.arm");
+              const done = B.newLabel("slot.done");
+              B.line(`${held} = load ptr, ptr @${step.armSlot}`);
+              B.line(`${empty} = icmp eq ptr ${held}, null`);
+              B.condBr(empty, armed, done);
+              B.startBlock(armed);
+              B.line(`store ptr ${token}, ptr @${step.armSlot}`);
+              B.br(done);
+              B.startBlock(done);
+            }
+          } else {
+            this.declare(`declare ptr @scr_retained_callbacks_require_process(ptr)`);
+            B.line(
+              `${token} = call ptr @scr_retained_callbacks_require_process(ptr ${closure})`,
             );
           }
-        });
-        /* A registration nothing owns is pinned in its ledger before the
-         * native call, so a library that fires on subscribe already reaches a
-         * rooted closure. A release is VALIDATED before the call and unpinned
-         * after it: releasing a value that was never registered must trap
-         * before native code acts on the bogus pointer pair, and the
-         * registration must stay live for a library that flushes one last
-         * time on the way out. Kept in lockstep with the C backend. */
-        const processRegistrations = binding.arguments.flatMap((argument, argumentIndex) => {
-          if (argument.callback?.owner.kind !== "process") return [];
-          return [{
-            adapter: this.nativeCallbackAdapter(binding.id, argumentIndex),
-            argumentIndex,
-            closure: args[argumentIndex]!.name,
-          }];
-        });
-        const processReleases = binding.parameters.flatMap((parameter) => {
-          if (parameter.projection.kind !== "callbackRelease") return [];
-          return [{
-            argumentIndex: parameter.projection.argument,
-            adapter: this.nativeCallbackAdapter(
-              parameter.projection.registration.binding,
-              parameter.projection.registration.argument,
-            ),
-            closure: args[parameter.projection.argument]!.name,
-          }];
-        });
-        for (const registration of processRegistrations) {
-          /* A program with no embedder configures the delivery service here,
-           * immediately before the first registration — never at startup,
-           * because a host that owns its loop configures during its own
-           * startup and must win. Kept in lockstep with the C backend. */
-          this.declare(`declare zeroext i1 @scr_owner_loop_install()`);
-          B.line(`call zeroext i1 @scr_owner_loop_install()`);
-          this.declare(`declare ptr @scr_retained_callbacks_register_process(ptr, ptr, i1)`);
-          const token = B.tmp();
-          B.line(
-            `${token} = call ptr @scr_retained_callbacks_register_process(` +
-              `ptr ${registration.closure}, ptr @${registration.adapter.symbol}_signature, ` +
-              `i1 ${registration.adapter.foreign})`,
-          );
-          retainedTokens.set(registration.argumentIndex, token);
-          /* A replaceable slot arms only while empty. A setter may flush the
-           * outgoing handler one last time mid-replace, and it must reach a
-           * live registration when it does; the slot is repointed after the
-           * call returns. */
-          if (registration.adapter.global !== null) {
-            const slot = `@${registration.adapter.global}`;
-            const held = B.tmp();
-            const empty = B.tmp();
-            const armed = B.newLabel("slot.arm");
-            const done = B.newLabel("slot.done");
-            B.line(`${held} = load ptr, ptr ${slot}`);
-            B.line(`${empty} = icmp eq ptr ${held}, null`);
-            B.condBr(empty, armed, done);
-            B.startBlock(armed);
-            B.line(`store ptr ${token}, ptr ${slot}`);
-            B.br(done);
-            B.startBlock(done);
-          }
-        }
-        for (const release of processReleases) {
-          this.declare(`declare ptr @scr_retained_callbacks_require_process(ptr)`);
-          const token = B.tmp();
-          B.line(
-            `${token} = call ptr @scr_retained_callbacks_require_process(ptr ${release.closure})`,
-          );
-          retainedTokens.set(release.argumentIndex, token);
+          retainedTokens.set(step.argument, token);
         }
         const operation = this.cstr(
           `${binding.declaration.module}.${binding.declaration.name}`,
@@ -7704,64 +7659,51 @@ class LlEmitter {
          * is bound here rather than left for the branches below to place.
          * Saving the previous value is what lets a nested or reentrant call
          * through the same binding stack correctly. */
-        const rawContexts = binding.arguments.flatMap((argument, argumentIndex) => {
-          /* A value that UNMAKES a registration has no adapter of its own —
-           * the trampoline it passes back belongs to the binding that made
-           * the registration, and that binding lent whatever it had to. */
-          if (argument.type.kind !== "func" || argument.callback === undefined) return [];
-          const adapter = this.nativeCallbackAdapter(binding.id, argumentIndex);
-          if (adapter.tls === null) return [];
+        /* Armed after every conversion, so a conversion that throws cannot
+         * leave a slot pointing at a closure nothing will clear. */
+        const saved = new Map<number, string>();
+        for (const lend of lifecycle.lends) {
           const previous = B.tmp();
-          B.line(`${previous} = load ptr, ptr @${adapter.tls}`);
-          B.line(`store ptr ${args[argumentIndex]!.name}, ptr @${adapter.tls}`);
-          return [{ tls: adapter.tls, previous }];
-        });
+          B.line(`${previous} = load ptr, ptr @${lend.slot}`);
+          B.line(`store ptr ${args[lend.argument]!.name}, ptr @${lend.slot}`);
+          saved.set(lend.argument, previous);
+        }
         let call =
           `call ${returnType} @${binding.entry.symbol}(` +
           `${callArgs.join(", ")})`;
         /* Everything that has to happen the moment the native call returns,
-         * innermost first: the lent closure slots go back, and only then is a
-         * released registration unpinned — the library may flush it one last
-         * time on the way out, and the pin is what keeps that legal. */
-        const afterCall: (() => void)[] = [
-          ...rawContexts.map((saved) => () => {
-            B.line(`store ptr ${saved.previous}, ptr @${saved.tls}`);
-          }).reverse(),
-          ...processRegistrations.flatMap((registration) =>
-            registration.adapter.global === null
-              ? []
-              : [() => {
-                  B.line(
-                    `store ptr ${retainedTokens.get(registration.argumentIndex)}, ` +
-                      `ptr @${registration.adapter.global}`,
-                  );
-                }]
-          ),
-          ...processReleases.map((release) => () => {
-            const token = retainedTokens.get(release.argumentIndex);
-            /* The slot must not outlive the registration it names, and only
-             * the registration it actually names may clear it. */
-            if (release.adapter.global !== null) {
-              const slot = `@${release.adapter.global}`;
-              const held = B.tmp();
-              const same = B.tmp();
-              const clear = B.newLabel("slot.clear");
-              const done = B.newLabel("slot.kept");
-              B.line(`${held} = load ptr, ptr ${slot}`);
-              B.line(`${same} = icmp eq ptr ${held}, ${token}`);
-              B.condBr(same, clear, done);
-              B.startBlock(clear);
-              B.line(`store ptr null, ptr ${slot}`);
-              B.br(done);
-              B.startBlock(done);
-            }
-            this.declare(`declare void @scr_retained_callbacks_release_process(ptr, i1)`);
-            B.line(
-              `call void @scr_retained_callbacks_release_process(` +
-                `ptr ${token}, i1 ${release.adapter.foreign})`,
-            );
-          }),
-        ];
+         * in the order the lifecycle gives. */
+        const afterCall: (() => void)[] = lifecycle.teardown.map((step) => () => {
+          const token = retainedTokens.get(step.argument);
+          if (step.kind === "restoreClosure") {
+            B.line(`store ptr ${saved.get(step.argument)}, ptr @${step.slot}`);
+            return;
+          }
+          if (step.kind === "commitSlot") {
+            B.line(`store ptr ${token}, ptr @${step.slot}`);
+            return;
+          }
+          /* The slot must not outlive the registration it names, and only the
+           * registration it actually names may clear it. */
+          if (step.clearSlot !== null) {
+            const slot = `@${step.clearSlot}`;
+            const held = B.tmp();
+            const same = B.tmp();
+            const clear = B.newLabel("slot.clear");
+            const done = B.newLabel("slot.kept");
+            B.line(`${held} = load ptr, ptr ${slot}`);
+            B.line(`${same} = icmp eq ptr ${held}, ${token}`);
+            B.condBr(same, clear, done);
+            B.startBlock(clear);
+            B.line(`store ptr null, ptr ${slot}`);
+            B.br(done);
+            B.startBlock(done);
+          }
+          this.declare(`declare void @scr_retained_callbacks_release_process(ptr, i1)`);
+          B.line(
+            `call void @scr_retained_callbacks_release_process(ptr ${token}, i1 ${step.foreign})`,
+          );
+        });
         if (afterCall.length > 0) {
           if (returnType === "void") {
             B.line(call);

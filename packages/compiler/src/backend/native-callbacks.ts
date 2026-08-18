@@ -310,3 +310,154 @@ export function nativeTrampolineForm(
     closure,
   };
 }
+
+/** Work a native call must do before its arguments are converted, because it
+ * must happen whether or not a conversion throws. */
+export type NativeCallSetup =
+  /** Register a callback a VALUE owns. Produces the token the library is
+   * handed as context; `ownerArgument` names the handle that owns it, when
+   * the contract injects one. */
+  | {
+      readonly kind: "registerOwned";
+      readonly argument: number;
+      readonly ownerArgument: number | null;
+    }
+  /** Register a callback nothing owns, pinning it before the call so a
+   * library that fires on subscribe already reaches a rooted closure. */
+  | {
+      readonly kind: "registerProcess";
+      readonly argument: number;
+      readonly foreign: boolean;
+      /** A replaceable slot to arm, and only while it is empty: a setter may
+       * flush the outgoing handler one last time mid-replace. */
+      readonly armSlot: string | null;
+    }
+  /** Validate a release BEFORE the native call, so releasing a value that was
+   * never registered traps before native code acts on the pointer pair. */
+  | { readonly kind: "requireProcess"; readonly argument: number };
+
+/** Work that must happen after every argument is converted but before the
+ * call, so a conversion that throws cannot leave a slot armed. */
+export interface NativeCallLend {
+  readonly argument: number;
+  readonly slot: string;
+}
+
+/** Work that must happen the moment the call returns. Order is the array's. */
+export type NativeCallTeardown =
+  | { readonly kind: "restoreClosure"; readonly argument: number; readonly slot: string }
+  /** Repoint a replaceable slot at the registration that superseded it. */
+  | { readonly kind: "commitSlot"; readonly argument: number; readonly slot: string }
+  /** Unpin a released registration, after the library has had its last
+   * flush. `clearSlot` is the slot that must stop naming it. */
+  | {
+      readonly kind: "releaseProcess";
+      readonly argument: number;
+      readonly foreign: boolean;
+      readonly clearSlot: string | null;
+    };
+
+export interface NativeCallLifecycle {
+  readonly setup: readonly NativeCallSetup[];
+  readonly lends: readonly NativeCallLend[];
+  readonly teardown: readonly NativeCallTeardown[];
+  /** Handle arguments that own a registration made by this call. */
+  readonly registrationOwnerArguments: ReadonlySet<number>;
+}
+
+/**
+ * Everything a native call must do around itself, in order.
+ *
+ * The order is the decision, not a detail. Registration precedes the call
+ * because a library may fire on subscribe. A release is validated before and
+ * unpinned after, because the registration must stay readable for a library
+ * that flushes one last time on the way out. A lent closure slot is armed
+ * after every argument is converted, because a conversion that throws must
+ * not leave one armed, and restored first on the way back because it is the
+ * innermost thing that was changed.
+ *
+ * Both backends built these lists independently from the same fields. They
+ * build them from this instead, and allocate their own temporaries for the
+ * values the steps produce — keyed by argument index, which is how both
+ * already addressed them.
+ */
+export function nativeCallLifecycle(
+  binding: IrNativeBinding,
+  adapterFor: (bindingId: string, argument: number) => NativeCallbackAdapter,
+): NativeCallLifecycle {
+  const setup: NativeCallSetup[] = [];
+  const lends: NativeCallLend[] = [];
+  const teardown: NativeCallTeardown[] = [];
+  const registrationOwnerArguments = new Set<number>();
+
+  binding.arguments.forEach((argument, index) => {
+    const contract = argument.callback;
+    if (argument.type.kind !== "func" || contract === undefined) return;
+    const adapter = adapterFor(binding.id, index);
+    if (nativeCallbackIsOwnerScoped(contract)) {
+      setup.push({
+        kind: "registerOwned",
+        argument: index,
+        ownerArgument:
+          contract.sourceArguments.some((source) => source.kind === "registration-owner") &&
+            contract.owner.kind === "argument"
+            ? contract.owner.argument
+            : null,
+      });
+      if (contract.owner.kind === "argument") {
+        registrationOwnerArguments.add(contract.owner.argument);
+      }
+      return;
+    }
+    if (contract.owner.kind !== "process") return;
+    setup.push({
+      kind: "registerProcess",
+      argument: index,
+      foreign: adapter.foreign,
+      armSlot: adapter.global,
+    });
+    if (adapter.global !== null) {
+      teardown.push({ kind: "commitSlot", argument: index, slot: adapter.global });
+    }
+  });
+
+  for (const parameter of binding.parameters) {
+    if (parameter.projection.kind !== "callbackRelease") continue;
+    const adapter = adapterFor(
+      parameter.projection.registration.binding,
+      parameter.projection.registration.argument,
+    );
+    setup.push({ kind: "requireProcess", argument: parameter.projection.argument });
+    teardown.push({
+      kind: "releaseProcess",
+      argument: parameter.projection.argument,
+      foreign: adapter.foreign,
+      clearSlot: adapter.global,
+    });
+  }
+
+  /* A value that UNMAKES a registration has no adapter of its own, so it
+   * lends nothing; the binding that made the registration lent whatever it
+   * had to. */
+  binding.arguments.forEach((argument, index) => {
+    if (argument.type.kind !== "func" || argument.callback === undefined) return;
+    const slot = adapterFor(binding.id, index).tls;
+    if (slot === null) return;
+    lends.push({ argument: index, slot });
+  });
+
+  return {
+    setup,
+    /* Innermost first on the way back: the lends were the last thing armed. */
+    teardown: [
+      ...[...lends].reverse().map((lend): NativeCallTeardown => ({
+        kind: "restoreClosure",
+        argument: lend.argument,
+        slot: lend.slot,
+      })),
+      ...teardown,
+    ],
+    lends,
+    registrationOwnerArguments,
+  };
+}
