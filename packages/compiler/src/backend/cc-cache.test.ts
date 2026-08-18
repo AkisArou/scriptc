@@ -1,7 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { afterAll, afterEach, expect, test as vitestTest } from "vitest";
@@ -267,6 +267,125 @@ test("the runtime fingerprint includes the textually included Ryū sources", asy
   await utimes(join(ryuDir, "d2s.c"), pinnedTime, pinnedTime);
   expect(await runtimeFingerprint(rtDir)).not.toBe(first);
 });
+
+test("the runtime fingerprint includes newly added nested headers", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scriptc-runtime-fingerprint-nested-"));
+  scratch.push(dir);
+  const rtDir = join(dir, "src");
+  const ryuDir = join(dir, "vendor", "ryu");
+  await Promise.all([
+    mkdir(join(rtDir, "sys"), { recursive: true }),
+    mkdir(ryuDir, { recursive: true }),
+  ]);
+  await writeFile(join(rtDir, "scr_number.c"), "int scriptc_probe;\n");
+  const first = await runtimeFingerprint(rtDir);
+
+  // A new file below an existing include root can win resolution without
+  // changing any path selected by the previous dependency scan.
+  await writeFile(join(rtDir, "sys", "types.h"), "#define SCRIPTC_SHADOW 1\n");
+  expect(await runtimeFingerprint(rtDir)).not.toBe(first);
+});
+
+test.skipIf(process.platform === "win32")(
+  "the runtime fingerprint follows symlinked source files",
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "scriptc-runtime-fingerprint-symlink-"));
+    scratch.push(dir);
+    const rtDir = join(dir, "src");
+    const ryuDir = join(dir, "vendor", "ryu");
+    const target = join(dir, "runtime-target.h");
+    await Promise.all([
+      mkdir(rtDir, { recursive: true }),
+      mkdir(ryuDir, { recursive: true }),
+      writeFile(target, "#define SCRIPTC_SYMLINK 1\n"),
+    ]);
+    await symlink(target, join(rtDir, "linked.h"));
+    const first = await runtimeFingerprint(rtDir);
+
+    await writeFile(target, "#define SCRIPTC_SYMLINK 2\n");
+    expect(await runtimeFingerprint(rtDir)).not.toBe(first);
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "new nested runtime headers invalidate complete and output-local artifacts",
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "scriptc-runtime-shadow-"));
+    scratch.push(dir);
+    const cacheRoot = join(dir, "cache");
+    const fakeRuntime = join(dir, "runtime", "src");
+    const projectDir = join(dir, "project");
+    const originalRuntime = runtimeSrcDir();
+    const cPath = join(projectDir, "program.c");
+    const firstOut = join(projectDir, "first");
+    const crossOutput = join(projectDir, "cross-output");
+    const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
+    const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+    const oldRuntimeDir = process.env["SCRIPTC_TEST_RUNTIME_SRC_DIR"];
+
+    try {
+      await Promise.all([
+        cp(originalRuntime, fakeRuntime, { recursive: true }),
+        mkdir(projectDir),
+        mkdir(join(dir, "runtime", "vendor"), { recursive: true }).then(() =>
+          cp(
+            join(originalRuntime, "..", "vendor", "ryu"),
+            join(dir, "runtime", "vendor", "ryu"),
+            { recursive: true },
+          )
+        ),
+      ]);
+      await mkdir(join(fakeRuntime, "sys"));
+      const numberSource = join(fakeRuntime, "scr_number.c");
+      await writeFile(
+        numberSource,
+        `${await readFile(numberSource, "utf8")}\n` +
+          "#ifndef SCRIPTC_SHADOW_VALUE\n#define SCRIPTC_SHADOW_VALUE 1\n#endif\n" +
+          "int scriptc_shadow_value(void) { return SCRIPTC_SHADOW_VALUE; }\n",
+      );
+      await writeFile(
+        cPath,
+        "#include <stdio.h>\nint scriptc_shadow_value(void);\n" +
+          'int main(void) { printf("%d\\n", scriptc_shadow_value()); return 0; }\n',
+      );
+      process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+      process.env["SCRIPTC_TEST_RUNTIME_SRC_DIR"] = fakeRuntime;
+      delete process.env["SCRIPTC_NO_CACHE"];
+
+      await compileC({ cPath, outPath: firstOut, cacheIdentity: "scriptc-generated-v1" });
+      expect(execFileSync(firstOut, { encoding: "utf8" }).trim()).toBe("1");
+
+      // scr_runtime.h includes <sys/types.h>. This newly created header wins
+      // the existing -I runtime search without changing any dependency path
+      // selected during the first build.
+      await writeFile(
+        join(fakeRuntime, "sys", "types.h"),
+        "#include_next <sys/types.h>\n#define SCRIPTC_SHADOW_VALUE 2\n",
+      );
+
+      // A new output path bypasses the output-local stamp and probes the
+      // cross-output complete-artifact cache directly.
+      await compileC({
+        cPath,
+        outPath: crossOutput,
+        cacheIdentity: "scriptc-generated-v1",
+      });
+      expect(execFileSync(crossOutput, { encoding: "utf8" }).trim()).toBe("2");
+
+      // The original output has an output-local stamp from the first build;
+      // it must invalidate for the same namespace change.
+      await compileC({ cPath, outPath: firstOut, cacheIdentity: "scriptc-generated-v1" });
+      expect(execFileSync(firstOut, { encoding: "utf8" }).trim()).toBe("2");
+    } finally {
+      if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+      else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
+      if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
+      else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
+      if (oldRuntimeDir === undefined) delete process.env["SCRIPTC_TEST_RUNTIME_SRC_DIR"];
+      else process.env["SCRIPTC_TEST_RUNTIME_SRC_DIR"] = oldRuntimeDir;
+    }
+  },
+);
 
 test("implicit dependency seeds include separately compiled vendor system headers", async () => {
   const includes = await implicitDependencyProbeIncludes(runtimeSrcDir());
@@ -2348,6 +2467,249 @@ test("system libraries relink after an in-place rebuild while runtime objects re
     else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
     if (oldLibraryPath === undefined) delete process.env["LIBRARY_PATH"];
     else process.env["LIBRARY_PATH"] = oldLibraryPath;
+  }
+});
+
+test("frontend-generated same-output builds no-op only while output and dependency stamp are valid", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scriptc-local-artifact-"));
+  scratch.push(dir);
+  const cacheRoot = join(dir, "cache");
+  const cPath = join(dir, "program.c");
+  const outPath = join(dir, "program");
+  const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
+  const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+  const oldUmask = process.umask();
+
+  try {
+    process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+    delete process.env["SCRIPTC_NO_CACHE"];
+    await writeFile(cPath, '#include <stdio.h>\nint main(void) { puts("valid"); return 0; }\n');
+
+    await compileC({ cPath, outPath, cacheIdentity: "scriptc-generated-v1" });
+    const stampPath = join(
+      cacheRoot,
+      "local",
+      createHash("sha256").update(outPath).digest("hex"),
+    );
+    const stamp = JSON.parse(await readFile(stampPath, "utf8")) as {
+      dependencies: { path: string; kind: "file" | "directory"; size: number; mtimeMs: number; ctimeMs: number }[];
+      integrity: string;
+    };
+    expect(stamp.dependencies.length).toBeGreaterThan(0);
+
+    const pinnedTime = new Date("2001-01-01T00:00:00.000Z");
+    await utimes(outPath, pinnedTime, pinnedTime);
+    await compileC({ cPath, outPath, cacheIdentity: "scriptc-generated-v1" });
+    expect((await stat(outPath)).mtimeMs).toBe(pinnedTime.getTime());
+
+    process.umask(0o077);
+    await compileC({ cPath, outPath, cacheIdentity: "scriptc-generated-v1" });
+    expect((await stat(outPath)).mode & 0o777).toBe(0o700);
+    process.umask(oldUmask);
+    await compileC({ cPath, outPath, cacheIdentity: "scriptc-generated-v1" });
+    expect((await stat(outPath)).mode & 0o777).toBe(0o777 & ~oldUmask);
+
+    // Generated TU bytes join the key: an actual source edit must replace the
+    // output even though its path, runtime, and toolchain are unchanged.
+    await writeFile(cPath, '#include <stdio.h>\nint main(void) { puts("edited"); return 0; }\n');
+    await compileC({ cPath, outPath, cacheIdentity: "scriptc-generated-v1" });
+    expect(execFileSync(outPath, { encoding: "utf8" }).trim()).toBe("edited");
+    await writeFile(cPath, '#include <stdio.h>\nint main(void) { puts("valid"); return 0; }\n');
+    await compileC({ cPath, outPath, cacheIdentity: "scriptc-generated-v1" });
+
+    // A damaged output cannot no-op even when every build input is unchanged.
+    await writeFile(outPath, "damaged\n");
+    await compileC({ cPath, outPath, cacheIdentity: "scriptc-generated-v1" });
+    expect(execFileSync(outPath, { encoding: "utf8" }).trim()).toBe("valid");
+
+    // The stamp is disposable cache data. A changed SDK/linker dependency
+    // metadata record must take the strict CAS path, which reinstalls output.
+    const damagedStamp = JSON.parse(await readFile(stampPath, "utf8")) as typeof stamp;
+    damagedStamp.dependencies[0]!.size++;
+    await writeFile(stampPath, `${JSON.stringify(damagedStamp)}\n`);
+    await utimes(outPath, pinnedTime, pinnedTime);
+    await compileC({ cPath, outPath, cacheIdentity: "scriptc-generated-v1" });
+    expect((await stat(outPath)).mtimeMs).toBeGreaterThan(pinnedTime.getTime());
+  } finally {
+    if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+    else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
+    if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
+    else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
+    process.umask(oldUmask);
+  }
+});
+
+test.skipIf(process.platform === "win32")(
+  "output-local hits follow symlinked header targets",
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "scriptc-local-artifact-symlink-"));
+    scratch.push(dir);
+    const cacheRoot = join(dir, "cache");
+    const cPath = join(dir, "program.c");
+    const header = join(dir, "value.h");
+    const target = join(dir, "target.h");
+    const outPath = join(dir, "program");
+    const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
+    const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+
+    try {
+      process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+      delete process.env["SCRIPTC_NO_CACHE"];
+      await writeFile(target, '#define VALUE "one"\n');
+      await symlink(target, header);
+      await writeFile(
+        cPath,
+        '#include <stdio.h>\n#include "value.h"\nint main(void) { puts(VALUE); return 0; }\n',
+      );
+      await compileC({ cPath, outPath, cacheIdentity: "scriptc-generated-v1" });
+      expect(execFileSync(outPath, { encoding: "utf8" }).trim()).toBe("one");
+
+      // clang's dependency file names the symlink path. The local stamp must
+      // also follow that path and invalidate when only the target changes.
+      await writeFile(target, '#define VALUE "two"\n');
+      await compileC({ cPath, outPath, cacheIdentity: "scriptc-generated-v1" });
+      expect(execFileSync(outPath, { encoding: "utf8" }).trim()).toBe("two");
+    } finally {
+      if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+      else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
+      if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
+      else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
+    }
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "output-local hits detect newly shadowing nested headers",
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "scriptc-local-artifact-shadow-"));
+    scratch.push(dir);
+    const cacheRoot = join(dir, "cache");
+    const cPath = join(dir, "program.c");
+    const outPath = join(dir, "program");
+    const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
+    const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+
+    try {
+      process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+      delete process.env["SCRIPTC_NO_CACHE"];
+      await mkdir(join(dir, "sys"));
+      await writeFile(
+        cPath,
+        '#include <stdio.h>\n#include "sys/param.h"\nint main(void) { printf("%d\\n", MAXPATHLEN); return 0; }\n',
+      );
+      await compileC({ cPath, outPath, cacheIdentity: "scriptc-generated-v1" });
+      expect(execFileSync(outPath, { encoding: "utf8" }).trim()).not.toBe("7");
+
+      // The source directory itself does not necessarily change metadata when
+      // a child directory gains a file. Its recursive namespace digest must.
+      await writeFile(join(dir, "sys", "param.h"), "#define MAXPATHLEN 7\n");
+      await compileC({ cPath, outPath, cacheIdentity: "scriptc-generated-v1" });
+      expect(execFileSync(outPath, { encoding: "utf8" }).trim()).toBe("7");
+    } finally {
+      if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+      else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
+      if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
+      else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
+    }
+  },
+);
+
+test("fresh processes preserve output-local dependency coverage after source edits", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scriptc-local-artifact-process-"));
+  scratch.push(dir);
+  const cacheRoot = join(dir, "cache");
+  const cPath = join(dir, "program.c");
+  const outPath = join(dir, "program");
+  const helperPath = join(dir, "compile.mjs");
+  const childEnv: NodeJS.ProcessEnv = { ...process.env, SCRIPTC_CACHE_DIR: cacheRoot };
+  delete childEnv["SCRIPTC_NO_CACHE"];
+  delete childEnv["SCRIPTC_TEST_STABLE_TOOLCHAIN"];
+  delete childEnv["SCRIPTC_TEST_TRUST_COMPILER_WRAPPER"];
+
+  await writeFile(
+    helperPath,
+    `import { compileC } from ${JSON.stringify(new URL("./cc.ts", import.meta.url).href)};\n` +
+      `await compileC({ cPath: process.argv[2], outPath: process.argv[3], cacheIdentity: "scriptc-generated-v1" });\n`,
+  );
+  const compileInFreshProcess = (): void => {
+    execFileSync(process.execPath, ["--import", "tsx", helperPath, cPath, outPath], {
+      env: childEnv,
+      stdio: "pipe",
+    });
+  };
+  const stampPath = join(
+    cacheRoot,
+    "local",
+    createHash("sha256").update(outPath).digest("hex"),
+  );
+  const dependencyPaths = async (): Promise<string[]> => {
+    const stamp = JSON.parse(await readFile(stampPath, "utf8")) as {
+      dependencies: { path: string }[];
+    };
+    return stamp.dependencies.map((dependency) => dependency.path);
+  };
+
+  await writeFile(cPath, '#include <stdio.h>\nint main(void) { puts("one"); return 0; }\n');
+  compileInFreshProcess();
+  const firstPaths = await dependencyPaths();
+  expect(firstPaths.length).toBeGreaterThan(2);
+
+  // The metadata fingerprints are restored from cache files in this second
+  // Node process; their in-memory fingerprint-to-path map starts empty.
+  await writeFile(cPath, '#include <stdio.h>\nint main(void) { puts("two"); return 0; }\n');
+  compileInFreshProcess();
+  expect(execFileSync(outPath, { encoding: "utf8" }).trim()).toBe("two");
+  expect(await dependencyPaths()).toEqual(firstPaths);
+});
+
+test("native metadata snapshots survive source edits and repair after tampering", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scriptc-native-metadata-"));
+  scratch.push(dir);
+  const cacheRoot = join(dir, "cache");
+  const cPath = join(dir, "program.c");
+  const outPath = join(dir, "program");
+  const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
+  const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+
+  try {
+    process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+    delete process.env["SCRIPTC_NO_CACHE"];
+    await writeFile(cPath, '#include <stdio.h>\nint main(void) { puts("one"); return 0; }\n');
+    await compileC({ cPath, outPath, cacheIdentity: "scriptc-generated-v1" });
+
+    const metadataDir = join(cacheRoot, "meta");
+    const metadataNames = await readdir(metadataDir);
+    expect(metadataNames.length).toBeGreaterThanOrEqual(3);
+    const pinnedTime = new Date("2002-01-01T00:00:00.000Z");
+    await Promise.all(metadataNames.map((name) => utimes(join(metadataDir, name), pinnedTime, pinnedTime)));
+
+    // Program bytes are not toolchain identity. A source edit should reuse the
+    // validated target/compiler/link snapshots without republishing them.
+    await writeFile(cPath, '#include <stdio.h>\nint main(void) { puts("two"); return 0; }\n');
+    await compileC({ cPath, outPath, cacheIdentity: "scriptc-generated-v1" });
+    expect(execFileSync(outPath, { encoding: "utf8" }).trim()).toBe("two");
+    for (const name of metadataNames) {
+      expect((await stat(join(metadataDir, name))).mtimeMs).toBe(pinnedTime.getTime());
+    }
+
+    // Snapshot files are disposable cache data. Tampering invalidates one,
+    // strict discovery repairs it, and the requested source edit still lands.
+    const damagedPath = join(metadataDir, metadataNames[0]!);
+    const damaged = JSON.parse(await readFile(damagedPath, "utf8")) as { integrity: string };
+    damaged.integrity = "0".repeat(64);
+    await writeFile(damagedPath, `${JSON.stringify(damaged)}\n`);
+    await utimes(damagedPath, pinnedTime, pinnedTime);
+    await writeFile(cPath, '#include <stdio.h>\nint main(void) { puts("three"); return 0; }\n');
+    await compileC({ cPath, outPath, cacheIdentity: "scriptc-generated-v1" });
+    expect(execFileSync(outPath, { encoding: "utf8" }).trim()).toBe("three");
+    expect((await stat(damagedPath)).mtimeMs).toBeGreaterThan(pinnedTime.getTime());
+    const repaired = JSON.parse(await readFile(damagedPath, "utf8")) as { integrity: string };
+    expect(repaired.integrity).not.toBe("0".repeat(64));
+  } finally {
+    if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+    else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
+    if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
+    else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
   }
 });
 
