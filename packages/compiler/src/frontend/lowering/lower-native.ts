@@ -1212,7 +1212,6 @@ function materializeNativeCallbackContract(
       owner: { kind: "call" },
       allowedInvocationExecutors: ["same-as-caller"],
       synchronousReturn: true,
-      transports: contract.transports.map(() => ({ kind: "borrow" })),
       sourceArguments,
     };
   }
@@ -1221,16 +1220,15 @@ function materializeNativeCallbackContract(
   }
   const owner = { ...contract.owner };
   const cancellationBinding = contract.cancellationBinding;
-  /* A retained callback the native side asks synchronously borrows its
-   * payloads for the call, exactly as a call-scoped one does: nothing
-   * outlives the answer, so nothing is copied. */
+  /* A retained callback the native side asks synchronously reads its payloads
+   * for the call, exactly as a call-scoped one does: nothing outlives the
+   * answer, so nothing is copied. */
   if (contract.synchronousReturn) {
     return {
       owner,
       cancellationBinding,
       allowedInvocationExecutors: ["same-as-caller"],
       synchronousReturn: true,
-      transports: contract.transports.map(() => ({ kind: "borrow" })),
       sourceArguments,
     };
   }
@@ -1239,7 +1237,6 @@ function materializeNativeCallbackContract(
     cancellationBinding,
     allowedInvocationExecutors: [...contract.allowedInvocationExecutors],
     synchronousReturn: false,
-    transports: contract.transports.map(() => ({ kind: "copy" })),
     sourceArguments,
   };
 }

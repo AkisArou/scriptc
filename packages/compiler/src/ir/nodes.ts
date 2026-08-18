@@ -322,12 +322,6 @@ export type IrNativeCallbackContract =
       owner: { kind: "call" };
       allowedInvocationExecutors: readonly ["same-as-caller"];
       synchronousReturn: true;
-      /* Per payload, and derivable rather than free: a value slot is read
-       * where it stands, and a pointer slot is copied because the script
-       * value built from it may outlive the call that borrowed the pointer.
-       * The validator holds it to exactly that, so the field records the
-       * decision without being able to contradict the payload. */
-      transports: readonly ({ kind: "borrow" } | { kind: "copy" })[];
       sourceArguments: readonly IrNativeCallbackSourceArgument[];
     }
   | {
@@ -338,7 +332,6 @@ export type IrNativeCallbackContract =
         | "any-attached-thread"
       )[];
       synchronousReturn: false;
-      transports: readonly { kind: "copy" }[];
       sourceArguments: readonly IrNativeCallbackSourceArgument[];
     }
   /**
@@ -366,7 +359,6 @@ export type IrNativeCallbackContract =
       cancellationBinding: string;
       allowedInvocationExecutors: readonly ["same-as-caller"];
       synchronousReturn: true;
-      transports: readonly { kind: "borrow" }[];
       sourceArguments: readonly IrNativeCallbackSourceArgument[];
     };
 
@@ -429,16 +421,6 @@ export function nativeArgumentScriptType(
   >,
 ): IrType {
   return argument.kind === "func" ? nativeCallbackSourceSignature(argument) : argument;
-}
-
-/** Whether reading this payload copies. True exactly for the forms whose
- * physical arrangement is a pointer the caller still owns: the script value
- * built from one may outlive the call that borrowed it, so the bytes cannot
- * be aliased. */
-export function nativeCallbackSourcePayloadCopies(
-  parameter: IrNativeCallbackArgumentType["params"][number] | undefined,
-): boolean {
-  return parameter?.kind === "cstring";
 }
 
 /** One payload's script type: what the handler's parameter actually is, once
@@ -1267,7 +1249,7 @@ export function isRefCounted(t: IrType): boolean {
 /* ── module ────────────────────────────────────────────────────────────── */
 
 /** Current wire-format version for every producer and consumer of Native IR. */
-export const IR_VERSION = 24 as const;
+export const IR_VERSION = 25 as const;
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */

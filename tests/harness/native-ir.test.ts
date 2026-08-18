@@ -47,7 +47,6 @@ const CALL_I32_CONTRACT = {
   owner: { kind: "call" },
   allowedInvocationExecutors: ["same-as-caller"],
   synchronousReturn: true,
-  transports: [{ kind: "borrow" }],
   sourceArguments: [{ kind: "callback-parameter", parameter: 0 }],
 } as const satisfies IrNativeCallbackContract;
 const RETAINED_I32_CALLBACK = {
@@ -64,7 +63,6 @@ const RETAINED_I32_CONTRACT = {
     "any-attached-thread",
   ],
   synchronousReturn: false,
-  transports: [{ kind: "copy" }],
   sourceArguments: [{ kind: "callback-parameter", parameter: 0 }],
 } as const satisfies IrNativeCallbackContract;
 /* The checked-number surface: source sees plain f64 numbers; the physical
@@ -324,7 +322,6 @@ const ASK_I32_CONTRACT = {
   cancellationBinding: "scriptc.fixture.c-v1@0.0.0#asker_destroy",
   allowedInvocationExecutors: ["same-as-caller"],
   synchronousReturn: true,
-  transports: [{ kind: "borrow" }],
   sourceArguments: [{ kind: "callback-parameter", parameter: 0 }],
 } as const satisfies IrNativeCallbackContract;
 /* The same question answered with an ordinary TypeScript boolean over the
@@ -2200,7 +2197,6 @@ test("Native IR rejects a synchronously answered callback with no answer", () =>
       cancellationBinding: binding.id,
       allowedInvocationExecutors: ["same-as-caller"],
       synchronousReturn: true,
-      transports: [],
       sourceArguments: [],
     },
   }];

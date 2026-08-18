@@ -25,7 +25,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "./nodes.js";
-import { arrayOf, BIGINT, BOOL, BYTES_U8, nativeCallbackIsRetained, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, ffiClassType, ffiSourceParamTypes, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, nativeArgumentScriptType, nativeCallbackSourcePayloadCopies, nativeIntegerInfo, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID, isFfiCallbackParam, isFfiContextParam, isFfiReleaseParam } from "./nodes.js";
+import { arrayOf, BIGINT, BOOL, BYTES_U8, nativeCallbackIsRetained, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, ffiClassType, ffiSourceParamTypes, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, nativeArgumentScriptType, nativeIntegerInfo, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID, isFfiCallbackParam, isFfiContextParam, isFfiReleaseParam } from "./nodes.js";
 
 /** Per-method signature for strIntrinsic: `argTypes` lists every argument
  * position (optional ones included); `minArgs` is how many may be omitted
@@ -1573,18 +1573,11 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     if (!Array.isArray(type.params)) return false;
     if (typeof contract !== "object" || contract === null) return false;
     const candidate = contract as Record<string, unknown>;
-    const transports = candidate["transports"];
     const sourceArguments = candidate["sourceArguments"];
-    if (!Array.isArray(transports) || !Array.isArray(sourceArguments) ||
+    if (!Array.isArray(sourceArguments) ||
       sourceArguments.length !== type.params.length) {
       return false;
     }
-    const transportKinds = transports.map((transport) =>
-      typeof transport === "object" && transport !== null &&
-      Object.keys(transport).length === 1
-        ? (transport as { kind?: unknown }).kind
-        : null
-    );
     const owner = candidate["owner"];
     const executors = candidate["allowedInvocationExecutors"];
     const validSourceArguments = sourceArguments.every((argument, index) => {
@@ -1621,16 +1614,10 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     const ownerKind = (owner as { kind?: unknown }).kind;
     if (ownerKind === "call") {
       return Object.keys(candidate).sort().join(",") ===
-          "allowedInvocationExecutors,owner,sourceArguments,synchronousReturn,transports" &&
+          "allowedInvocationExecutors,owner,sourceArguments,synchronousReturn" &&
         Object.keys(owner).length === 1 &&
         executors.length === 1 && executors[0] === "same-as-caller" &&
-        candidate["synchronousReturn"] === true &&
-        /* A pointer-derived payload is copied, everything else is borrowed.
-         * The transport is not a free choice: reading a `const char *` means
-         * building a script string, and that string outlives the pointer. */
-        transportKinds.every((kind, index) =>
-          kind === (nativeCallbackSourcePayloadCopies(type.params[index]) ? "copy" : "borrow")
-        );
+        candidate["synchronousReturn"] === true;
     }
     if (ownerKind === "result" || ownerKind === "argument") {
       const allowed = new Set(["same-as-caller", "any-attached-thread"]);
@@ -1662,16 +1649,15 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           return false;
         }
         return Object.keys(candidate).sort().join(",") ===
-            "allowedInvocationExecutors,cancellationBinding,owner,sourceArguments,synchronousReturn,transports" &&
+            "allowedInvocationExecutors,cancellationBinding,owner,sourceArguments,synchronousReturn" &&
           validOwner &&
           typeof candidate["cancellationBinding"] === "string" &&
           candidate["cancellationBinding"] !== "" &&
           executors.length === 1 && executors[0] === "same-as-caller" &&
-          transportKinds.every((kind) => kind === "borrow") &&
           type.ret.kind !== "void";
       }
       return Object.keys(candidate).sort().join(",") ===
-          "allowedInvocationExecutors,cancellationBinding,owner,sourceArguments,synchronousReturn,transports" &&
+          "allowedInvocationExecutors,cancellationBinding,owner,sourceArguments,synchronousReturn" &&
         validOwner &&
         typeof candidate["cancellationBinding"] === "string" &&
         candidate["cancellationBinding"] !== "" &&
@@ -1679,7 +1665,6 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         executors.every((executor) => allowed.has(String(executor))) &&
         new Set(executors).size === executors.length &&
         candidate["synchronousReturn"] === false &&
-        transportKinds.every((kind) => kind === "copy") &&
         type.ret.kind === "void";
     }
     return false;
@@ -2196,7 +2181,6 @@ export function validateModule(mod: IrModule): IrValidationError[] {
               parameter.type.kind !== "nativeCallback" ||
               !validNativeCallback(parameter.type) ||
               callbackContract === undefined ||
-              callbackContract.transports.length !== payloadSlots.length ||
               callbackContract.sourceArguments.length !== sourceArgument.type.params.length
             ) return false;
             const projectedPhysical = new Set<number>();

@@ -27,7 +27,7 @@ import type {
   IrNativeCallbackSignature,
   IrNativeScalarType,
 } from "../ir/nodes.js";
-import { isFfiCallbackParam, isFfiContextParam, isFfiReleaseParam, nativeCallbackSourcePayloadCopies } from "../ir/nodes.js";
+import { isFfiCallbackParam, isFfiContextParam, isFfiReleaseParam } from "../ir/nodes.js";
 
 /** The exact scalar a profile class occupies. The profile names a C type by
  * class rather than by width, so these are fixed rather than probed. */
@@ -143,9 +143,6 @@ function desugarCallback(entry: IrFfiImport): {
     owner: { kind: "call" },
     allowedInvocationExecutors: ["same-as-caller"],
     synchronousReturn: true,
-    transports: source.params.map((parameter) =>
-      nativeCallbackSourcePayloadCopies(parameter) ? { kind: "copy" } : { kind: "borrow" }
-    ),
     sourceArguments: payloadSlots.map((parameter) => ({
       kind: "callback-parameter",
       parameter,
