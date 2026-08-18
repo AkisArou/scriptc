@@ -1675,23 +1675,40 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     }
     const signature = type.signature as Partial<IrNativeCallbackSignature>;
     const result = signature.result;
-    const context = signature.context;
-    return Array.isArray(signature.parameters) &&
-      signature.parameters.every((parameter) =>
-        validNativeScalar(parameter) ||
-        (typeof parameter === "object" && parameter !== null &&
-          ((parameter.kind === "nativePointer" &&
-            (parameter.pointee === "i8" || parameter.pointee === "u8") &&
-            parameter.addressSpace === 0) ||
-            /* A handle arrives as the pointer the caller passed. It stays a
-             * handle rather than collapsing to a byte pointer because the
-             * trampoline has to know which type tag to intern it under. */
-            (parameter.kind === "nativeHandle" &&
-              nativeTypesById.get(parameter.typeId)?.kind === "handle")))
-      ) &&
+    if (!Array.isArray(signature.parameters)) return false;
+    /* At most one context slot: it carries the closure, and two would mean
+     * two closures for one callback. Its POSITION is free — a C API may take
+     * userdata first, last, or not at all. */
+    const contexts = signature.parameters.filter(
+      (parameter) =>
+        typeof parameter === "object" && parameter !== null &&
+        (parameter as { kind?: unknown }).kind === "nativeContext",
+    );
+    if (contexts.length > 1 || !contexts.every(validNativeContext)) return false;
+    const validParameter = (parameter: unknown): boolean => {
+      if (validNativeScalar(parameter)) return true;
+      if (typeof parameter !== "object" || parameter === null) return false;
+      const candidate = parameter as {
+        kind?: unknown;
+        pointee?: unknown;
+        addressSpace?: unknown;
+        typeId?: string;
+      };
+      if (candidate.kind === "nativeContext") return true;
+      if (
+        candidate.kind === "nativePointer" &&
+        (candidate.pointee === "i8" || candidate.pointee === "u8") &&
+        candidate.addressSpace === 0
+      ) return true;
+      /* A handle arrives as the pointer the caller passed. It stays a handle
+       * rather than collapsing to a byte pointer because the trampoline has
+       * to know which type tag to intern it under. */
+      return candidate.kind === "nativeHandle" &&
+        nativeTypesById.get(String(candidate.typeId))?.kind === "handle";
+    };
+    return signature.parameters.every(validParameter) &&
       (validNativeScalar(result) ||
-        (typeof result === "object" && result !== null && result.kind === "void")) &&
-      typeof context === "object" && context !== null && context.placement === "last";
+        (typeof result === "object" && result !== null && result.kind === "void"));
   };
   const validNativeContext = (
     type: NonNullable<IrModule["nativeBindings"]>[number]["parameters"][number]["type"],
@@ -2142,14 +2159,27 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           projectionCounts.callbackFunction++;
           const callbackContract = sourceArgument.callback;
           const callbackSourceProjectionValid = (() => {
+            /* Transports and source arguments describe PAYLOADS. The context
+             * slot carries the closure, so it is in the physical signature
+             * and in neither of those lists. */
+            /* Read defensively: a malformed binding may carry no signature
+               at all, and the validator's job there is to refuse rather
+               than to crash. */
+            const physicalSlots = parameter.type.kind === "nativeCallback"
+              ? parameter.type.signature?.parameters
+              : undefined;
+            const payloadSlots = Array.isArray(physicalSlots)
+              ? physicalSlots.flatMap(
+                  (slot, index) => (slot?.kind === "nativeContext" ? [] : [index]),
+                )
+              : [];
             if (
               sourceArgument.type.kind !== "func" ||
               !validNativeCallbackArgument(sourceArgument.type) ||
               parameter.type.kind !== "nativeCallback" ||
               !validNativeCallback(parameter.type) ||
               callbackContract === undefined ||
-              callbackContract.transports.length !==
-                parameter.type.signature.parameters.length ||
+              callbackContract.transports.length !== payloadSlots.length ||
               callbackContract.sourceArguments.length !== sourceArgument.type.params.length
             ) return false;
             const projectedPhysical = new Set<number>();
@@ -2183,6 +2213,9 @@ export function validateModule(mod: IrModule): IrValidationError[] {
               }
               const source = sourceArgument.type.params[sourceIndex]!;
               if (expected === undefined) return false;
+              /* A source argument may never project the context slot: it
+               * carries the closure, not a value the handler receives. */
+              if (expected.kind === "nativeContext") return false;
               /* A string source over a const byte pointer is the copy the
                * runtime makes when the callback is queued. Everything else
                * must be the physical type itself. */
@@ -2230,7 +2263,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             } else if (!typeEquals(answer, parameter.type.signature.result)) {
               return false;
             }
-            return projectedPhysical.size === parameter.type.signature.parameters.length;
+            return projectedPhysical.size === payloadSlots.length;
           })();
           if (
             !validNativeCallbackArgument(sourceArgument.type) ||

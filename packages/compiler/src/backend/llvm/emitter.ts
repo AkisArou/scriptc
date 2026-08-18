@@ -1908,12 +1908,15 @@ class LlEmitter {
     const expired = this.cstr("scriptc: native callback invoked outside its call-scoped lifetime\n");
     for (const adapter of this.nativeCallbackAdapters.values()) {
       const signature = adapter.callback.signature;
-      const params = [
-        ...signature.parameters.map((parameter, index) =>
-          `${this.nativeParameterType(parameter)} %a${index}`
-        ),
-        "ptr %ctx",
-      ];
+      /* The context slot sits at its declared position rather than being
+       * appended: a C API may take userdata first, last, or not at all, and
+       * the trampoline has to match the pointer the library will call.
+       * Kept in lockstep with the C backend. */
+      const params = signature.parameters.map((parameter, index) =>
+        parameter.kind === "nativeContext"
+          ? "ptr %ctx"
+          : `${this.nativeParameterType(parameter)} %a${index}`
+      );
       const externalRet = this.nativeReturnType(signature.result);
       const rawRet = this.llType(signature.result);
       const pendingResult = rawRet === "double" ? f64Lit(0) : "0";
@@ -2055,7 +2058,8 @@ class LlEmitter {
           ...(injectsOwner ? ["ptr"] : []),
           ...signature.parameters.map((parameter, index) =>
             copiedStrings.has(index) || ownedHandles.has(index) ||
-              parameter.kind === "nativePointer"
+              parameter.kind === "nativePointer" ||
+              parameter.kind === "nativeContext"
               ? "ptr"
               : this.llType(parameter)
           ),
@@ -2246,6 +2250,10 @@ class LlEmitter {
             : []),
         );
         signature.parameters.forEach((parameter, index) => {
+          /* The context slot identified which registration fired, which the
+           * token already carries; it never reaches the queue. Its field
+           * stays in the record so every other index is unchanged. */
+          if (parameter.kind === "nativeContext") return;
           defs.push(
             `  %copy${index}.ptr = getelementptr inbounds ${invocationType}, ptr %record, i64 0, i32 ${physicalFieldBase + index}`,
           );

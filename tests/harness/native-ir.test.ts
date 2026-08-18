@@ -35,11 +35,12 @@ const I64 = nativeScalarType("i64");
 const U64 = nativeScalarType("u64");
 const ISIZE = nativeScalarType("isize");
 const USIZE = nativeScalarType("usize");
+/* The closure slot, at its declared position in the physical signature. */
+const CONTEXT = { kind: "nativeContext", addressSpace: 0 } as const;
 const NATIVE_F64 = nativeScalarType("f64");
 const CALL_I32_CALLBACK = {
-  parameters: [I32],
+  parameters: [I32, CONTEXT],
   result: I32,
-  context: { placement: "last" },
 } as const;
 const CALL_I32_SOURCE = nativeCallbackArgumentType(CALL_I32_CALLBACK);
 const CALL_I32_CONTRACT = {
@@ -50,9 +51,8 @@ const CALL_I32_CONTRACT = {
   sourceArguments: [{ kind: "callback-parameter", parameter: 0 }],
 } as const satisfies IrNativeCallbackContract;
 const RETAINED_I32_CALLBACK = {
-  parameters: [I32],
+  parameters: [I32, CONTEXT],
   result: { kind: "void" },
-  context: { placement: "last" },
 } as const;
 const RETAINED_I32_SOURCE = nativeCallbackArgumentType(RETAINED_I32_CALLBACK);
 const RETAINED_I32_CONTRACT = {
@@ -83,9 +83,8 @@ const CALL_NUMBER_SOURCE = {
 /* The same shape over a 32-bit float slot: the payload is stored as a float
  * and the handler receives the double it widens to. */
 const CALL_F32_CALLBACK = {
-  parameters: [nativeScalarType("f32")],
+  parameters: [nativeScalarType("f32"), CONTEXT],
   result: I32,
-  context: { placement: "last" },
 } as const;
 const PADDED_ID = "scriptc.fixture.c-v1@0.0.0#type:padded";
 const PADDED = { kind: "nativeStruct", typeId: PADDED_ID } as const;
@@ -316,9 +315,8 @@ const ASKER = { kind: "nativeHandle", typeId: ASKER_ID } as const;
  * result. Same shape as an event handler that reports whether it consumed
  * the event. */
 const ASK_I32_CALLBACK = {
-  parameters: [I32],
+  parameters: [I32, CONTEXT],
   result: I32,
-  context: { placement: "last" },
 } as const;
 const ASK_I32_SOURCE = nativeCallbackArgumentType(ASK_I32_CALLBACK);
 const ASK_I32_CONTRACT = {
@@ -2211,10 +2209,9 @@ test("Native IR rejects a synchronously answered callback with no answer", () =>
     type: {
       kind: "nativeCallback",
       signature: {
-        parameters: [],
+        parameters: [CONTEXT],
         result: { kind: "void" },
-        context: { placement: "last" },
-      },
+            },
     },
     passMode: "pointer",
     ownership: { kind: "callback" },

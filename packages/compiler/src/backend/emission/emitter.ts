@@ -167,19 +167,25 @@ function nativeCallbackParameterTypeC(
     return `${parameter.const ? "const " : ""}char *`;
   }
   /* An object payload crosses as an opaque pointer: the emitter has already
-   * referenced it, and what its type means is the managed cell's business. */
-  return parameter.kind === "nativeHandle" ? "void *" : cType(parameter).trim();
+   * referenced it, and what its type means is the managed cell's business.
+   * The context slot is opaque for the opposite reason — it carries the
+   * closure and nothing else looks inside it. */
+  if (parameter.kind === "nativeHandle" || parameter.kind === "nativeContext") {
+    return "void *";
+  }
+  return cType(parameter).trim();
 }
 
 function nativeCallbackPointerTypeC(
   callback: Extract<IrNativeBinding["parameters"][number]["type"], { kind: "nativeCallback" }>,
 ): string {
   const signature = callback.signature;
-  const params = [
-    ...signature.parameters.map(nativeCallbackParameterTypeC),
-    "void *",
-  ];
-  return `${cType(signature.result).trim()} (*)(${params.join(", ")})`;
+  /* Every slot the library will pass is in the list, context included, so
+   * nothing is appended: the pointer type is the signature as declared. */
+  const params = signature.parameters.map(nativeCallbackParameterTypeC);
+  return `${cType(signature.result).trim()} (*)(${
+    params.length > 0 ? params.join(", ") : "void"
+  })`;
 }
 
 export class CEmitter {
@@ -2214,12 +2220,14 @@ export class CEmitter {
   emitNativeCallbackDefs(out: string[]): void {
     for (const adapter of this.nativeCallbackAdapters.values()) {
       const signature = adapter.callback.signature;
-      const nativeParams = [
-        ...signature.parameters.map((parameter, index) =>
-          `${nativeCallbackParameterTypeC(parameter)} sc_a${index}`
-        ),
-        "void *sc_ctx",
-      ];
+      /* The context slot sits at its declared position rather than being
+       * appended: a C API may take userdata first, last, or not at all, and
+       * the trampoline has to match the pointer the library will call. */
+      const nativeParams = signature.parameters.map((parameter, index) =>
+        parameter.kind === "nativeContext"
+          ? "void *sc_ctx"
+          : `${nativeCallbackParameterTypeC(parameter)} sc_a${index}`
+      );
       /* Physical slots whose source value is a string. Their pointer must not
        * be stored: a queued delivery outlives whatever the emitter owned, so
        * the copy is made when the signal fires. */
@@ -2323,12 +2331,18 @@ export class CEmitter {
           `typedef struct {`,
           `  ScrCallbackInvocation base;`,
           ...(injectsOwner ? [`  ScrNativeHandle *sc_owner;`] : []),
-          ...signature.parameters.map((parameter, index) =>
-            copiedStrings.has(index)
-              ? `  ScrStr *sc_a${index};`
-              : ownedHandles.has(index)
-                ? `  void *sc_a${index};`
-                : `  ${nativeCallbackParameterTypeC(parameter)} sc_a${index};`
+          /* The context slot never reaches the queue: it identified which
+           * registration fired, which the token already carries. */
+          ...signature.parameters.flatMap((parameter, index) =>
+            parameter.kind === "nativeContext"
+              ? []
+              : [
+                  copiedStrings.has(index)
+                    ? `  ScrStr *sc_a${index};`
+                    : ownedHandles.has(index)
+                      ? `  void *sc_a${index};`
+                      : `  ${nativeCallbackParameterTypeC(parameter)} sc_a${index};`,
+                ]
           ),
           `} ${invocation};`,
           `static void ${destroy}(ScrOwnerGatewayEvent *sc_event) {`,
@@ -2413,10 +2427,14 @@ export class CEmitter {
           ...(injectsOwner
             ? [`  sc_invocation->sc_owner = scr_retained_callbacks_retain_owner(sc_token);`]
             : []),
-          ...signature.parameters.map((_parameter, index) =>
-            copiedStrings.has(index)
-              ? `  sc_invocation->sc_a${index} = scr_str_from_c_data(sc_a${index});`
-              : `  sc_invocation->sc_a${index} = sc_a${index};`
+          ...signature.parameters.flatMap((parameter, index) =>
+            parameter.kind === "nativeContext"
+              ? []
+              : [
+                  copiedStrings.has(index)
+                    ? `  sc_invocation->sc_a${index} = scr_str_from_c_data(sc_a${index});`
+                    : `  sc_invocation->sc_a${index} = sc_a${index};`,
+                ]
           ),
           `  (void)scr_callback_token_admit(sc_token, &sc_invocation->base);`,
           `}`,

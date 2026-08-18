@@ -223,9 +223,14 @@ export interface IrNativeCallbackSignature {
     | IrNativeScalarType
     | IrNativePointerType
     | IrNativeHandleType
+    /* The closure context occupies a real ABI slot at a real position, so
+     * it is an entry here rather than a placement field beside the list. A
+     * callback that takes no context simply has none — which is how a raw C
+     * callback with no userdata is written down, and there is no way to
+     * state a position the list does not have. */
+    | IrNativeContextType
   )[];
   result: IrNativeScalarType | { kind: "void" };
-  context: { placement: "last" };
 }
 
 /** A C function pointer that exists only in a physical native signature. */
@@ -374,13 +379,17 @@ export function nativeCallbackArgumentType(
 ): IrNativeCallbackArgumentType {
   return {
     kind: "func",
-    params: signature.parameters.map((parameter) => {
+    /* The context slot is the emitter's own plumbing: it carries the
+     * closure, never a source value, so it is absent from what the handler
+     * receives. */
+    params: signature.parameters.flatMap((parameter) => {
+      if (parameter.kind === "nativeContext") return [];
       if (parameter.kind === "nativePointer") {
         throw new Error(
           "native callback pointer parameters require an explicit source projection",
         );
       }
-      return { ...parameter };
+      return [{ ...parameter }];
     }),
     ret: { ...signature.result },
   };
