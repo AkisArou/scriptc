@@ -129,6 +129,24 @@ ScrCallbackToken *scr_callback_table_find_anchor(ScrCallbackTable *table,
   return NULL;
 }
 
+/* Any live registration no owner has claimed — the exit sweep's cursor.
+ *
+ * Closing one takes it out of the ACTIVE state, so repeated calls walk the
+ * whole set and terminate rather than returning the same entry forever. */
+ScrCallbackToken *scr_callback_table_first_unowned(ScrCallbackTable *table) {
+  if (table == NULL) return NULL;
+  for (size_t slot = 0; slot < table->length; slot++) {
+    ScrCallbackTableEntry *entry = &table->entries[slot];
+    if (entry->token == NULL || entry->retired || entry->owner_claimed) continue;
+    if (entry->source_context != NULL) continue;
+    if (scr_callback_token_state(entry->token) != SCR_CALLBACK_TOKEN_ACTIVE) {
+      continue;
+    }
+    return entry->token;
+  }
+  return NULL;
+}
+
 static ScrCallbackTableEntry *scr_callback_table_entry(
     ScrCallbackTable *table, ScrCallbackToken *token) {
   if (table == NULL || token == NULL ||

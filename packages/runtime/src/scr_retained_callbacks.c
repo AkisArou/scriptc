@@ -7,6 +7,8 @@
  * they only call scr_callback_token_admit with their opaque token. */
 #include "scr_runtime.h"
 
+#include <stdlib.h>
+
 static SCR_TL ScrOwnerGateway *scr_retained_gateway;
 static SCR_TL ScrCallbackTable *scr_retained_table;
 static SCR_TL bool scr_retained_accepting;
@@ -15,6 +17,9 @@ static SCR_TL bool scr_retained_accepting;
  * produce work while that thread sits in the loop, so counting it would keep
  * a finished program running forever. */
 static SCR_TL size_t scr_retained_foreign;
+/* The exit sweep is registered once, on the first registration that needs it,
+ * so a program with none keeps its exact atexit list. */
+static SCR_TL bool scr_retained_process_sweep;
 
 static void *scr_retained_closure_retain(void *opaque) {
   return scr_closure_retain((ScrClosure *)opaque);
@@ -75,12 +80,45 @@ ScrCallbackToken *scr_retained_callbacks_register(
  * owner-scoped registration gets, with no source owner set and no owner edge
  * claiming it — which is exactly what makes it findable by the value it holds
  * when a release names that value back. */
+/* Every registration nothing owns, dropped at exit.
+ *
+ * A process-scoped registration by definition has nothing whose disposal
+ * would end it, so without this its closure is still pinned when the program
+ * stops — which the reference audit reports as a leak, correctly. The sweep
+ * runs from atexit, which is AFTER the 'exit' listeners that run inline in
+ * main: a listener is entitled to release a registration itself, or to pump a
+ * native library one last time, and both need the table intact. */
+static void scr_retained_callbacks_drop_process(void) {
+  if (scr_retained_table == NULL) return;
+  /* Deliveries already queued are dropped first, and they hold references of
+   * their own: a payload copied on the producing thread is a script string or
+   * byte array that only the delivery would have consumed. Closing the
+   * registrations without this would release the closures and leak those. */
+  (void)scr_retained_callbacks_discard();
+  for (;;) {
+    ScrCallbackToken *token =
+        scr_callback_table_first_unowned(scr_retained_table);
+    if (token == NULL) return;
+    /* Either step refusing means the entry is already leaving by another
+     * path; stopping is right, and it is also what keeps this loop finite. */
+    if (!scr_callback_table_begin_close(scr_retained_table, token)) return;
+    if (!scr_callback_table_cancellation_complete(scr_retained_table, token)) {
+      return;
+    }
+    (void)scr_callback_table_collect(scr_retained_table);
+  }
+}
+
 ScrCallbackToken *scr_retained_callbacks_register_process(
     ScrClosure *closure, const void *signature, bool foreign) {
   /* Configuration is the CALLER's to arrange, so this unit stays ignorant of
    * whichever loop is driving it: a host configures the service itself, and
    * generated code installs the default wake just before registering. The
    * register below traps precisely if neither happened. */
+  if (!scr_retained_process_sweep) {
+    scr_retained_process_sweep = true;
+    scr_atexit(scr_retained_callbacks_drop_process);
+  }
   ScrCallbackToken *token =
       scr_retained_callbacks_register(closure, signature, NULL);
   if (foreign) scr_retained_foreign++;

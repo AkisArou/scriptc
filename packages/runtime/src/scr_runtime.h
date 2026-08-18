@@ -213,6 +213,9 @@ ScrCallbackToken *scr_callback_table_register(ScrCallbackTable *table,
  * so the first match wins and duplicates retire one at a time. */
 ScrCallbackToken *scr_callback_table_find_anchor(ScrCallbackTable *table,
                                                  void *anchor);
+/* Any live registration no owner claimed. Closing one takes it out of the
+ * ACTIVE state, so repeated calls walk the whole set. */
+ScrCallbackToken *scr_callback_table_first_unowned(ScrCallbackTable *table);
 /* Owner-only lookup for an admitted invocation. Returns a retained anchor;
  * closing entries remain visible until their already-admitted leases finish. */
 void *scr_callback_table_acquire(ScrCallbackTable *table, size_t slot,
