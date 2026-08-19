@@ -162,8 +162,16 @@ function buildProbe(
   return bin;
 }
 
-function runProbe(bin: string, args: string[] = []): { stdout: string; status: number | null; signal: string | null } {
-  const r = spawnSync(bin, args, { encoding: "utf8", timeout: 60_000 });
+function runProbe(
+  bin: string,
+  args: string[] = [],
+  env?: NodeJS.ProcessEnv,
+): { stdout: string; status: number | null; signal: string | null } {
+  const r = spawnSync(bin, args, {
+    encoding: "utf8",
+    timeout: 60_000,
+    ...(env === undefined ? {} : { env: { ...process.env, ...env } }),
+  });
   return { stdout: r.stdout ?? "", status: r.status, signal: r.signal };
 }
 
@@ -450,11 +458,23 @@ B: r1=31 r2=6 chunks=4 thread_ok=1 sink_calls=0
   platformTest("CB8: CB1/CB2 under ASan", async () => {
     const { archive, outDir } = await buildLibrary(emission, { sanitize: true });
     const probe = buildProbe("probe.c", archive, outDir, { sanitize: true, pthread: true });
-    const run = runProbe(probe, ["run"]);
+    /* Memory errors yes, leak accounting no — and the reason is the scenario
+     * itself. `run` ends by clearing a registration and calling the channel
+     * again, so the unregistered-call trap fires and the sink longjmps to a
+     * host frame below the entry, which is the survival pattern the runtime
+     * documents and this case exists to exercise. That jump skips every
+     * library frame between, so whatever they held is abandoned by
+     * construction: one `Uint8Array(3)`, here, live in the loop that was
+     * emitting when the trap hit. LeakSanitizer reports it correctly, and no
+     * cleanup could have run — asking for a clean leak report across a
+     * longjmp is asking the pattern not to be the pattern. Use-after-free,
+     * overflows, and double-frees are still checked, which is what this lane
+     * is for. */
+    const run = runProbe(probe, ["run"], { ASAN_OPTIONS: "detect_leaks=0" });
     expect(run.signal).toBeNull();
     expect(run.status).toBe(0);
     expect(run.stdout).toBe(RUN_EXPECTED);
-    const orphan = runProbe(probe, ["orphan"]);
+    const orphan = runProbe(probe, ["orphan"], { ASAN_OPTIONS: "detect_leaks=0" });
     expect(orphan.signal).toBe("SIGABRT");
     expect(orphan.stdout).toBe(ORPHAN_EXPECTED);
   });
