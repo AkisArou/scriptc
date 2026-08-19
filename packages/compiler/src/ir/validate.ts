@@ -2634,6 +2634,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       | { kind: "boolean"; conversion?: unknown; falseValue?: unknown; trueValue?: unknown }
       | { kind: "number" }
       | { kind: "utf8CString"; nullable?: unknown }
+      | { kind: "utf8CStringArray"; nullable?: unknown; release?: unknown }
       | { kind: "nullableHandle" }
       | { kind: "errorChannel" }
       | undefined;
@@ -2760,6 +2761,55 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       ) {
         errors.push({
           message: `Native IR binding "${binding.id}" has an invalid UTF-8 C-string result projection`,
+          loc: moduleLoc,
+        });
+      }
+    } else if (resultProjection?.kind === "utf8CStringArray") {
+      /* The slot is `char **` — a pointer to the vector's element type, which
+       * is itself a pointer to bytes. Its `const` is deliberately unchecked:
+       * an SDK that hands over ownership spells the same vector `char **` and
+       * one that keeps it spells it `const char *const *`, and the ownership
+       * below is what distinguishes them. Reading constness as ownership
+       * would be inferring a lifetime from a spelling. */
+      const ownership = binding.result.ownership;
+      const anchor = binding.arguments.find(
+        (argument) =>
+          ownership.kind === "borrowed" && argument.name === ownership.anchor,
+      );
+      const release = resultProjection.release as
+        | { kind?: unknown; symbol?: unknown }
+        | undefined;
+      const releaseValid =
+        release?.kind === "none" ||
+        (release?.kind === "symbol" &&
+          typeof release.symbol === "string" &&
+          release.symbol.length > 0);
+      /* Ownership is pinned to the release and cannot disagree with it. A
+       * vector nothing frees is borrowed from its receiver, exactly as a
+       * borrowed string is — the copy has to happen while the receiver is
+       * still alive, which is what the anchor records. A vector something
+       * frees is a `value`: the projection consumes it, and nothing the
+       * program holds outlives this call because of it. `owned` is neither,
+       * and would claim a destructor BINDING that cannot exist for a pointer
+       * no argument can carry. */
+      const ownershipValid =
+        release?.kind === "none"
+          ? ownership.kind === "borrowed" &&
+            ownership.scope === "receiver" &&
+            anchor?.type.kind === "nativeHandle"
+          : ownership.kind === "value";
+      if (
+        binding.result.type.kind !== "nativePointer" ||
+        !validNativePointer(binding.result.type) ||
+        binding.result.type.pointee !== "ptr" ||
+        binding.result.passMode !== "pointer" ||
+        !releaseValid ||
+        !ownershipValid ||
+        nativeFailureReadsResult(binding.error.detect) ||
+        typeof resultProjection.nullable !== "boolean"
+      ) {
+        errors.push({
+          message: `Native IR binding "${binding.id}" has an invalid UTF-8 C-string array result projection`,
           loc: moduleLoc,
         });
       }
@@ -4759,6 +4809,7 @@ function validateFunction(
           | { kind: "boolean" }
           | { kind: "number" }
           | { kind: "utf8CString"; nullable?: unknown }
+          | { kind: "utf8CStringArray"; nullable?: unknown }
           | { kind: "nullableHandle" }
           | { kind: "errorChannel" }
           | undefined;
@@ -4799,6 +4850,25 @@ function validateFunction(
           e.type.kind !== "string"
         ) {
           err(`Native IR call ${e.binding} must project to string`, e.loc);
+        } else if (
+          resultProjection?.kind === "utf8CStringArray" &&
+          resultProjection.nullable === true
+        ) {
+          const unionId = e.type.kind === "union" ? e.type.unionId : null;
+          const arms = unionId === null ? undefined : unions.get(unionId)?.arms;
+          if (
+            arms?.length !== 2 ||
+            !arms.some((arm) => arm.kind === "array" && arm.elem.kind === "string") ||
+            !arms.some((arm) => arm.kind === "nullT")
+          ) {
+            err(`Native IR call ${e.binding} must project to string[] | null`, e.loc);
+          }
+        } else if (
+          resultProjection?.kind === "utf8CStringArray" &&
+          resultProjection.nullable === false &&
+          !(e.type.kind === "array" && e.type.elem.kind === "string")
+        ) {
+          err(`Native IR call ${e.binding} must project to string[]`, e.loc);
         } else if (resultProjection?.kind === "nullableHandle") {
           /* Absence is a value, so the call answers with the handle or null. */
           const unionId = e.type.kind === "union" ? e.type.unionId : null;
@@ -4821,7 +4891,10 @@ function validateFunction(
               e.loc,
             );
           }
-        } else if (resultProjection?.kind !== "utf8CString") {
+        } else if (
+          resultProjection?.kind !== "utf8CString" &&
+          resultProjection?.kind !== "utf8CStringArray"
+        ) {
           err(`Native IR call ${e.binding} has no valid result projection`, e.loc);
         }
         break;

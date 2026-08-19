@@ -19,7 +19,6 @@ import type {
   IrNativeExport,
   IrNativeFailureDetection,
   IrNativeFailureMessage,
-  IrNativeFailureRelease,
   IrNativeHandleDef,
   IrNativeHandleType,
   IrNativeIntegerScalar,
@@ -28,6 +27,7 @@ import type {
   IrNativePhysicalAbiValue,
   IrNativePointerType,
   IrNativeRegistrationRef,
+  IrNativeRelease,
   IrNativeResultAbiType,
   IrNativeResultProjection,
   IrNativeScalar,
@@ -1044,7 +1044,6 @@ export type {
   IrNativeExport,
   IrNativeFailureDetection,
   IrNativeFailureMessage,
-  IrNativeFailureRelease,
   IrNativeHandleDef,
   IrNativeHandleType,
   IrNativeIntegerScalar,
@@ -1053,6 +1052,7 @@ export type {
   IrNativePhysicalAbiValue,
   IrNativePointerType,
   IrNativeRegistrationRef,
+  IrNativeRelease,
   IrNativeResultAbiType,
   IrNativeResultProjection,
   IrNativeScalar,
@@ -1063,7 +1063,7 @@ export type {
 };
 
 /** Current wire-format version for every producer and consumer of Native IR. */
-export const IR_VERSION = 36 as const;
+export const IR_VERSION = 37 as const;
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */

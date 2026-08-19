@@ -2686,6 +2686,43 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           releaseArguments();
           return { name: "", type: e.type };
         }
+        if (
+          resultForm.kind === "utf8CStringArray" ||
+          resultForm.kind === "utf8CStringArrayOrNull"
+        ) {
+          /* The vector is read before it is disposed of, and disposed of
+           * whatever the read produced: the elements are copied into managed
+           * strings first, so nothing the program keeps points into storage
+           * the release is about to reclaim. */
+          const raw = `sc_t${E.tempCounter++}`;
+          const managed = `sc_t${E.tempCounter++}`;
+          E.line(`const char *const *${raw} = ${call};${E.srcComment(e.loc)}`);
+          E.line(`ScrArr *${managed} = scr_native_cstring_array_adopt(${raw});`);
+          if (resultForm.release !== null) {
+            E.line(`if (${raw} != NULL) ${resultForm.release}((void *)${raw});`);
+          }
+          if (resultForm.kind === "utf8CStringArrayOrNull") {
+            const { arrayTag, nullTag } = resultForm;
+            const elem = { kind: "array", elem: STRING } as const;
+            const adapters = vAdapters(elem);
+            const present =
+              `scr_union_new_ref(${arrayTag}, ${managed}, ` +
+              `&${adapters.retain}, &${adapters.release}, ${E.traceArgC(elem)})`;
+            const absent = E.unitInstanceRef(resultForm.unionId, nullTag);
+            const result = E.newTemp(
+              e.type,
+              `${raw} != NULL ? ${present} : scr_union_retain(${absent})`,
+            );
+            if (callbacksMayThrow) E.emitPendingCheck();
+            releaseArguments();
+            return result;
+          }
+          const result = E.newTemp(e.type, managed);
+          E.line(`if (${result.name} == NULL) scr_native_throw_null(${operation});`);
+          E.emitPendingCheck();
+          releaseArguments();
+          return result;
+        }
         if (resultForm.kind === "utf8CString" || resultForm.kind === "utf8CStringOrNull") {
           const raw = `sc_t${E.tempCounter++}`;
           const managed = `sc_t${E.tempCounter++}`;

@@ -412,6 +412,25 @@ export type IrNativeResultProjection =
    * validation requires the no-fail error contract. */
   | { kind: "number" }
   | { kind: "utf8CString"; nullable: boolean }
+  /** A NUL-terminated vector of C strings copied into a managed `string[]`.
+   *
+   * Copying is what makes the result independent of the callee's storage,
+   * which is not one thing: the vector may be the callee's to keep or the
+   * caller's to free, and the elements likewise. `release` settles all of it
+   * with one symbol, which is why conventions an SDK distinguishes need no arm
+   * here — GIR's `full` and `container` transfers differ in whether the
+   * elements are the caller's too, and that difference is entirely which
+   * symbol frees the vector.
+   *
+   * The result's ownership is pinned to match and cannot disagree: a vector
+   * that needs no release is `borrowed` from its receiver, exactly as a
+   * borrowed string is, and one that does is a `value` — because it is
+   * consumed inside this projection and never becomes something the program
+   * holds.
+   *
+   * An element cannot be absent, because the absent slot IS the terminator.
+   * The VECTOR can be, which is what `nullable` covers. */
+  | { kind: "utf8CStringArray"; nullable: boolean; release: IrNativeRelease }
   /** An owned handle the callee may report as absent, projected as a union of
    * the handle and null. Absence is a value, not a failure. */
   | { kind: "nullableHandle" }
@@ -446,16 +465,24 @@ export type IrNativeFailureMessage =
   | { kind: "errno" }
   | { kind: "symbol"; symbol: string };
 
-/** What must be released once the message has been read. Named here rather
- * than derived from the operation's own symbol, so no emitter guesses it. */
-export type IrNativeFailureRelease =
+/** What must be released once a borrowed pointer has been read: an error
+ * object after its message, or a returned vector after its elements have been
+ * copied. Named here rather than derived from the operation's own symbol, so
+ * no emitter guesses it.
+ *
+ * Distinct from a handle result's `destructor`, which names a BINDING the
+ * validator checks — a handle is a resource the program holds, and what ends
+ * it is itself a callable. These pointers are consumed inside one projection
+ * and never become a program value, so there is no binding to name and a
+ * symbol is the whole of it. */
+export type IrNativeRelease =
   | { kind: "none" }
   | { kind: "symbol"; symbol: string };
 
 export interface IrNativeErrorContract {
   detect: IrNativeFailureDetection;
   message: IrNativeFailureMessage;
-  release: IrNativeFailureRelease;
+  release: IrNativeRelease;
 }
 
 export interface IrNativeBinding {

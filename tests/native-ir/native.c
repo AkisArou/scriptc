@@ -155,6 +155,32 @@ int32_t nts_cstring_array_measure_named(const char **items, const char *name) {
   return nts_cstring_array_measure(items) + (int32_t)strlen(name);
 }
 
+
+/* A vector the CALLER frees, built fresh each call. `count` picks the length
+ * so a program can ask for an empty one, and a negative count answers NULL —
+ * the absent vector, which is a different thing from an empty one. */
+char **nts_cstring_array_made(int32_t count) {
+  if (count < 0) return NULL;
+  char **slots = calloc((size_t)count + 1, sizeof *slots);
+  for (int32_t i = 0; i < count; i++) {
+    slots[i] = malloc(4);
+    snprintf(slots[i], 4, "s%d", i % 10);
+  }
+  slots[count] = NULL;
+  return slots;
+}
+
+/* The disposal the binding names for the vector above. Frees the elements as
+ * well as the vector, which is the shape GIR calls `full` — and the reason
+ * the compiler takes a SYMBOL rather than a policy: a `container` transfer
+ * would name a function that frees only the vector, and nothing else about
+ * the projection would change. */
+void nts_cstring_array_free(void *vector) {
+  char **slots = vector;
+  for (size_t i = 0; slots[i] != NULL; i++) free(slots[i]);
+  free(slots);
+}
+
 /* Answers whether `value` is above `threshold`, and hands back the value it
  * looked at either way — the distinction that makes this shape worth having,
  * since a call that reported absence instead would discard a usable value. */
@@ -488,6 +514,19 @@ int32_t nts_counter_value(NtsCounter *counter) { return counter->value; }
 
 const char *nts_counter_label(NtsCounter *counter) {
   return counter->value == 42 ? "native \xE2\x9C\x93" : NULL;
+}
+
+/* A vector the RECEIVER owns: static storage reached through the counter, so
+ * the caller borrows it and frees nothing. This is the transfer-none shape,
+ * and it is a method rather than a free function because that is the only
+ * shape it takes in practice — a borrowed pointer needs something whose
+ * lifetime bounds it, and for every such member in Gtk-4.0 that is the
+ * receiver. */
+static const char *const nts_counter_tag_vector[] = {"alpha", "beta", "gamma", NULL};
+
+const char *const *nts_counter_tags(NtsCounter *counter) {
+  (void)counter;
+  return nts_counter_tag_vector;
 }
 
 const char *nts_counter_required_label(NtsCounter *counter) {

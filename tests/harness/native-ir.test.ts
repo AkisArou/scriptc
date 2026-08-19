@@ -1578,6 +1578,52 @@ const localNativeInput: NativeFrontendInput = {
       },
     },
     {
+      /* Borrowed: the receiver keeps the vector, so nothing is freed and the
+       * result anchors to the counter exactly as a borrowed string does. */
+      id: "scriptc.fixture.c-v1@0.0.0#counter_tags",
+      declaration: { module: nativePackage, name: "Counter.tags" },
+      entry: { symbol: "nts_counter_tags" },
+      sourceCall: { kind: "method", receiverArgument: 0 },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "counter", type: COUNTER, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
+      ]),
+      result: {
+        type: { kind: "nativePointer", pointee: "ptr", const: true, addressSpace: 0 },
+        passMode: "pointer",
+        ownership: { kind: "borrowed", scope: "receiver", anchor: "counter" },
+        projection: {
+          kind: "utf8CStringArray",
+          nullable: false,
+          release: { kind: "none" },
+        },
+      },
+    },
+    {
+      /* Freed by the caller: the projection consumes the vector, so the
+       * result is a `value` and the symbol that frees it is named on the
+       * projection. A handle's `destructor` names a BINDING instead, which
+       * this could not be — no argument can carry a raw vector. */
+      id: "scriptc.fixture.c-v1@0.0.0#cstring_array_made",
+      declaration: { module: nativePackage, name: "cstringArrayMade" },
+      entry: { symbol: "nts_cstring_array_made" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "count", type: I32, passMode: "value", ownership: { kind: "value" } },
+      ]),
+      result: {
+        type: { kind: "nativePointer", pointee: "ptr", const: false, addressSpace: 0 },
+        passMode: "pointer",
+        ownership: { kind: "value" },
+        projection: {
+          kind: "utf8CStringArray",
+          nullable: true,
+          release: { kind: "symbol", symbol: "nts_cstring_array_free" },
+        },
+      },
+    },
+    {
       id: "scriptc.fixture.c-v1@0.0.0#counter_required_label",
       declaration: { module: nativePackage, name: "Counter.requiredLabel" },
       entry: { symbol: "nts_counter_required_label" },
@@ -3676,6 +3722,42 @@ describe.each(["c", "llvm"] as const)("Native IR checked-number boundary, %s bac
     const releases = generated.split("scr_native_cstring_array_release").length - 1;
     expect(borrows).toBeGreaterThan(0);
     expect(releases).toBeGreaterThan(borrows);
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+
+  localFixtureTest("copies a returned vector out of the callee's storage", async () => {
+    const outDir = join(scratch, `cstring-array-result-${backend}`);
+    const result = await compile(join(repoRoot, "tests/native-ir/cstring-array-result.ts"), {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend,
+      sanitize,
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+      nativeLinkInputs: [fixtureObject(), supportObject()],
+    });
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    const generated = readFileSync(
+      join(outDir, backend === "c" ? "cstring-array-result.c" : "cstring-array-result.ll"),
+      "utf8",
+    );
+    /* The disposal is the symbol the binding names, at exactly the call sites
+     * whose binding names it. Counting it against the owned call itself is
+     * what makes that checkable without pinning a number: both counts include
+     * one declaration, so they cancel, and an emitter that grew a POLICY —
+     * freeing what it decided rather than what it was told — would release
+     * the borrowed vectors too and push the release count above it. The
+     * fixture's borrowed vector is static storage, so that mistake is a crash
+     * rather than a wrong answer, and this catches it before the run does. */
+    const releases = generated.split("nts_cstring_array_free").length - 1;
+    const ownedCalls = generated.split("nts_cstring_array_made").length - 1;
+    expect(releases).toBeGreaterThan(0);
+    expect(releases).toEqual(ownedCalls);
     const run = spawnSync(result.binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
       status: 42,

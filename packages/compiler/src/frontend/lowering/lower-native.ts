@@ -210,6 +210,19 @@ function matchesNativeResultSource(
       ) &&
       handleArms.some((arm) => arm.kind === "nullT");
   }
+  /* A copied vector reads as a plain `string[]`, and a nullable one as the
+   * union with null — the same two shapes a copied string takes, because the
+   * projection differs in what it copies and not in what the program sees. */
+  if (binding.result.projection.kind === "utf8CStringArray") {
+    const isStringArray = (type: IrType): boolean =>
+      type.kind === "array" && type.elem.kind === "string";
+    if (!binding.result.projection.nullable) return isStringArray(mapped);
+    if (mapped.kind !== "union") return false;
+    const vectorArms = L.unions.get(mapped.unionId)?.arms;
+    return vectorArms?.length === 2 &&
+      vectorArms.some(isStringArray) &&
+      vectorArms.some((arm) => arm.kind === "nullT");
+  }
   if (!binding.result.projection.nullable) return mapped.kind === "string";
   if (mapped.kind !== "union") return false;
   const arms = L.unions.get(mapped.unionId)?.arms;

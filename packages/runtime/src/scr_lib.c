@@ -1594,6 +1594,27 @@ void scr_native_cstring_array_release(const char **slots) {
   free((void *)slots);
 }
 
+/* A NUL-terminated vector of C strings copied into a managed `string[]`.
+ *
+ * Copying is what makes the result independent of the callee's storage. Which
+ * storage that is varies — the vector may be the callee's to keep or the
+ * caller's to free, and the elements likewise — and the copy is the same work
+ * for all of them, which is why the disposal is the caller's business here
+ * and not this function's.
+ *
+ * An element cannot be absent: the absent slot IS the terminator. A NULL
+ * VECTOR answers NULL, matching `scr_str_from_c_data` so the caller decides
+ * between an absent value and a contract violation the same way it does for
+ * one string. */
+ScrArr *scr_native_cstring_array_adopt(const char *const *slots) {
+  if (slots == NULL) return NULL;
+  ScrArr *out = scr_arr_new(SCR_ELEM_STR, 0);
+  for (size_t i = 0; slots[i] != NULL; i++) {
+    scr_arr_push_ref(out, scr_str_new(slots[i], strlen(slots[i])));
+  }
+  return out;
+}
+
 void scr_native_throw_null(const char *operation) {
   static const char suffix[] = " returned null";
   size_t cap = strlen(operation) + sizeof suffix;

@@ -1376,6 +1376,13 @@ ScrArr *scr_arr_slice(ScrArr *a, double start, double end);
 const char **scr_native_cstring_array_borrow(ScrArr *a, const char *operation);
 void scr_native_cstring_array_release(const char **slots);
 
+/* The other direction: a NUL-terminated vector the callee produced, copied
+ * into a managed `string[]`. Answers NULL for a NULL vector, so the caller
+ * separates an absent value from a contract violation exactly as it does for
+ * a single string. Disposal of the vector is the caller's, because which
+ * disposal it is comes from the binding rather than from this shape. */
+ScrArr *scr_native_cstring_array_adopt(const char *const *slots);
+
 /* ES2023 copying methods. All borrow their inputs and return fresh +1
  * shallow copies. with() raises Node's catchable RangeError for an invalid
  * relative index; the ref variant retains the borrowed replacement. */

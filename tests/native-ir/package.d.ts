@@ -88,6 +88,8 @@ export interface Counter extends CounterMiddle {
   add(delta: i32): i32;
   label(): string | null;
   requiredLabel(): string;
+  /** A vector the receiver keeps: borrowed, so nothing is freed. */
+  tags(): string[];
   dispose(): void;
 }
 
@@ -218,6 +220,9 @@ export declare function cstringArrayMeasureNamed(
   items: readonly string[],
   name: string,
 ): i32;
+/** A vector the caller owns, freed through the symbol the binding names. A
+ * negative count answers the absent vector, which is not the empty one. */
+export declare function cstringArrayMade(count: i32): string[] | null;
 export declare function answeredAbove(value: i32, threshold: i32): Answered;
 /** What actually landed in the slot, so the write is observable and not only
  * the read. */

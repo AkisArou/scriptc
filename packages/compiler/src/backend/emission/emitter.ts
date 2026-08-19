@@ -856,6 +856,15 @@ export class CEmitter {
             : []),
         );
       }
+      // A copied vector's release is a foreign symbol on the same footing,
+      // and its shape is fixed the same way: it takes the vector and answers
+      // nothing.
+      if (
+        binding.result.projection.kind === "utf8CStringArray" &&
+        binding.result.projection.release.kind === "symbol"
+      ) {
+        out.push(`extern void ${binding.result.projection.release.symbol}(void *);`);
+      }
     }
     if ((this.mod.nativeBindings?.length ?? 0) > 0) out.push("");
     for (const fn of this.mod.functions) out.push(this.signature(fn) + ";");

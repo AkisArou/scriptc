@@ -7903,6 +7903,61 @@ class LlEmitter {
           releaseArguments();
           return { name: "", type: e.type };
         }
+        if (
+          resultForm.kind === "utf8CStringArray" ||
+          resultForm.kind === "utf8CStringArrayOrNull"
+        ) {
+          /* The vector is read before it is disposed of, and disposed of
+           * whatever the read produced: the elements are copied into managed
+           * strings first, so nothing the program keeps points into storage
+           * the release is about to reclaim. */
+          const raw = B.tmp();
+          B.line(`${raw} = ${call}`);
+          this.declare("declare ptr @scr_native_cstring_array_adopt(ptr)");
+          const managed = B.tmp();
+          B.line(`${managed} = call ptr @scr_native_cstring_array_adopt(ptr ${raw})`);
+          if (resultForm.release !== null) {
+            this.declare(`declare void @${resultForm.release}(ptr)`);
+            const present = B.newLabel("native.cstrv.free");
+            const freed = B.newLabel("native.cstrv.freed");
+            const isNull = B.tmp();
+            B.line(`${isNull} = icmp eq ptr ${raw}, null`);
+            B.condBr(isNull, freed, present);
+            B.startBlock(present);
+            B.line(`call void @${resultForm.release}(ptr ${raw})`);
+            B.br(freed);
+            B.startBlock(freed);
+          }
+          const elem = { kind: "array", elem: STRING } as const;
+          if (resultForm.kind === "utf8CStringArrayOrNull") {
+            const { arrayTag, nullTag, unionId } = resultForm;
+            const value = this.wrapNullable(
+              raw,
+              managed,
+              elem,
+              arrayTag,
+              { kind: "union", unionId },
+              nullTag,
+            );
+            if (callbacksMayThrow) this.emitPendingCheck();
+            releaseArguments();
+            return value;
+          }
+          const value = this.own({ name: managed, type: e.type });
+          const isNull = B.tmp();
+          const throwBlock = B.newLabel("native.cstrv.throw");
+          const continuation = B.newLabel("native.cstrv.ok");
+          B.line(`${isNull} = icmp eq ptr ${managed}, null`);
+          B.condBr(isNull, throwBlock, continuation);
+          B.startBlock(throwBlock);
+          this.declare("declare void @scr_native_throw_null(ptr)");
+          B.line(`call void @scr_native_throw_null(ptr ${operation})`);
+          B.br(continuation);
+          B.startBlock(continuation);
+          this.emitPendingCheck();
+          releaseArguments();
+          return value;
+        }
         if (resultForm.kind === "utf8CString" || resultForm.kind === "utf8CStringOrNull") {
           const raw = B.tmp();
           B.line(`${raw} = ${call}`);

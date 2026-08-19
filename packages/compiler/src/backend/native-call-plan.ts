@@ -67,6 +67,19 @@ export type NativeResultForm =
     }
   /** A borrowed C string copied into a managed `string`. */
   | { readonly kind: "utf8CString" }
+  /** A NUL-terminated vector of C strings copied into a managed `string[]`.
+   * `release` is what the vector needs afterwards, or null when it needs
+   * nothing — one field, because whether the elements are the caller's too is
+   * expressed by WHICH symbol frees the vector and not by this compiler. */
+  | { readonly kind: "utf8CStringArray"; readonly release: string | null }
+  /** The same, where the callee may answer with NULL and absence is a value. */
+  | {
+      readonly kind: "utf8CStringArrayOrNull";
+      readonly release: string | null;
+      readonly unionId: string;
+      readonly arrayTag: number;
+      readonly nullTag: number;
+    }
   /** The same, where the callee may answer with NULL and absence is a value. */
   | {
       readonly kind: "utf8CStringOrNull";
@@ -172,6 +185,31 @@ export function nativeResultForm(
       fail("nullable C-string result lacks string/null arms");
     }
     return { kind: "utf8CStringOrNull", unionId, stringTag, nullTag };
+  }
+
+  if (projection.kind === "utf8CStringArray") {
+    /* A symbol rather than a binding, unlike a handle's destructor: the
+     * vector is consumed inside this projection and never becomes a program
+     * value, so there is nothing for a callable to take. */
+    const release = projection.release.kind === "symbol" ? projection.release.symbol : null;
+    if (!projection.nullable) {
+      if (sourceType.kind !== "array" || sourceType.elem.kind !== "string") {
+        fail("non-null C-string-array result is not a string array");
+      }
+      return { kind: "utf8CStringArray", release };
+    }
+    if (sourceType.kind !== "union") fail("nullable C-string-array result is not a union");
+    const unionId = (sourceType as { readonly unionId: string }).unionId;
+    const arms = tables.unionsById.get(unionId)?.arms;
+    const arrayTag = armTag(
+      arms,
+      (arm) => arm.kind === "array" && arm.elem.kind === "string",
+    );
+    const nullTag = armTag(arms, (arm) => arm.kind === "nullT");
+    if (arrayTag < 0 || nullTag < 0) {
+      fail("nullable C-string-array result lacks array/null arms");
+    }
+    return { kind: "utf8CStringArrayOrNull", release, unionId, arrayTag, nullTag };
   }
 
   if (projection.kind === "boolean") {
