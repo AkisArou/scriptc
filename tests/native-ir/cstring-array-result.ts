@@ -11,8 +11,9 @@
  * audit runs from an atexit handler without unwinding module scope.
  */
 import {
-  cstringArrayMade,
   createCounter,
+  cstringArrayMade,
+  cstringMade,
   type i32,
 } from "@scriptc/native-abi-fixture";
 import { exit } from "scriptc-native-test";
@@ -59,6 +60,19 @@ function check(): number {
   /* Absent is not empty. A negative count answers NULL, and the projection
    * says so as a value rather than as a failure. */
   ok(cstringArrayMade(-1 as i32) === null);
+
+  /* One element instead of many, and the same question afterwards: the bytes
+   * are copied into managed storage, then the pointer is freed through the
+   * symbol the binding names. What survives cannot point into what is gone. */
+  const owned = cstringMade(4 as i32);
+  ok(owned === "abcd");
+  ok(cstringMade(0 as i32) === "");
+  ok(cstringMade(-1 as i32) === null);
+  /* Held past several more calls, so a use-after-free would have something to
+   * land on rather than reading storage nothing else has claimed yet. */
+  const held = cstringMade(6 as i32);
+  for (let i = 0; i < 8; i = i + 1) cstringMade(12 as i32);
+  ok(held === "abcdef");
 
   /* Read it enough times that a leaked vector or a double free would be a
    * pattern rather than a coincidence — the sanitized lane is what sees it. */

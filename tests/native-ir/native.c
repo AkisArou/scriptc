@@ -163,6 +163,22 @@ int32_t nts_cstring_array_measure_named(const char **items, const char *name) {
 }
 
 
+/* A string the CALLER frees, built fresh each call. `count` picks the length
+ * so a program can ask for an empty one, and a negative count answers NULL. */
+char *nts_cstring_made(int32_t count) {
+  if (count < 0) return NULL;
+  char *text = malloc((size_t)count + 1);
+  for (int32_t i = 0; i < count; i++) text[i] = (char)('a' + (i % 26));
+  text[count] = '\0';
+  return text;
+}
+
+/* The disposal the binding names for the string above. A plain free, which is
+ * the shape almost every SDK uses for an owned string — and still a SYMBOL
+ * rather than a policy, because an SDK with a pool allocator names a
+ * different one and nothing else about the projection changes. */
+void nts_cstring_free(void *text) { free(text); }
+
 /* A vector the CALLER frees, built fresh each call. `count` picks the length
  * so a program can ask for an empty one, and a negative count answers NULL —
  * the absent vector, which is a different thing from an empty one. */

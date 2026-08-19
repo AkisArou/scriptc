@@ -417,7 +417,14 @@ export type IrNativeResultProjection =
    * Lossless for every representable value, so there is no failure path and
    * validation requires the no-fail error contract. */
   | { kind: "number" }
-  | { kind: "utf8CString"; nullable: boolean }
+  /** A C string copied into a managed `string`.
+   *
+   * `release` is what the pointer needs once the copy is made, exactly as it
+   * is for a vector: absent where the callee keeps the storage, and a named
+   * symbol where the caller must free it. The two projections share the
+   * field because they share the question — an owned `char *` and an owned
+   * `char **` differ in what is copied, not in what happens afterwards. */
+  | { kind: "utf8CString"; nullable: boolean; release: IrNativeRelease }
   /** A NUL-terminated vector of C strings copied into a managed `string[]`.
    *
    * Copying is what makes the result independent of the callee's storage,

@@ -8001,6 +8001,21 @@ class LlEmitter {
           this.declare("declare ptr @scr_str_from_c_data(ptr)");
           const managed = B.tmp();
           B.line(`${managed} = call ptr @scr_str_from_c_data(ptr ${raw})`);
+          if (resultForm.release !== null) {
+            /* Copied first, then freed: the managed string owns its own bytes
+             * by now, so nothing that survives points into storage the
+             * release is about to reclaim. */
+            this.declare(`declare void @${resultForm.release}(ptr)`);
+            const owned = B.newLabel("native.cstr.free");
+            const freed = B.newLabel("native.cstr.freed");
+            const wasNull = B.tmp();
+            B.line(`${wasNull} = icmp eq ptr ${raw}, null`);
+            B.condBr(wasNull, freed, owned);
+            B.startBlock(owned);
+            B.line(`call void @${resultForm.release}(ptr ${raw})`);
+            B.br(freed);
+            B.startBlock(freed);
+          }
           if (resultForm.kind === "utf8CStringOrNull") {
             const { stringTag, nullTag, unionId } = resultForm;
             const value = this.wrapNullable(

@@ -2639,7 +2639,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       | { kind: "direct" }
       | { kind: "boolean"; conversion?: unknown; falseValue?: unknown; trueValue?: unknown }
       | { kind: "number" }
-      | { kind: "utf8CString"; nullable?: unknown }
+      | { kind: "utf8CString"; nullable?: unknown; release?: unknown }
       | { kind: "utf8CStringArray"; nullable?: unknown; release?: unknown }
       | { kind: "nullableHandle" }
       | { kind: "errorChannel" }
@@ -2754,14 +2754,40 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         (argument) =>
           ownership.kind === "borrowed" && argument.name === ownership.anchor,
       );
+      const release = resultProjection.release as
+        | { kind?: unknown; symbol?: unknown }
+        | undefined;
+      const releaseValid =
+        release?.kind === "none" ||
+        (release?.kind === "symbol" &&
+          typeof release.symbol === "string" &&
+          release.symbol.length > 0);
+      /* Ownership is pinned to the release exactly as a vector result's is,
+       * and for the same reason: they state one fact about one pointer. A
+       * string nothing frees is borrowed from the receiver whose lifetime
+       * bounds the copy; one something frees is a `value`, consumed by the
+       * projection.
+       *
+       * Constness is checked for AGREEMENT with that, not read as it. A slot
+       * the callee keeps is `const char *`, and a manifest calling it mutable
+       * has described a pointer the caller could write through into storage
+       * it does not own. An owned slot is spelled either way by different
+       * SDKs, so nothing is required of it — the release already said what
+       * matters. */
+      const ownershipValid = release?.kind === "none"
+        ? ownership.kind === "borrowed" &&
+          ownership.scope === "receiver" &&
+          anchor?.type.kind === "nativeHandle" &&
+          binding.result.type.kind === "nativePointer" &&
+          binding.result.type.const
+        : ownership.kind === "value";
       if (
         binding.result.type.kind !== "nativePointer" ||
         !validNativePointer(binding.result.type) ||
-        binding.result.type.const !== true ||
+        binding.result.type.pointee === "ptr" ||
         binding.result.passMode !== "pointer" ||
-        ownership.kind !== "borrowed" ||
-        ownership.scope !== "receiver" ||
-        anchor?.type.kind !== "nativeHandle" ||
+        !releaseValid ||
+        !ownershipValid ||
         nativeFailureReadsResult(binding.error.detect) ||
         typeof resultProjection.nullable !== "boolean"
       ) {
@@ -2772,11 +2798,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       }
     } else if (resultProjection?.kind === "utf8CStringArray") {
       /* The slot is `char **` — a pointer to the vector's element type, which
-       * is itself a pointer to bytes. Its `const` is deliberately unchecked:
-       * an SDK that hands over ownership spells the same vector `char **` and
-       * one that keeps it spells it `const char *const *`, and the ownership
-       * below is what distinguishes them. Reading constness as ownership
-       * would be inferring a lifetime from a spelling. */
+       * is itself a pointer to bytes. */
       const ownership = binding.result.ownership;
       const anchor = binding.arguments.find(
         (argument) =>
@@ -2797,12 +2819,21 @@ export function validateModule(mod: IrModule): IrValidationError[] {
        * frees is a `value`: the projection consumes it, and nothing the
        * program holds outlives this call because of it. `owned` is neither,
        * and would claim a destructor BINDING that cannot exist for a pointer
-       * no argument can carry. */
+       * no argument can carry.
+       *
+       * Constness is checked for AGREEMENT with that, not read as it: a
+       * vector the callee keeps is const, and a manifest calling it mutable
+       * has described a pointer the caller could write through into storage
+       * it does not own. An owned one is spelled either way by different
+       * SDKs, so nothing is required of it — the release already said what
+       * matters. */
       const ownershipValid =
         release?.kind === "none"
           ? ownership.kind === "borrowed" &&
             ownership.scope === "receiver" &&
-            anchor?.type.kind === "nativeHandle"
+            anchor?.type.kind === "nativeHandle" &&
+            binding.result.type.kind === "nativePointer" &&
+            binding.result.type.const
           : ownership.kind === "value";
       if (
         binding.result.type.kind !== "nativePointer" ||

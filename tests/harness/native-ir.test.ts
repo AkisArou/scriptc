@@ -1597,7 +1597,7 @@ const localNativeInput: NativeFrontendInput = {
         type: { kind: "nativePointer", pointee: "i8", const: true, addressSpace: 0 },
         passMode: "pointer",
         ownership: { kind: "borrowed", scope: "receiver", anchor: "counter" },
-        projection: { kind: "utf8CString", nullable: true },
+        projection: { kind: "utf8CString", nullable: true, release: { kind: "none" } },
       },
     },
     {
@@ -1619,6 +1619,28 @@ const localNativeInput: NativeFrontendInput = {
           kind: "utf8CStringArray",
           nullable: false,
           release: { kind: "none" },
+        },
+      },
+    },
+    {
+      /* Freed by the caller once its bytes are copied. Same field, same
+       * question as the vector below — one element instead of many. */
+      id: "scriptc.fixture.c-v1@0.0.0#cstring_made",
+      declaration: { module: nativePackage, name: "cstringMade" },
+      entry: { symbol: "nts_cstring_made" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "count", type: I32, passMode: "value", ownership: { kind: "value" } },
+      ]),
+      result: {
+        type: { kind: "nativePointer", pointee: "i8", const: false, addressSpace: 0 },
+        passMode: "pointer",
+        ownership: { kind: "value" },
+        projection: {
+          kind: "utf8CString",
+          nullable: true,
+          release: { kind: "symbol", symbol: "nts_cstring_free" },
         },
       },
     },
@@ -1659,7 +1681,7 @@ const localNativeInput: NativeFrontendInput = {
         type: { kind: "nativePointer", pointee: "i8", const: true, addressSpace: 0 },
         passMode: "pointer",
         ownership: { kind: "borrowed", scope: "receiver", anchor: "counter" },
-        projection: { kind: "utf8CString", nullable: false },
+        projection: { kind: "utf8CString", nullable: false, release: { kind: "none" } },
       },
     },
     {
@@ -4228,7 +4250,7 @@ describe.each(["c", "llvm"] as const)("Native IR borrowed UTF-8 C-string results
           type: { kind: "nativePointer", pointee: "i8", const: true, addressSpace: 0 },
           passMode: "pointer",
           ownership: { kind: "borrowed", scope: "receiver", anchor: "counter" },
-          projection: { kind: "utf8CString", nullable: true },
+          projection: { kind: "utf8CString", nullable: true, release: { kind: "none" } },
         },
       }),
     );

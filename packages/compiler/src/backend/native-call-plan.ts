@@ -65,8 +65,10 @@ export type NativeResultForm =
       readonly message: string;
       readonly release: string;
     }
-  /** A borrowed C string copied into a managed `string`. */
-  | { readonly kind: "utf8CString" }
+  /** A C string copied into a managed `string`. `release` is what the pointer
+   * needs afterwards, or null when it needs nothing — the same field a vector
+   * result carries, because it is the same question. */
+  | { readonly kind: "utf8CString"; readonly release: string | null }
   /** A NUL-terminated vector of C strings copied into a managed `string[]`.
    * `release` is what the vector needs afterwards, or null when it needs
    * nothing — one field, because whether the elements are the caller's too is
@@ -83,6 +85,7 @@ export type NativeResultForm =
   /** The same, where the callee may answer with NULL and absence is a value. */
   | {
       readonly kind: "utf8CStringOrNull";
+      readonly release: string | null;
       readonly unionId: string;
       readonly stringTag: number;
       readonly nullTag: number;
@@ -172,9 +175,10 @@ export function nativeResultForm(
   }
 
   if (projection.kind === "utf8CString") {
+    const release = projection.release.kind === "symbol" ? projection.release.symbol : null;
     if (!projection.nullable) {
       if (sourceType.kind !== "string") fail("non-null C-string result is not a string");
-      return { kind: "utf8CString" };
+      return { kind: "utf8CString", release };
     }
     if (sourceType.kind !== "union") fail("nullable C-string result is not a union");
     const unionId = (sourceType as { readonly unionId: string }).unionId;
@@ -184,7 +188,7 @@ export function nativeResultForm(
     if (stringTag < 0 || nullTag < 0) {
       fail("nullable C-string result lacks string/null arms");
     }
-    return { kind: "utf8CStringOrNull", unionId, stringTag, nullTag };
+    return { kind: "utf8CStringOrNull", release, unionId, stringTag, nullTag };
   }
 
   if (projection.kind === "utf8CStringArray") {

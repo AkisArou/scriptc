@@ -1065,7 +1065,7 @@ export type {
 };
 
 /** Current wire-format version for every producer and consumer of Native IR. */
-export const IR_VERSION = 38 as const;
+export const IR_VERSION = 39 as const;
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */

@@ -225,6 +225,9 @@ export declare function cstringArrayMeasureNamed(
   items: readonly string[],
   name: string,
 ): i32;
+/** A string the caller owns, freed through the symbol the binding names once
+ * its bytes have been copied. A negative count answers null. */
+export declare function cstringMade(count: i32): string | null;
 /** A vector the caller owns, freed through the symbol the binding names. A
  * negative count answers the absent vector, which is not the empty one. */
 export declare function cstringArrayMade(count: i32): string[] | null;

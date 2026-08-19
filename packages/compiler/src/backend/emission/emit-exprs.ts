@@ -2748,6 +2748,12 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           const managed = `sc_t${E.tempCounter++}`;
           E.line(`const char *${raw} = ${call};${E.srcComment(e.loc)}`);
           E.line(`ScrStr *${managed} = scr_str_from_c_data(${raw});`);
+          if (resultForm.release !== null) {
+            /* Copied first, then freed: the managed string owns its own bytes
+             * by now, so nothing that survives points into storage the
+             * release is about to reclaim. */
+            E.line(`if (${raw} != NULL) ${resultForm.release}((void *)${raw});`);
+          }
           if (resultForm.kind === "utf8CStringOrNull") {
             const { stringTag, nullTag } = resultForm;
             const adapters = vAdapters(STRING);
