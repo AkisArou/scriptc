@@ -363,6 +363,25 @@ export interface NativeCallLifecycle {
   readonly teardown: readonly NativeCallTeardown[];
   /** Handle arguments that own a registration made by this call. */
   readonly registrationOwnerArguments: ReadonlySet<number>;
+  /**
+   * The one handle argument a registration made here is owned by, or null.
+   *
+   * At most one, because the registration is owned by the RESULT and a result
+   * has one owner; two would be two answers to the same question. Both
+   * backends checked that separately, which is the shape this whole module
+   * exists to stop.
+   */
+  readonly registrationOwner: number | null;
+  /**
+   * The handle whose callbacks this call ends, resolved and checked.
+   *
+   * A cancellation binding runs while the object it names is still alive and
+   * answers nothing, so its argument must be a handle and its result void.
+   */
+  readonly cancellation: {
+    readonly argument: number;
+    readonly typeId: string;
+  } | null;
 }
 
 /**
@@ -384,6 +403,10 @@ export interface NativeCallLifecycle {
 export function nativeCallLifecycle(
   binding: IrNativeBinding,
   adapterFor: (bindingId: string, argument: number) => NativeCallbackAdapter,
+  /** Every binding in the module, so a cancellation can be recognised by the
+   * registration that names it. Omitted where the caller has already resolved
+   * the cancellation itself. */
+  moduleBindings: readonly IrNativeBinding[] = [],
 ): NativeCallLifecycle {
   const setup: NativeCallSetup[] = [];
   const lends: NativeCallLend[] = [];
@@ -459,5 +482,39 @@ export function nativeCallLifecycle(
     ],
     lends,
     registrationOwnerArguments,
+    registrationOwner: resolveRegistrationOwner(binding, registrationOwnerArguments),
+    cancellation: resolveCancellation(binding, moduleBindings),
   };
+}
+
+/** A registration owned by more than one argument is two answers to one
+ * question. Both backends asked it; now neither does. */
+function resolveRegistrationOwner(
+  binding: IrNativeBinding,
+  owners: ReadonlySet<number>,
+): number | null {
+  if (owners.size > 1) {
+    throw new Error(
+      `emitter bug: conflicting retained callback owners in ${binding.id}`,
+    );
+  }
+  return owners.values().next().value ?? null;
+}
+
+/** The handle whose callbacks this binding ends, checked against what a
+ * cancellation can be: it runs while the object is alive, so it takes a
+ * handle, and it answers nothing, so its result is void. */
+function resolveCancellation(
+  binding: IrNativeBinding,
+  moduleBindings: readonly IrNativeBinding[],
+): NativeCallLifecycle["cancellation"] {
+  const argument = nativeCallbackCancellationArgument(moduleBindings, binding);
+  if (argument === undefined) return null;
+  const type = binding.arguments[argument]?.type;
+  if (type?.kind !== "nativeHandle" || binding.result.type.kind !== "void") {
+    throw new Error(
+      `emitter bug: invalid callback cancellation binding ${binding.id}`,
+    );
+  }
+  return { argument, typeId: type.typeId };
 }

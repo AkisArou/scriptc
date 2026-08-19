@@ -10,7 +10,7 @@ import { dynDestrCheckHelper, dynIterNHelper, dynKeyGetHelper } from "./emit-wal
 import { genResultThunkFor } from "./emit-async.js";
 import { nativeCallbackCancellationArgument } from "../native-callbacks.js";
 import { nativeCallLifecycle } from "../native-callbacks.js";
-import { nativeArgumentForm, nativeFailureForm, nativeResultForm, type NativeArgumentFormExhausted } from "../native-call-plan.js";
+import { nativeArgumentForm, nativeCallDisposal, nativeFailureForm, nativeResultForm, type NativeArgumentFormExhausted } from "../native-call-plan.js";
 
 function streamTypedRefCommitAdapter(
   E: CEmitter,
@@ -2266,8 +2266,8 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         const lifecycle = nativeCallLifecycle(
           binding,
           (bindingId, argument) => E.nativeCallbackAdapter(bindingId, argument),
+          E.mod.nativeBindings ?? [],
         );
-        const retainedOwnerArguments = lifecycle.registrationOwnerArguments;
         /* What the result becomes, resolved and checked once rather than by a
          * ladder each backend maintains. Every arm below reads what it needs
          * off this and asks the contract nothing. */
@@ -2318,20 +2318,14 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
          * own symbol is the destructor the cell already holds. Any other
          * binding that takes an owned handle is an ordinary call that happens
          * to consume one, and it is emitted as one. */
-        const ownedParameter = E.nativeDestructorBindings.has(binding.id)
-          ? binding.parameters.findIndex(
-            (parameter) => parameter.ownership.kind === "owned",
-          )
-          : -1;
-        if (ownedParameter >= 0) {
-          const parameter = binding.parameters[ownedParameter]!;
-          if (parameter.type.kind !== "nativeHandle" || parameter.projection.kind !== "argument") {
-            throw new Error(`emitter bug: owned non-handle parameter in ${binding.id}`);
-          }
-          const arg = args[parameter.projection.argument]!;
+        const disposal = nativeCallDisposal(
+          binding,
+          E.nativeDestructorBindings.has(binding.id),
+        );
+        if (disposal !== null) {
           E.line(
-            `scr_native_handle_dispose(${arg.name}, ` +
-              `&${mangleNativeHandleTag(parameter.type.typeId)}, ${operation});${E.srcComment(e.loc)}`,
+            `scr_native_handle_dispose(${args[disposal.argument]!.name}, ` +
+              `&${mangleNativeHandleTag(disposal.typeId)}, ${operation});${E.srcComment(e.loc)}`,
           );
           E.emitPendingCheck();
           releaseArguments();
@@ -2515,21 +2509,14 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
            * switch with no argument produced. Both backends carry this line. */
           return form satisfies NativeArgumentFormExhausted;
         });
-        const cancellationArgument = nativeCallbackCancellationArgument(
-          E.mod.nativeBindings ?? [],
-          binding,
-        );
+        const cancellation = lifecycle.cancellation;
         let cancellationStarted: string | undefined;
-        if (cancellationArgument !== undefined) {
-          const source = args[cancellationArgument]!;
-          const type = binding.arguments[cancellationArgument]?.type;
-          if (type?.kind !== "nativeHandle" || binding.result.type.kind !== "void") {
-            throw new Error(`emitter bug: invalid callback cancellation binding ${binding.id}`);
-          }
+        if (cancellation !== null) {
           cancellationStarted = `sc_t${E.tempCounter++}`;
           E.line(
             `bool ${cancellationStarted} = scr_native_handle_callbacks_begin(` +
-              `${source.name}, &${mangleNativeHandleTag(type.typeId)}, ${operation});`,
+              `${args[cancellation.argument]!.name}, ` +
+              `&${mangleNativeHandleTag(cancellation.typeId)}, ${operation});`,
           );
           E.emitPendingCheck();
         }
@@ -2614,7 +2601,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           if (cancellationStarted !== undefined) {
             E.line(
               `if (${cancellationStarted}) ` +
-                `scr_native_handle_callbacks_complete(${args[cancellationArgument!]!.name});`,
+                `scr_native_handle_callbacks_complete(${args[cancellation!.argument]!.name});`,
             );
           }
           if (callbacksMayThrow) E.emitPendingCheck();
@@ -2774,11 +2761,8 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               `&${destructor}, &${mangleNativeHandleTag(definition.id)}, ` +
               `${cStringLiteral(Buffer.from(definition.nativeName, "utf8"))});`,
           );
-          if (retainedOwnerArguments.size > 1) {
-            throw new Error(`emitter bug: conflicting retained callback owners in ${binding.id}`);
-          }
-          const retainedOwnerArgument = retainedOwnerArguments.values().next().value;
-          if (retainedOwnerArgument !== undefined) {
+          const retainedOwnerArgument = lifecycle.registrationOwner;
+          if (retainedOwnerArgument !== null) {
             E.line(
               `scr_native_handle_prepare_owner(${prepared}, ` +
                 `${args[retainedOwnerArgument]!.name});`,

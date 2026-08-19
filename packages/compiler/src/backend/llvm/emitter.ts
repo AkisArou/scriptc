@@ -90,7 +90,7 @@ import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, islandPr
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
 import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, nativeCallLifecycle, nativeCallbackPayloads, nativeTrampolineForm, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
-import { nativeArgumentForm, nativeFailureForm, nativeResultForm, type NativeArgumentFormExhausted } from "../native-call-plan.js";
+import { nativeArgumentForm, nativeCallDisposal, nativeFailureForm, nativeResultForm, type NativeArgumentFormExhausted } from "../native-call-plan.js";
 import { computeMayThrow } from "../emission/may-throw.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleNativeHandleTag, mangleNativeStruct, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
@@ -7174,8 +7174,8 @@ class LlEmitter {
         const lifecycle = nativeCallLifecycle(
           binding,
           (bindingId, argument) => this.nativeCallbackAdapter(bindingId, argument),
+          this.mod.nativeBindings ?? [],
         );
-        const retainedOwnerArguments = lifecycle.registrationOwnerArguments;
         /* What the result becomes, resolved and checked once rather than by a
          * ladder each backend maintains. Every arm below reads what it needs
          * off this and asks the contract nothing. */
@@ -7240,21 +7240,15 @@ class LlEmitter {
          * own symbol is the destructor the cell already holds. Any other
          * binding that takes an owned handle is an ordinary call that happens
          * to consume one. Kept in lockstep with the C backend. */
-        const ownedParameter = this.nativeDestructorBindings.has(binding.id)
-          ? binding.parameters.findIndex(
-            (parameter) => parameter.ownership.kind === "owned",
-          )
-          : -1;
-        if (ownedParameter >= 0) {
-          const parameter = binding.parameters[ownedParameter]!;
-          if (parameter.type.kind !== "nativeHandle" || parameter.projection.kind !== "argument") {
-            throw new Error(`llvm emitter bug: owned non-handle parameter in ${binding.id}`);
-          }
-          const arg = args[parameter.projection.argument]!;
+        const disposal = nativeCallDisposal(
+          binding,
+          this.nativeDestructorBindings.has(binding.id),
+        );
+        if (disposal !== null) {
           this.declare(`declare void @scr_native_handle_dispose(ptr, ptr, ptr)`);
           B.line(
-            `call void @scr_native_handle_dispose(ptr ${arg.name}, ` +
-              `ptr @${mangleNativeHandleTag(parameter.type.typeId)}, ptr ${operation})`,
+            `call void @scr_native_handle_dispose(ptr ${args[disposal.argument]!.name}, ` +
+              `ptr @${mangleNativeHandleTag(disposal.typeId)}, ptr ${operation})`,
           );
           this.emitPendingCheck();
           releaseArguments();
@@ -7631,22 +7625,15 @@ class LlEmitter {
            * `NativeArgumentForm` and forgotten here stops this compiling. */
           form satisfies NativeArgumentFormExhausted;
         });
-        const cancellationArgument = nativeCallbackCancellationArgument(
-          this.mod.nativeBindings ?? [],
-          binding,
-        );
+        const cancellation = lifecycle.cancellation;
         let cancellationStarted: string | undefined;
-        if (cancellationArgument !== undefined) {
-          const source = args[cancellationArgument]!;
-          const type = binding.arguments[cancellationArgument]?.type;
-          if (type?.kind !== "nativeHandle" || binding.result.type.kind !== "void") {
-            throw new Error(`llvm emitter bug: invalid callback cancellation binding ${binding.id}`);
-          }
+        if (cancellation !== null) {
           this.declare(`declare zeroext i1 @scr_native_handle_callbacks_begin(ptr, ptr, ptr)`);
           cancellationStarted = B.tmp();
           B.line(
             `${cancellationStarted} = call zeroext i1 @scr_native_handle_callbacks_begin(` +
-              `ptr ${source.name}, ptr @${mangleNativeHandleTag(type.typeId)}, ptr ${operation})`,
+              `ptr ${args[cancellation.argument]!.name}, ` +
+              `ptr @${mangleNativeHandleTag(cancellation.typeId)}, ptr ${operation})`,
           );
           this.emitPendingCheck();
         }
@@ -7805,7 +7792,7 @@ class LlEmitter {
             B.startBlock(complete);
             B.line(
               `call void @scr_native_handle_callbacks_complete(` +
-                `ptr ${args[cancellationArgument!]!.name})`,
+                `ptr ${args[cancellation!.argument]!.name})`,
             );
             B.br(done);
             B.startBlock(done);
@@ -8053,11 +8040,8 @@ class LlEmitter {
               `ptr @${destructor}, ptr @${mangleNativeHandleTag(definition.id)}, ` +
               `ptr ${this.cstr(definition.nativeName)})`,
           );
-          if (retainedOwnerArguments.size > 1) {
-            throw new Error(`llvm emitter bug: conflicting retained callback owners in ${binding.id}`);
-          }
-          const retainedOwnerArgument = retainedOwnerArguments.values().next().value;
-          if (retainedOwnerArgument !== undefined) {
+          const retainedOwnerArgument = lifecycle.registrationOwner;
+          if (retainedOwnerArgument !== null) {
             this.declare(`declare void @scr_native_handle_prepare_owner(ptr, ptr)`);
             B.line(
               `call void @scr_native_handle_prepare_owner(` +

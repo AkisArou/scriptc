@@ -555,3 +555,33 @@ export function nativeFailureForm(binding: IrNativeBinding): NativeFailureForm {
 
   return { kind: "none" };
 }
+
+/**
+ * The one shape a native call takes that is not a call at all.
+ *
+ * A binding a handle type names as its destructor is reached two ways: the
+ * runtime calls it during teardown, holding the symbol as data, and a program
+ * calls it directly as `dispose()`. The second is not an ordinary call — it
+ * must run the cell's whole teardown, not just the symbol — so the emitters
+ * branch to a disposal before building any arguments.
+ *
+ * Every other binding that merely CONSUMES an owned handle is an ordinary call
+ * that happens to take one, and is emitted as one. Being a destructor is what
+ * makes the difference, which is why `isDestructor` is the caller's answer:
+ * only the module knows which types named which bindings.
+ */
+export function nativeCallDisposal(
+  binding: IrNativeBinding,
+  isDestructor: boolean,
+): { readonly argument: number; readonly typeId: string } | null {
+  if (!isDestructor) return null;
+  const index = binding.parameters.findIndex(
+    (parameter) => parameter.ownership.kind === "owned",
+  );
+  if (index < 0) return null;
+  const parameter = binding.parameters[index]!;
+  if (parameter.type.kind !== "nativeHandle" || parameter.projection.kind !== "argument") {
+    throw new NativeCallPlanError(binding.id, "owned non-handle parameter");
+  }
+  return { argument: parameter.projection.argument, typeId: parameter.type.typeId };
+}
