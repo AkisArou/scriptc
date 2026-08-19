@@ -582,3 +582,203 @@ export interface IrNativeExport {
     release: { kind: "none" };
   };
 }
+
+/* ── the document an embedder hands over ─────────────────────────────────
+ *
+ * Everything above describes ONE value or ONE binding. These describe the
+ * whole document: the bindings, the types they reference, the source
+ * identities they attach to, and the ABI facts the generic ones are resolved
+ * against. `NativeFrontendInput` is the format — the rest of this module is
+ * what it is made of.
+ */
+
+/** One exported TypeScript declaration that denotes an exact Native IR value.
+ * Source spelling is never used as evidence: the frontend resolves this
+ * module/name pair to the checker's declaration symbol. */
+export interface NativeSourceType {
+  readonly declaration: {
+    readonly module: string;
+    readonly name: string;
+  };
+  readonly type: Readonly<IrNativeValueType>;
+}
+
+export interface NativeFrontendConstant {
+  readonly id: string;
+  readonly declaration: {
+    readonly module: string;
+    readonly name: string;
+  };
+  readonly type: Readonly<IrNativeScalarType>;
+  readonly value: string;
+}
+
+/** One source-level operation on an exact scalar, supplied by the embedder.
+ * None has a native symbol or a runtime module value: the frontend resolves
+ * the checked declaration identity and lowers reached calls directly to
+ * Native IR.
+ *
+ * `integer-reduce` folds a variadic argument list with one wrapping operator
+ * (a flags `combine`). `to-number` and `from-number` are the conversions
+ * between an exact scalar and an ordinary number; they are operations rather
+ * than operators because no syntax names a direction, and named rather than
+ * spelled `Number(v)` because JavaScript's conversion rounds silently where
+ * this one refuses. Every arithmetic operation is an operator expression
+ * inside a construction instead. */
+export type NativeFrontendOperation =
+  | {
+      readonly id: string;
+      readonly declaration: {
+        readonly module: string;
+        readonly name: string;
+      };
+      readonly kind: "integer-reduce";
+      readonly operator: "&" | "|" | "^";
+      readonly type: Readonly<IrNativeScalarType>;
+    }
+  | {
+      readonly id: string;
+      readonly declaration: {
+        readonly module: string;
+        readonly name: string;
+      };
+      readonly kind: "to-number";
+      readonly type: Readonly<IrNativeScalarType>;
+    }
+  | {
+      readonly id: string;
+      readonly declaration: {
+        readonly module: string;
+        readonly name: string;
+      };
+      readonly kind: "from-number";
+      readonly type: Readonly<IrNativeScalarType>;
+    };
+
+export type NativeStructDefinition = Readonly<
+  Omit<IrNativeStructDef, "fields"> & {
+    readonly fields: readonly Readonly<IrNativeStructDef["fields"][number]>[];
+  }
+>;
+
+export type NativeHandleDefinition = Readonly<
+  Omit<IrNativeHandleDef, "upcasts"> & {
+    readonly upcasts: readonly Readonly<IrNativeHandleDef["upcasts"][number]>[];
+  }
+>;
+
+export type NativeTypeDefinition = NativeStructDefinition | NativeHandleDefinition;
+
+export interface NativeFrontendBinding {
+  readonly id: string;
+  readonly declaration: {
+    readonly module: string;
+    readonly name: string;
+  };
+  readonly entry: {
+    readonly kind: "c-symbol";
+    readonly symbol: string;
+  };
+  readonly error:
+    Readonly<IrNativeErrorContract>;
+  readonly sourceCall:
+    | { readonly kind: "function" }
+    | { readonly kind: "constructor" }
+    | { readonly kind: "method"; readonly receiverArgument: number }
+    | { readonly kind: "getter"; readonly receiverArgument: number }
+    | {
+        readonly kind: "setter";
+        readonly receiverArgument: number;
+        readonly valueArgument: number;
+      };
+  readonly arguments: readonly {
+    readonly name: string;
+    readonly type: Readonly<IrNativeArgumentType>;
+    readonly callback?: Readonly<IrNativeCallbackContract>;
+  }[];
+  readonly parameters: readonly {
+    readonly name: string;
+    readonly type: Readonly<IrNativeAbiType>;
+    readonly passMode: "value" | "pointer";
+    readonly ownership:
+      | { readonly kind: "value" }
+      | { readonly kind: "borrowed"; readonly scope: "call" }
+      | { readonly kind: "owned"; readonly transfer: "to-native" }
+      | { readonly kind: "callback" };
+    readonly projection: Readonly<IrNativeParameterProjection>;
+  }[];
+  readonly result: {
+    readonly type: Readonly<IrNativeResultAbiType>;
+    readonly passMode: "value" | "pointer";
+    readonly ownership:
+      | { readonly kind: "value" }
+      | {
+          readonly kind: "borrowed";
+          readonly scope: "receiver";
+          readonly anchor: string;
+        }
+      | {
+          readonly kind: "owned";
+          readonly transfer: "to-runtime";
+          readonly destructor: string;
+        };
+    readonly projection: Readonly<IrNativeResultProjection>;
+  };
+}
+
+/** One C-callable entry implemented by an exported function in the library
+ * entry module. This first slice is intentionally exact-scalar-only: it is a
+ * Native IR boundary, distinct from library profiles' JavaScript-value
+ * marshalling classes. */
+export interface NativeFrontendExport {
+  readonly id: string;
+  /** Exported function name in the compilation entry module. */
+  readonly sourceExport: string;
+  /** Source contract identity retained for reports and diagnostics. */
+  readonly declaration: {
+    readonly module: string;
+    readonly name: string;
+  };
+  readonly entry: {
+    readonly kind: "c-symbol";
+    readonly symbol: string;
+  };
+  readonly error: {
+    readonly detect: { readonly kind: "never" };
+    readonly message: { readonly kind: "none" };
+    readonly release: { readonly kind: "none" };
+  };
+  readonly parameters: readonly {
+    readonly name: string;
+    readonly type: Readonly<IrNativeValueType>;
+    readonly passMode: "value";
+    readonly ownership: { readonly kind: "value" };
+  }[];
+  readonly result: {
+    readonly type: Readonly<IrNativeValueType> | { readonly kind: "void" };
+    readonly passMode: "value";
+    readonly ownership: { readonly kind: "value" };
+  };
+}
+
+/** Embedder-supplied native semantics for one frontend run. This contract is
+ * deliberately composition-neutral: package identity, provenance, and target
+ * planning live above ScriptC, while this layer sees only exact source
+ * identities, the target ABI facts needed to interpret generic types, and
+ * Native IR. */
+export interface NativeFrontendInput {
+  /** ABI facts selected by the embedder. Pointer-sized Native IR types are
+   * resolved against this width; aggregate lowering additionally keys on the
+   * ABI identity. The compiler driver verifies both against the selected
+   * backend target before lowering. */
+  readonly target: {
+    readonly pointerBits: 32 | 64;
+    readonly abi: string;
+  };
+  readonly sourceTypes: readonly NativeSourceType[];
+  readonly constants: readonly NativeFrontendConstant[];
+  readonly operations: readonly NativeFrontendOperation[];
+  readonly types: readonly NativeTypeDefinition[];
+  readonly bindings: readonly NativeFrontendBinding[];
+  readonly exports: readonly NativeFrontendExport[];
+}

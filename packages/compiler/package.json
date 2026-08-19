@@ -1,7 +1,7 @@
 {
   "name": "@scriptc/compiler",
   "version": "0.0.32",
-  "description": "The scriptc compiler — TypeScript/JavaScript frontend, typed IR, LLVM and C backends",
+  "description": "The scriptc compiler \u2014 TypeScript/JavaScript frontend, typed IR, LLVM and C backends",
   "license": "Apache-2.0",
   "homepage": "https://scriptc.dev",
   "repository": {
@@ -28,7 +28,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "node node_modules/typescript5/bin/tsc -p tsconfig.json"
+    "build": "node node_modules/typescript5/bin/tsc -p tsconfig.json && node -e \"require('node:fs').copyFileSync('src/native-manifest.d.ts','dist/native-manifest.d.ts')\""
   },
   "dependencies": {
     "@scriptc/runtime": "workspace:*",
