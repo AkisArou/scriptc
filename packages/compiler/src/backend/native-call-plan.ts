@@ -314,6 +314,10 @@ export type NativeArgumentForm =
     }
   /** A managed string borrowed as a NUL-terminated pointer. */
   | { readonly kind: "cString"; readonly argument: number }
+  /** A managed string array borrowed as a NUL-terminated vector of them. The
+   * only argument family that leaves something to clean up: the vector is
+   * built before the call and released after it, whatever the call did. */
+  | { readonly kind: "cStringArray"; readonly argument: number }
   /** A nullable string argument whose value is statically the null arm. */
   | { readonly kind: "cStringNull" }
   /** A nullable string argument that is a union at runtime. */
@@ -456,6 +460,8 @@ export function nativeArgumentForm(
       }
       return { kind: "cString", argument };
     }
+    case "utf8CStringArray":
+      return { kind: "cStringArray", argument };
     case "utf8Data":
     case "utf8ByteLength":
     case "bytesData":

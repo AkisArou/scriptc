@@ -208,6 +208,16 @@ export interface Answered {
   readonly answered: boolean;
   readonly value: number;
 }
+/** Reads a NUL-terminated vector built for this call alone. Answers
+ * `total * 100 + count` so a wrong pointer and a wrong length are different
+ * wrong answers. */
+export declare function cstringArrayMeasure(items: readonly string[]): i32;
+/** The same measurement with a string beside the vector, so a program can put
+ * a throwing conversion after a successful borrow. */
+export declare function cstringArrayMeasureNamed(
+  items: readonly string[],
+  name: string,
+): i32;
 export declare function answeredAbove(value: i32, threshold: i32): Answered;
 /** What actually landed in the slot, so the write is observable and not only
  * the read. */

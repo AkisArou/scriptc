@@ -2273,6 +2273,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
            * serves it. */
           E.ffiHasRetainedCallback;
         const retainedTokens = new Map<number, string>();
+        /* Vectors this call borrowed, by the argument they came from. The
+         * release runs after the call whatever it did, so it cannot be a
+         * statement the argument conversion emits. */
+        const borrowedArrays = new Map<number, string>();
         /* What this call must do around itself, decided once for both
          * backends. Each step names an argument; the value it produces gets a
          * temporary here. */
@@ -2367,6 +2371,25 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             nativeById: E.nativeById,
           },
         };
+        /* A conversion that throws must not strand a vector an earlier
+         * conversion borrowed. The release below the call is not reached on
+         * this path, and the unwind only knows about managed temporaries — a
+         * raw vector is invisible to it — so the release goes here, on the
+         * only path that would otherwise miss it. */
+        function emitConversionPendingCheck(): void {
+          if (borrowedArrays.size === 0) {
+            E.emitPendingCheck();
+            return;
+          }
+          E.line(`if (scr_exc_pending()) {`);
+          E.indent++;
+          for (const slot of borrowedArrays.values()) {
+            E.line(`scr_native_cstring_array_release(${slot});`);
+          }
+          E.emitUnwind();
+          E.indent--;
+          E.line(`}`);
+        }
         const nativeArgs = binding.parameters.map((_parameter, parameterIndex) => {
           const form = nativeArgumentForm(binding, parameterIndex, argumentContext);
           switch (form.kind) {
@@ -2433,7 +2456,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
                 `${cType(form.scalar)} ${raw} = ` +
                   `scr_native_${form.scalar.scalar}_from_number(${args[form.argument]!.name}, ${operation});`,
               );
-              E.emitPendingCheck();
+              emitConversionPendingCheck();
               return raw;
             }
             case "cStringNull":
@@ -2445,13 +2468,28 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
                 `const char *${raw} = ${arg.name}->tag == ${form.stringTag} ` +
                   `? scr_str_c_data((ScrStr *)scr_union_peek(${arg.name})) : NULL;`,
               );
-              E.emitPendingCheck();
+              emitConversionPendingCheck();
               return raw;
             }
             case "cString": {
               const raw = `sc_t${E.tempCounter++}`;
               E.line(`const char *${raw} = scr_str_c_data(${args[form.argument]!.name});`);
-              E.emitPendingCheck();
+              emitConversionPendingCheck();
+              return raw;
+            }
+            case "cStringArray": {
+              /* The vector is this call's, not the program's: the strings
+               * belong to the managed array and outlive the call, so what is
+               * built here is the pointers alone and what is released after
+               * the call is the same. Recorded so the teardown can find it,
+               * because the release has to happen on the throwing path too. */
+              const raw = `sc_t${E.tempCounter++}`;
+              E.line(
+                `const char **${raw} = scr_native_cstring_array_borrow(` +
+                  `${args[form.argument]!.name}, ${operation});`,
+              );
+              emitConversionPendingCheck();
+              borrowedArrays.set(form.argument, raw);
               return raw;
             }
             case "utf8Data":
@@ -2485,7 +2523,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
                 `void *${moved} = scr_native_handle_surrender(${args[form.argument]!.name}, ` +
                   `&${mangleNativeHandleTag(form.typeId)}, ${operation});`,
               );
-              E.emitPendingCheck();
+              emitConversionPendingCheck();
               return moved;
             }
             // The null arm passes NULL without consulting the handle table; a
@@ -2501,7 +2539,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
                   `&${mangleNativeHandleTag(form.typeId)}, ${operation}) ` +
                   ": NULL;",
               );
-              E.emitPendingCheck();
+              emitConversionPendingCheck();
               return raw;
             }
             case "handleRequire": {
@@ -2510,7 +2548,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
                 `void *${raw} = scr_native_handle_require(${args[form.argument]!.name}, ` +
                   `&${mangleNativeHandleTag(form.typeId)}, ${operation});`,
               );
-              E.emitPendingCheck();
+              emitConversionPendingCheck();
               return raw;
             }
             case "direct":
@@ -2531,7 +2569,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               `${args[cancellation.argument]!.name}, ` +
               `&${mangleNativeHandleTag(cancellation.typeId)}, ${operation});`,
           );
-          E.emitPendingCheck();
+          emitConversionPendingCheck();
         }
         let call = `${binding.entry.symbol}(${nativeArgs.join(", ")})`;
         /* A callback whose C signature has no userdata slot cannot be handed
@@ -2572,7 +2610,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             `}`,
           ];
         })();
-        const afterCall = [...errorCheck, ...lifecycle.teardown.flatMap((step) => {
+        const releaseBorrowedArrays = [...borrowedArrays.values()].map(
+          (slot) => `scr_native_cstring_array_release(${slot});`,
+        );
+        const afterCall = [...errorCheck, ...releaseBorrowedArrays, ...lifecycle.teardown.flatMap((step) => {
           const token = retainedTokens.get(step.argument);
           switch (step.kind) {
             case "restoreClosure":

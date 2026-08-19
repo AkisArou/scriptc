@@ -7181,6 +7181,9 @@ class LlEmitter {
            * serves it. */
           this.ffiHasRetainedCallback;
         const retainedTokens = new Map<number, string>();
+        /* Vectors this call borrowed, by the argument they came from; released
+         * after the call whatever it did. */
+        const borrowedArrays = new Map<number, string>();
         /* What this call must do around itself, decided once for both
          * backends. Each step names an argument; the value it produces gets a
          * temporary here. Kept in lockstep with the C backend by sharing the
@@ -7310,6 +7313,31 @@ class LlEmitter {
           errorSlot = B.slot();
           B.entryAllocas.push(`${errorSlot} = alloca ptr`);
         }
+        /* A conversion that throws must not strand a vector an earlier
+         * conversion borrowed. The release below the call is not reached on
+         * this path, and the unwind only knows about managed temporaries — a
+         * raw vector is invisible to it — so the release goes here, on the
+         * only path that would otherwise miss it. */
+        const emitConversionPendingCheck = (): void => {
+          if (borrowedArrays.size === 0) {
+            this.emitPendingCheck();
+            return;
+          }
+          if (B.isTerminated()) return;
+          this.declare(`declare zeroext i1 @scr_exc_pending()`);
+          this.declare("declare void @scr_native_cstring_array_release(ptr)");
+          const pending = B.tmp();
+          B.line(`${pending} = call zeroext i1 @scr_exc_pending()`);
+          const unwind = B.newLabel("exc.u");
+          const keep = B.newLabel("exc.k");
+          B.condBr(pending, unwind, keep);
+          B.startBlock(unwind);
+          for (const slot of borrowedArrays.values()) {
+            B.line(`call void @scr_native_cstring_array_release(ptr ${slot})`);
+          }
+          this.emitUnwind();
+          B.startBlock(keep);
+        };
         const callArgs: string[] = [];
         if (aggregateResult !== null && returnStorage !== null) {
           callArgs.push(`${declarationParameters[0]} ${resultSlot}`);
@@ -7430,7 +7458,7 @@ class LlEmitter {
                 form.scalar,
                 operation,
               );
-              this.emitPendingCheck();
+              emitConversionPendingCheck();
               callArgs.push(`${parameterType} ${value}`);
               return;
             }
@@ -7457,7 +7485,7 @@ class LlEmitter {
               B.startBlock(done);
               const data = B.tmp();
               B.line(`${data} = phi ptr [ ${presentData}, %${present} ], [ null, %${absent} ]`);
-              this.emitPendingCheck();
+              emitConversionPendingCheck();
               callArgs.push(`${parameterType} ${data}`);
               return;
             }
@@ -7465,8 +7493,24 @@ class LlEmitter {
               const data = B.tmp();
               this.declare("declare ptr @scr_str_c_data(ptr)");
               B.line(`${data} = call ptr @scr_str_c_data(ptr ${valueOf(form.argument)})`);
-              this.emitPendingCheck();
+              emitConversionPendingCheck();
               callArgs.push(`${parameterType} ${data}`);
+              return;
+            }
+            case "cStringArray": {
+              /* The vector is this call's, not the program's: the strings
+               * belong to the managed array and outlive the call, so what is
+               * built here is the pointers alone. Recorded so the release
+               * after the call can find it, including on the throwing path. */
+              this.declare("declare ptr @scr_native_cstring_array_borrow(ptr, ptr)");
+              const vector = B.tmp();
+              B.line(
+                `${vector} = call ptr @scr_native_cstring_array_borrow(` +
+                  `ptr ${valueOf(form.argument)}, ptr ${operation})`,
+              );
+              emitConversionPendingCheck();
+              borrowedArrays.set(form.argument, vector);
+              callArgs.push(`${parameterType} ${vector}`);
               return;
             }
             case "utf8Data": {
@@ -7548,7 +7592,7 @@ class LlEmitter {
               B.line(
                 `${selected} = phi ptr [ ${required}, %${present} ], [ null, %${absent} ]`,
               );
-              this.emitPendingCheck();
+              emitConversionPendingCheck();
               callArgs.push(`${parameterType} ${selected}`);
               return;
             }
@@ -7562,7 +7606,7 @@ class LlEmitter {
                 `${raw} = call ptr @scr_native_handle_surrender(ptr ${valueOf(form.argument)}, ` +
                   `ptr @${mangleNativeHandleTag(form.typeId)}, ptr ${operation})`,
               );
-              this.emitPendingCheck();
+              emitConversionPendingCheck();
               callArgs.push(`${parameterType} ${raw}`);
               return;
             }
@@ -7573,7 +7617,7 @@ class LlEmitter {
                 `${raw} = call ptr @scr_native_handle_require(ptr ${valueOf(form.argument)}, ` +
                   `ptr @${mangleNativeHandleTag(form.typeId)}, ptr ${operation})`,
               );
-              this.emitPendingCheck();
+              emitConversionPendingCheck();
               callArgs.push(`${parameterType} ${raw}`);
               return;
             }
@@ -7649,7 +7693,7 @@ class LlEmitter {
               `ptr ${args[cancellation.argument]!.name}, ` +
               `ptr @${mangleNativeHandleTag(cancellation.typeId)}, ptr ${operation})`,
           );
-          this.emitPendingCheck();
+          emitConversionPendingCheck();
         }
         /* A callback whose C signature has no userdata slot cannot be handed
          * its closure, so the call lends one through the adapter's
@@ -7708,7 +7752,13 @@ class LlEmitter {
           B.br(done);
           B.startBlock(done);
         }];
-        const afterCall: (() => void)[] = [...errorCheck, ...lifecycle.teardown.map((step) => () => {
+        const releaseBorrowedArrays: (() => void)[] = [...borrowedArrays.values()].map(
+          (slot) => () => {
+            this.declare("declare void @scr_native_cstring_array_release(ptr)");
+            B.line(`call void @scr_native_cstring_array_release(ptr ${slot})`);
+          },
+        );
+        const afterCall: (() => void)[] = [...errorCheck, ...releaseBorrowedArrays, ...lifecycle.teardown.map((step) => () => {
           const token = retainedTokens.get(step.argument);
           if (step.kind === "restoreClosure") {
             B.line(`store ptr ${saved.get(step.argument)}, ptr @${step.slot}`);

@@ -658,7 +658,6 @@ ScrStr *scr_str_from_c_data(const char *data); /* returns +1 or NULL */
 /* Borrow a C-compatible NUL-terminated view. Embedded NUL bytes set a
  * pending TypeError and return NULL. */
 const char *scr_str_c_data(ScrStr *s);
-
 /* Internal allocators for buffer builders (scr_json.c): a +1 string with
  * UNINITIALIZED data (the builder fills bytes, then len and the NUL), and
  * an rc==1-only realloc that grows capacity in place. Both keep the RC
@@ -1367,6 +1366,15 @@ void scr_arr_set_ref(ScrArr *a, double i, void *v);
  * ToIntegerOrInfinity indices, negatives from the end, clamping; ref
  * elements retain into the copy. Borrows a. */
 ScrArr *scr_arr_slice(ScrArr *a, double start, double end);
+
+/* One managed string array as the NUL-terminated `char **` a C API expects,
+ * valid for one call. Only the vector of pointers is allocated; the bytes
+ * belong to the managed strings and outlive the call. Declared here, beside
+ * the array API rather than beside the string one, because a prototype
+ * naming an incomplete `struct ScrArr` would scope its own type and not
+ * match a caller's. */
+const char **scr_native_cstring_array_borrow(ScrArr *a, const char *operation);
+void scr_native_cstring_array_release(const char **slots);
 
 /* ES2023 copying methods. All borrow their inputs and return fresh +1
  * shallow copies. with() raises Node's catchable RangeError for an invalid

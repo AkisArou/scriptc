@@ -133,6 +133,28 @@ NtsPair32 nts_pair32_transform(NtsPair32 value) {
   return result;
 }
 
+/* Reads a NUL-terminated vector the caller built for this call and nothing
+ * else. Summing the lengths makes the answer depend on every element, and
+ * counting to the terminator makes a missing one visible rather than silently
+ * short — the two ways a borrowed vector goes wrong. */
+int32_t nts_cstring_array_measure(const char **items) {
+  int32_t total = 0;
+  int32_t count = 0;
+  for (size_t i = 0; items[i] != NULL; i++) {
+    total += (int32_t)strlen(items[i]);
+    count += 1;
+  }
+  return total * 100 + count;
+}
+
+/* The same measurement with a plain string BESIDE the vector, so a program
+ * can put a throwing conversion after a successful borrow. That ordering is
+ * the one where a vector could be stranded: the release below the call is
+ * never reached, and nothing else knows the allocation exists. */
+int32_t nts_cstring_array_measure_named(const char **items, const char *name) {
+  return nts_cstring_array_measure(items) + (int32_t)strlen(name);
+}
+
 /* Answers whether `value` is above `threshold`, and hands back the value it
  * looked at either way — the distinction that makes this shape worth having,
  * since a call that reported absence instead would discard a usable value. */

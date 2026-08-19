@@ -599,6 +599,62 @@ const localNativeInput: NativeFrontendInput = {
       },
     },
     {
+      id: "scriptc.fixture.c-v1@0.0.0#cstring_array_measure",
+      declaration: { module: nativePackage, name: "cstringArrayMeasure" },
+      entry: { symbol: "nts_cstring_array_measure" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      arguments: [{ name: "items", type: { kind: "array", elem: { kind: "string" } } }],
+      parameters: [{
+        name: "items",
+        type: { kind: "nativePointer", pointee: "ptr", const: true, addressSpace: 0 },
+        passMode: "pointer" as const,
+        ownership: { kind: "borrowed" as const, scope: "call" as const },
+        projection: { kind: "utf8CStringArray" as const, argument: 0 },
+      }],
+      result: {
+        type: I32,
+        passMode: "value" as const,
+        ownership: { kind: "value" as const },
+        projection: DIRECT_RESULT,
+      },
+    },
+    {
+      /* A vector and a plain string, in that order, so a program can make the
+       * SECOND conversion throw while the first has already allocated. */
+      id: "scriptc.fixture.c-v1@0.0.0#cstring_array_measure_named",
+      declaration: { module: nativePackage, name: "cstringArrayMeasureNamed" },
+      entry: { symbol: "nts_cstring_array_measure_named" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      arguments: [
+        { name: "items", type: { kind: "array", elem: { kind: "string" } } },
+        { name: "name", type: { kind: "string" } },
+      ],
+      parameters: [
+        {
+          name: "items",
+          type: { kind: "nativePointer", pointee: "ptr", const: true, addressSpace: 0 },
+          passMode: "pointer" as const,
+          ownership: { kind: "borrowed" as const, scope: "call" as const },
+          projection: { kind: "utf8CStringArray" as const, argument: 0 },
+        },
+        {
+          name: "name",
+          type: { kind: "nativePointer", pointee: "i8", const: true, addressSpace: 0 },
+          passMode: "pointer" as const,
+          ownership: { kind: "borrowed" as const, scope: "call" as const },
+          projection: { kind: "utf8CString" as const, argument: 1 },
+        },
+      ],
+      result: {
+        type: I32,
+        passMode: "value" as const,
+        ownership: { kind: "value" as const },
+        projection: DIRECT_RESULT,
+      },
+    },
+    {
       id: "scriptc.fixture.c-v1@0.0.0#answered_above",
       declaration: { module: nativePackage, name: "answeredAbove" },
       entry: { symbol: "nts_answered_above" },
@@ -3586,6 +3642,40 @@ describe.each(["c", "llvm"] as const)("Native IR checked-number boundary, %s bac
       expect(generated).not.toContain("@llvm.trunc.f64");
     }
     expect(generated).not.toContain("scr_native_throw_number");
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+
+  localFixtureTest("borrows a managed string array as a NUL-terminated vector", async () => {
+    const outDir = join(scratch, `cstring-array-${backend}`);
+    const result = await compile(join(repoRoot, "tests/native-ir/cstring-array.ts"), {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend,
+      sanitize,
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+      nativeLinkInputs: [fixtureObject(), supportObject()],
+    });
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    const generated = readFileSync(
+      join(outDir, backend === "c" ? "cstring-array.c" : "cstring-array.ll"),
+      "utf8",
+    );
+    /* A borrowed vector has TWO ways out, so releases outnumber borrows: the
+     * teardown after the call, and — for the calls that convert another
+     * argument after the borrow — the unwind of a conversion that throws.
+     * A raw allocation is invisible to the unwind, so if the second site were
+     * missing the count would fall back to equal here and the leak would show
+     * up only in the sanitized lane. */
+    const borrows = generated.split("scr_native_cstring_array_borrow").length - 1;
+    const releases = generated.split("scr_native_cstring_array_release").length - 1;
+    expect(borrows).toBeGreaterThan(0);
+    expect(releases).toBeGreaterThan(borrows);
     const run = spawnSync(result.binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
       status: 42,

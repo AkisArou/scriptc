@@ -1552,6 +1552,48 @@ void scr_native_throw_errno(int e, const char *operation) {
   free(msg);
 }
 
+/* A managed string array borrowed as the NUL-terminated `char **` a C API
+ * expects, valid for one call.
+ *
+ * The elements are not copied: `scr_str_c_data` hands back storage the managed
+ * string already owns and keeps owning, so what is allocated here is only the
+ * vector of pointers plus its terminator. The array is borrowed for the call,
+ * so nothing in it may be released before the release below runs.
+ *
+ * An empty array still allocates, because a C API distinguishes "no strings"
+ * from "no array" and handing it NULL would say the second. */
+const char **scr_native_cstring_array_borrow(ScrArr *a, const char *operation) {
+  size_t len = a == NULL ? 0 : a->len;
+  const char **slots = calloc(len + 1, sizeof *slots);
+  if (slots == NULL) scr_trap("scriptc: out of memory\n");
+  for (size_t i = 0; i < len; i++) {
+    ScrStr *element = (ScrStr *)a->data[i];
+    if (element == NULL) {
+      free(slots);
+      scr_native_throw_null(operation);
+      return NULL;
+    }
+    /* `scr_str_c_data` answers NULL exactly when it set a pending TypeError
+     * for an embedded NUL. The foreign call never runs after that, so the
+     * release emitted beside it never runs either and the vector allocated
+     * above has nothing left to reach it — the borrow frees it here. Storing
+     * the NULL and carrying on would also build a vector that ends early,
+     * which is a shorter array rather than a failure. */
+    const char *bytes = scr_str_c_data(element);
+    if (bytes == NULL) {
+      free(slots);
+      return NULL;
+    }
+    slots[i] = bytes;
+  }
+  slots[len] = NULL;
+  return slots;
+}
+
+void scr_native_cstring_array_release(const char **slots) {
+  free((void *)slots);
+}
+
 void scr_native_throw_null(const char *operation) {
   static const char suffix[] = " returned null";
   size_t cap = strlen(operation) + sizeof suffix;

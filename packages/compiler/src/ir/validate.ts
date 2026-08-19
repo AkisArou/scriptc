@@ -1532,7 +1532,9 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     type: IrNativePointerType,
   ): boolean =>
     type.kind === "nativePointer" &&
-    ["i8", "u8"].includes(type.pointee) &&
+    /* `ptr` is one level and not a recursive type: a vector of strings is
+     * what a C API asks for, and a vector of vectors has no program. */
+    ["i8", "u8", "ptr"].includes(type.pointee) &&
     typeof type.const === "boolean" &&
     type.addressSpace === 0;
   const validNativeCallbackArgument = (
@@ -1987,6 +1989,10 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         argument.type.kind !== "nullableString" &&
         argument.type.kind !== "nullableNativeHandle" &&
         !(argument.type.kind === "bytes" && argument.type.elem === "u8") &&
+        /* An array of plain strings, which is what a NUL-terminated `char **`
+         * receives. One element type, because a terminated vector cannot
+         * carry an absent element without ending itself where it is. */
+        !(argument.type.kind === "array" && argument.type.elem.kind === "string") &&
         !validNativeCallbackArgument(argument.type) &&
         !validNativeValue(argument.type)
       ) {
@@ -2011,6 +2017,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       boolean: 0,
       number: 0,
       utf8CString: 0,
+      utf8CStringArray: 0,
       utf8Data: 0,
       utf8ByteLength: 0,
       bytesData: 0,
@@ -2229,6 +2236,28 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           ) {
             errors.push({
               message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an invalid UTF-8 C-string projection`,
+              loc: moduleLoc,
+            });
+          }
+          break;
+        case "utf8CStringArray":
+          projectionCounts.utf8CStringArray++;
+          /* The slot is a pointer to the vector's element type, which is
+           * itself a pointer to bytes — `const char **`. The source is an
+           * array whose element is a plain string; a nullable element has no
+           * spelling here, because a NUL-terminated vector cannot hold one
+           * without ending itself. */
+          if (
+            sourceArgument.type.kind !== "array" ||
+            sourceArgument.type.elem.kind !== "string" ||
+            parameter.type.kind !== "nativePointer" ||
+            parameter.type.pointee !== "ptr" ||
+            parameter.type.const !== true ||
+            parameter.type.addressSpace !== 0 ||
+            parameter.ownership.kind !== "borrowed"
+          ) {
+            errors.push({
+              message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an invalid UTF-8 C-string array projection`,
               loc: moduleLoc,
             });
           }
@@ -2574,6 +2603,10 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             ? projections.total === 1 && projections.boolean === 1
             : argument.type.kind === "f64"
               ? projections.total === 1 && projections.number === 1
+            /* A string array fills ONE slot, unlike a byte span: the vector
+             * carries its own end, so there is no length beside it. */
+            : argument.type.kind === "array"
+              ? projections.total === 1 && projections.utf8CStringArray === 1
             : argument.type.kind === "bytes"
               ? projections.total === 2 &&
                 projections.bytesData === 1 &&

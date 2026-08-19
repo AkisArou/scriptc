@@ -91,8 +91,12 @@ export type IrNativeValueType = IrNativeScalarType | IrNativeStructType | IrNati
  * It is intentionally excluded from IrType: source code and ordinary IR
  * expressions can never observe or manufacture one. */
 export interface IrNativePointerType {
+  /** What the pointer points at. Bytes, or another pointer — the second is
+   * what a NUL-terminated vector of strings is, and it is deliberately not a
+   * recursive type: one level is what a C API asks for and a second has no
+   * program behind it. */
   kind: "nativePointer";
-  pointee: "i8" | "u8";
+  pointee: "i8" | "u8" | "ptr";
   const: boolean;
   addressSpace: 0;
 }
@@ -335,6 +339,11 @@ export type IrNativeArgumentType =
    * required one is. */
   | { kind: "nullableNativeHandle"; typeId: string }
   | (IrBytesType & { elem: "u8" })
+  /** A managed array of plain strings, which is what a C API taking a
+   * NUL-terminated `char **` receives. The element is not nullable: a
+   * terminated vector cannot carry an absent element without ending itself
+   * where the absence is. */
+  | { kind: "array"; elem: { kind: "string" } }
   | IrNativeCallbackArgumentType;
 
 export type IrNativeParameterProjection =
@@ -362,6 +371,13 @@ export type IrNativeParameterProjection =
    * are for. */
   | { kind: "number"; argument: number; conversion: "checked" | "wrap" }
   | { kind: "utf8CString"; argument: number }
+  /** A managed string array borrowed as the NUL-terminated `char **` a C API
+   * expects. The elements are not copied — a managed string already owns its
+   * bytes and keeps owning them — so what the call borrows is one vector of
+   * pointers, built before the call and released after it whatever the call
+   * did. That release is why this is not simply a pointer conversion: it is
+   * the one argument family that leaves something behind to clean up. */
+  | { kind: "utf8CStringArray"; argument: number }
   | { kind: "utf8Data"; argument: number }
   | { kind: "utf8ByteLength"; argument: number }
   | { kind: "bytesData"; argument: number }
