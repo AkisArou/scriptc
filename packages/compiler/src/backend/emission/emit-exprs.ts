@@ -10,7 +10,7 @@ import { dynDestrCheckHelper, dynIterNHelper, dynKeyGetHelper } from "./emit-wal
 import { genResultThunkFor } from "./emit-async.js";
 import { nativeCallbackCancellationArgument } from "../native-callbacks.js";
 import { nativeCallLifecycle } from "../native-callbacks.js";
-import { nativeResultForm } from "../native-call-plan.js";
+import { nativeArgumentForm, nativeResultForm, type NativeArgumentFormExhausted } from "../native-call-plan.js";
 
 function streamTypedRefCommitAdapter(
   E: CEmitter,
@@ -2341,205 +2341,176 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         const errorSlot = binding.parameters.some((p) => p.projection.kind === "errorOut")
           ? `sc_t${E.tempCounter++}`
           : null;
-        const nativeArgs = binding.parameters.map((parameter, parameterIndex) => {
-          /* The compiler's own slot: nothing in the program supplies it, so
-           * it projects no argument. Declared null here, and its ADDRESS is
-           * what the callee is handed — the callee stores through it. */
-          if (parameter.projection.kind === "errorOut") {
-            E.line(`void *${errorSlot} = NULL;`);
-            return `&${errorSlot}`;
-          }
-          const arg = args[parameter.projection.argument]!;
-          switch (parameter.projection.kind) {
+        /* What each argument becomes, decided once. The emitter below has one
+         * arm per primitive and no view on which applies. */
+        const argumentContext = {
+          argumentType: (argument: number) => args[argument]!.type,
+          sourceLiteral: (argument: number) => {
+            const source = e.args[argument];
+            return source?.kind === "numLit" ? source.value : undefined;
+          },
+          provenCrossings,
+          pointerBits: E.mod.nativeTarget?.pointerBits,
+          tables: {
+            unionsById: E.unionsById,
+            nativeTypesById: E.nativeTypesById,
+            nativeById: E.nativeById,
+          },
+        };
+        const nativeArgs = binding.parameters.map((_parameter, parameterIndex) => {
+          const form = nativeArgumentForm(binding, parameterIndex, argumentContext);
+          switch (form.kind) {
+            /* The compiler's own slot: nothing in the program supplies it, so
+             * it projects no argument. Declared null here, and its ADDRESS is
+             * what the callee is handed — the callee stores through it. */
+            case "errorSlot":
+              E.line(`void *${errorSlot} = NULL;`);
+              return `&${errorSlot}`;
             case "boolean": {
-              if (parameter.type.kind !== "nativeScalar" || arg.type.kind !== "bool") {
-                throw new Error(`emitter bug: invalid boolean parameter projection in ${binding.id}`);
-              }
               const trueValue = cNativeScalarLiteral(
-                parameter.type,
-                parameter.projection.trueValue,
+                form.scalar,
+                form.trueValue,
                 E.mod.nativeTarget?.pointerBits,
               );
               const falseValue = cNativeScalarLiteral(
-                parameter.type,
-                parameter.projection.falseValue,
+                form.scalar,
+                form.falseValue,
                 E.mod.nativeTarget?.pointerBits,
               );
-              return `${arg.name} ? ${trueValue} : ${falseValue}`;
+              return `${args[form.argument]!.name} ? ${trueValue} : ${falseValue}`;
             }
-            case "number": {
-              if (
-                parameter.type.kind !== "nativeScalar" ||
-                arg.type.kind !== "f64"
-              ) {
-                throw new Error(`emitter bug: invalid number parameter projection in ${binding.id}`);
-              }
-              /* A double slot converts nothing: the source value is already
-               * the representation the ABI wants, so the projection is a
-               * change of source view and nothing else. A float slot rounds
-               * to nearest float, which is the only thing storing a double
-               * in 32 bits can mean — the one crossing in this family that
-               * is not exact, and the reason the declaration has to say the
-               * slot is a float. */
-              if (parameter.type.scalar === "f64") return arg.name;
-              if (parameter.type.scalar === "f32") {
-                return `scr_native_f32_from_number(${arg.name})`;
-              }
-              if (parameter.projection.conversion === "wrap") {
-                /* The ECMAScript modulo conversion, which is total: every
-                 * double has an answer, so nothing is checked and nothing
-                 * throws. `| 0` and `>>> 0` spell the same thing in source,
-                 * which is why this is a conversion the document names
-                 * rather than a behavior the boundary assumes. */
-                const info = nativeIntegerInfo(
-                  parameter.type.scalar,
-                  E.mod.nativeTarget?.pointerBits,
-                );
-                if (info === null) {
-                  throw new Error(`emitter bug: wrapping conversion over ${parameter.type.scalar} in ${binding.id}`);
-                }
-                const via = info.signed
-                  ? `scr_bit_or(${arg.name}, 0.0)`
-                  : `scr_bit_ushr(${arg.name}, 0.0)`;
-                return `(${cType(parameter.type)})${via}`;
-              }
-              /* A literal argument the emitter can re-prove in place needs no
-               * runtime check: the constant IS the converted value, which is
-               * exactly what a branded exact construction would have emitted. */
-              const source = e.args[parameter.projection.argument];
-              const proven = source?.kind === "numLit"
-                ? provenNumberLiteral(
-                    source.value,
-                    parameter.type.scalar,
-                    E.mod.nativeTarget?.pointerBits,
-                  )
-                : null;
-              if (proven !== null) {
-                return cNativeScalarLiteral(
-                  parameter.type,
-                  proven,
-                  E.mod.nativeTarget?.pointerBits,
-                );
-              }
-              /* The number facts proved this value whole and inside the
-               * slot on every path that reaches here, so the conversion is
-               * the cast alone. The checks are dominated by nothing and
-               * would compute the same result. */
-              if (provenCrossings?.has(parameterIndex) === true) {
-                return `(${cType(parameter.type)})${arg.name}`;
-              }
+            /* A double slot converts nothing: the source value is already the
+             * representation the ABI wants, so the projection is a change of
+             * source view and nothing else. */
+            case "numberIdentity":
+              return args[form.argument]!.name;
+            /* A float slot rounds to nearest float, which is the only thing
+             * storing a double in 32 bits can mean — the one crossing in this
+             * family that is not exact, and the reason the declaration has to
+             * say the slot is a float. */
+            case "numberToFloat":
+              return `scr_native_f32_from_number(${args[form.argument]!.name})`;
+            case "numberWrapping": {
+              /* The ECMAScript modulo conversion, which is total: every double
+               * has an answer, so nothing is checked and nothing throws. `| 0`
+               * and `>>> 0` spell the same thing in source, which is why this
+               * is a conversion the document names rather than a behavior the
+               * boundary assumes. */
+              const via = form.signed
+                ? `scr_bit_or(${args[form.argument]!.name}, 0.0)`
+                : `scr_bit_ushr(${args[form.argument]!.name}, 0.0)`;
+              return `(${cType(form.scalar)})${via}`;
+            }
+            /* The constant IS the converted value, which is exactly what a
+             * branded exact construction would have emitted. */
+            case "numberProvenLiteral":
+              return cNativeScalarLiteral(
+                form.scalar,
+                form.value,
+                E.mod.nativeTarget?.pointerBits,
+              );
+            /* The number facts proved this value whole and inside the slot on
+             * every path that reaches here, so the conversion is the cast
+             * alone; the checks would compute the same result. */
+            case "numberProvenCrossing":
+              return `(${cType(form.scalar)})${args[form.argument]!.name}`;
+            case "numberChecked": {
               /* The helper throws a catchable TypeError and yields 0 on an
                * unconvertible value; the pending check unwinds before the
                * native call can observe the placeholder. */
               const raw = `sc_t${E.tempCounter++}`;
               E.line(
-                `${cType(parameter.type)} ${raw} = ` +
-                  `scr_native_${parameter.type.scalar}_from_number(${arg.name}, ${operation});`,
+                `${cType(form.scalar)} ${raw} = ` +
+                  `scr_native_${form.scalar.scalar}_from_number(${args[form.argument]!.name}, ${operation});`,
               );
               E.emitPendingCheck();
               return raw;
             }
-            case "utf8CString": {
-              const sourceType = binding.arguments[parameter.projection.argument]!.type;
-              if (sourceType.kind === "nullableString") {
-                if (arg.type.kind === "nullT") return "NULL";
-                if (arg.type.kind === "union") {
-                  const arms = E.unionsById.get(arg.type.unionId)?.arms;
-                  const stringTag = arms?.findIndex((arm) => arm.kind === "string") ?? -1;
-                  const nullTag = arms?.findIndex((arm) => arm.kind === "nullT") ?? -1;
-                  if (stringTag < 0 || nullTag < 0) {
-                    throw new Error(`emitter bug: nullable C-string argument lacks string/null arms in ${binding.id}`);
-                  }
-                  const raw = `sc_t${E.tempCounter++}`;
-                  E.line(
-                    `const char *${raw} = ${arg.name}->tag == ${stringTag} ` +
-                      `? scr_str_c_data((ScrStr *)scr_union_peek(${arg.name})) : NULL;`,
-                  );
-                  E.emitPendingCheck();
-                  return raw;
-                }
-                if (arg.type.kind !== "string") {
-                  throw new Error(`emitter bug: nullable C-string argument has ${arg.type.kind} type in ${binding.id}`);
-                }
-              }
+            case "cStringNull":
+              return "NULL";
+            case "cStringOrNull": {
+              const arg = args[form.argument]!;
               const raw = `sc_t${E.tempCounter++}`;
-              E.line(`const char *${raw} = scr_str_c_data(${arg.name});`);
+              E.line(
+                `const char *${raw} = ${arg.name}->tag == ${form.stringTag} ` +
+                  `? scr_str_c_data((ScrStr *)scr_union_peek(${arg.name})) : NULL;`,
+              );
+              E.emitPendingCheck();
+              return raw;
+            }
+            case "cString": {
+              const raw = `sc_t${E.tempCounter++}`;
+              E.line(`const char *${raw} = scr_str_c_data(${args[form.argument]!.name});`);
               E.emitPendingCheck();
               return raw;
             }
             case "utf8Data":
-              return `(const void *)${arg.name}->data`;
-            case "utf8ByteLength":
-              return `${arg.name}->len`;
             case "bytesData":
-              return `(const void *)${arg.name}->data`;
+              return `(const void *)${args[form.argument]!.name}->data`;
+            case "utf8ByteLength":
             case "bytesByteLength":
-              return `${arg.name}->len`;
+              return `${args[form.argument]!.name}->len`;
             case "callbackFunction":
-              return `&${E.nativeCallbackAdapter(binding.id, parameter.projection.argument).symbol}`;
-            /* The registering binding's trampoline, not one of ours: the
-             * library matches the registration on the pointer pair it was
-             * given, so a second trampoline would identify nothing. */
+              return `&${E.nativeCallbackAdapter(binding.id, form.argument).symbol}`;
             case "callbackRelease":
               return `&${
                 E.nativeCallbackAdapter(
-                  parameter.projection.registration.binding,
-                  parameter.projection.registration.argument,
+                  form.registration.binding,
+                  form.registration.argument,
                 ).symbol
               }`;
             case "callbackContext":
-              return `(void *)${retainedTokens.get(parameter.projection.argument) ?? arg.name}`;
-            case "argument": {
-              if (parameter.type.kind !== "nativeHandle") return arg.name;
-              const sourceType = binding.arguments[parameter.projection.argument]!.type;
-              const tag = mangleNativeHandleTag(parameter.type.typeId);
+              return `(void *)${
+                retainedTokens.get(form.argument) ?? args[form.argument]!.name
+              }`;
+            case "handleSurrender": {
               /* The callee takes the reference, so the cell gives it up here
                * rather than holding one nobody owns. Everything an explicit
                * disposal does happens, except freeing the object: that is the
                * callee's now, and using the handle afterwards is a
                * use-after-dispose for the same reason it is after
                * `dispose()`. */
-              if (parameter.ownership.kind === "owned") {
-                const moved = `sc_t${E.tempCounter++}`;
-                E.line(
-                  `void *${moved} = scr_native_handle_surrender(${arg.name}, ` +
-                    `&${tag}, ${operation});`,
-                );
-                E.emitPendingCheck();
-                return moved;
-              }
-              if (sourceType.kind === "nullableNativeHandle") {
-                // The null arm passes NULL without consulting the handle
-                // table; a present handle is validated exactly as a required
-                // one is.
-                if (arg.type.kind === "nullT") return "NULL";
-                if (arg.type.kind === "union") {
-                  const arms = E.unionsById.get(arg.type.unionId)?.arms;
-                  const handleTag = arms?.findIndex(
-                    (arm) => arm.kind === "nativeHandle",
-                  ) ?? -1;
-                  if (handleTag < 0) {
-                    throw new Error(`emitter bug: nullable handle argument lacks a handle arm in ${binding.id}`);
-                  }
-                  const raw = `sc_t${E.tempCounter++}`;
-                  E.line(
-                    `void *${raw} = ${arg.name}->tag == ${handleTag} ` +
-                      `? scr_native_handle_require(scr_union_peek(${arg.name}), &${tag}, ${operation}) ` +
-                      ": NULL;",
-                  );
-                  E.emitPendingCheck();
-                  return raw;
-                }
-              }
+              const moved = `sc_t${E.tempCounter++}`;
+              E.line(
+                `void *${moved} = scr_native_handle_surrender(${args[form.argument]!.name}, ` +
+                  `&${mangleNativeHandleTag(form.typeId)}, ${operation});`,
+              );
+              E.emitPendingCheck();
+              return moved;
+            }
+            // The null arm passes NULL without consulting the handle table; a
+            // present handle is validated exactly as a required one is.
+            case "handleNull":
+              return "NULL";
+            case "handleOrNull": {
+              const arg = args[form.argument]!;
               const raw = `sc_t${E.tempCounter++}`;
               E.line(
-                `void *${raw} = scr_native_handle_require(${arg.name}, ` +
-                  `&${tag}, ${operation});`,
+                `void *${raw} = ${arg.name}->tag == ${form.handleTag} ` +
+                  `? scr_native_handle_require(scr_union_peek(${arg.name}), ` +
+                  `&${mangleNativeHandleTag(form.typeId)}, ${operation}) ` +
+                  ": NULL;",
               );
               E.emitPendingCheck();
               return raw;
             }
+            case "handleRequire": {
+              const raw = `sc_t${E.tempCounter++}`;
+              E.line(
+                `void *${raw} = scr_native_handle_require(${args[form.argument]!.name}, ` +
+                  `&${mangleNativeHandleTag(form.typeId)}, ${operation});`,
+              );
+              E.emitPendingCheck();
+              return raw;
+            }
+            case "direct":
+              return args[form.argument]!.name;
           }
+          /* Every arm is handled above. Naming the remainder is what makes the
+           * compiler check that: add an arm to `NativeArgumentForm` and forget
+           * it here, and this stops compiling rather than falling out of the
+           * switch with no argument produced. Both backends carry this line. */
+          return form satisfies NativeArgumentFormExhausted;
         });
         const cancellationArgument = nativeCallbackCancellationArgument(
           E.mod.nativeBindings ?? [],

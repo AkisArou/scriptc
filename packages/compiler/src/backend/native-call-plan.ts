@@ -30,7 +30,13 @@ import type {
   IrType,
   IrUnionDef,
 } from "../ir/nodes.js";
-import { nativeScalarWidensToNumber, STRING, typeEquals } from "../ir/nodes.js";
+import {
+  nativeIntegerInfo,
+  nativeScalarWidensToNumber,
+  provenNumberLiteral,
+  STRING,
+  typeEquals,
+} from "../ir/nodes.js";
 
 /** What the emitters need to look up while resolving a contract. Passed in
  * rather than imported so this module stays independent of how either backend
@@ -248,4 +254,237 @@ function resolveHandle(
     definition: definition as IrNativeHandleDef,
     destructor: (destructor as IrNativeBinding).entry.symbol,
   };
+}
+
+/**
+ * The one thing an argument becomes on its way into a slot.
+ *
+ * The same shape as `NativeResultForm` and for the same reason: both backends
+ * ran an eleven-case switch over the projection — in different orders, with
+ * `number` and `boolean` swapped exactly as the result ladder had them — and
+ * inside the numeric case both chose between the same six sub-cases in the
+ * same sequence. Choosing is not emitting.
+ *
+ * An arm carries values rather than rendered text: a boolean arm carries the
+ * two canonical representations and the scalar they inhabit, never a C literal
+ * or an LLVM one, because how a value is spelled is the only part of this that
+ * differs between the two.
+ */
+export type NativeArgumentForm =
+  /** The compiler's own error slot: nothing in the program supplies it. */
+  | { readonly kind: "errorSlot" }
+  /** A source boolean selecting between the two declared representations. */
+  | {
+      readonly kind: "boolean";
+      readonly argument: number;
+      readonly scalar: IrNativeScalarType;
+      readonly falseValue: string;
+      readonly trueValue: string;
+    }
+  /** A double slot: the source value already IS the representation. */
+  | { readonly kind: "numberIdentity"; readonly argument: number }
+  /** A float slot, which rounds — the one crossing here that is not exact. */
+  | { readonly kind: "numberToFloat"; readonly argument: number }
+  /** The ECMAScript modulo conversion, which is total and cannot fail. */
+  | {
+      readonly kind: "numberWrapping";
+      readonly argument: number;
+      readonly scalar: IrNativeScalarType;
+      readonly signed: boolean;
+    }
+  /** A literal the emitter re-proved in place: the constant IS the conversion,
+   * so nothing is checked at runtime. */
+  | {
+      readonly kind: "numberProvenLiteral";
+      readonly scalar: IrNativeScalarType;
+      readonly value: string;
+    }
+  /** The number facts proved this whole and in range on every path here, so
+   * the conversion is the cast alone. */
+  | {
+      readonly kind: "numberProvenCrossing";
+      readonly argument: number;
+      readonly scalar: IrNativeScalarType;
+    }
+  /** Neither proven: the checked helper, which throws catchably. */
+  | {
+      readonly kind: "numberChecked";
+      readonly argument: number;
+      readonly scalar: IrNativeScalarType;
+    }
+  /** A managed string borrowed as a NUL-terminated pointer. */
+  | { readonly kind: "cString"; readonly argument: number }
+  /** A nullable string argument whose value is statically the null arm. */
+  | { readonly kind: "cStringNull" }
+  /** A nullable string argument that is a union at runtime. */
+  | {
+      readonly kind: "cStringOrNull";
+      readonly argument: number;
+      readonly stringTag: number;
+    }
+  /** The two physical slots a span occupies, and the two a UTF-8 view does. */
+  | {
+      readonly kind: "utf8Data" | "utf8ByteLength" | "bytesData" | "bytesByteLength";
+      readonly argument: number;
+    }
+  /** The trampoline this call registers. */
+  | { readonly kind: "callbackFunction"; readonly argument: number }
+  /** The REGISTERING binding's trampoline: the library matches a registration
+   * on the pointer pair it was given, so a second one would identify nothing. */
+  | {
+      readonly kind: "callbackRelease";
+      readonly registration: { readonly binding: string; readonly argument: number };
+    }
+  /** The closure slot, carrying a token when one was minted for it. */
+  | { readonly kind: "callbackContext"; readonly argument: number }
+  /** The callee takes the reference: the cell gives it up rather than holding
+   * one nobody owns. */
+  | {
+      readonly kind: "handleSurrender";
+      readonly argument: number;
+      readonly typeId: string;
+    }
+  /** A nullable handle argument whose value is statically the null arm. */
+  | { readonly kind: "handleNull" }
+  /** A nullable handle argument that is a union at runtime. */
+  | {
+      readonly kind: "handleOrNull";
+      readonly argument: number;
+      readonly typeId: string;
+      readonly handleTag: number;
+    }
+  /** A required handle, validated before the pointer crosses. */
+  | {
+      readonly kind: "handleRequire";
+      readonly argument: number;
+      readonly typeId: string;
+    }
+  /** An exact value that crosses as itself. */
+  | { readonly kind: "direct"; readonly argument: number };
+
+/* Both emitters end their switch by assigning the form to this, so an arm
+ * added above and forgotten in one backend stops that backend compiling. It is
+ * `never` rather than a listed remainder because an argument switch handles
+ * every arm — unlike the result ladder, which legitimately falls through to a
+ * direct crossing. */
+export type NativeArgumentFormExhausted = never;
+
+/** What resolving an argument needs to know beyond the binding itself. */
+export interface NativeArgumentContext {
+  /** The runtime type of each emitted argument value, by argument index. */
+  readonly argumentType: (argument: number) => IrType;
+  /** The source expression behind each argument, for the proven-literal case. */
+  readonly sourceLiteral: (argument: number) => number | undefined;
+  /** Argument positions the number facts proved whole and in range. */
+  readonly provenCrossings: ReadonlySet<number> | undefined;
+  readonly pointerBits: 32 | 64 | undefined;
+  readonly tables: NativeCallTables;
+}
+
+export function nativeArgumentForm(
+  binding: IrNativeBinding,
+  parameterIndex: number,
+  context: NativeArgumentContext,
+): NativeArgumentForm {
+  const fail = (detail: string): never => {
+    throw new NativeCallPlanError(binding.id, detail);
+  };
+  const parameter = binding.parameters[parameterIndex] ??
+    fail(`missing parameter ${parameterIndex}`);
+  const projection = parameter.projection;
+  if (projection.kind === "errorOut") return { kind: "errorSlot" };
+  if (projection.kind === "callbackRelease") {
+    return { kind: "callbackRelease", registration: projection.registration };
+  }
+  const argument = projection.argument;
+  const valueType = context.argumentType(argument);
+
+  switch (projection.kind) {
+    case "boolean": {
+      if (parameter.type.kind !== "nativeScalar" || valueType.kind !== "bool") {
+        fail("invalid boolean parameter projection");
+      }
+      return {
+        kind: "boolean",
+        argument,
+        scalar: parameter.type as IrNativeScalarType,
+        falseValue: projection.falseValue,
+        trueValue: projection.trueValue,
+      };
+    }
+    case "number": {
+      if (parameter.type.kind !== "nativeScalar" || valueType.kind !== "f64") {
+        fail("invalid number parameter projection");
+      }
+      const scalar = parameter.type as IrNativeScalarType;
+      if (scalar.scalar === "f64") return { kind: "numberIdentity", argument };
+      if (scalar.scalar === "f32") return { kind: "numberToFloat", argument };
+      if (projection.conversion === "wrap") {
+        const info = nativeIntegerInfo(scalar.scalar, context.pointerBits);
+        if (info === null) fail(`wrapping conversion over ${scalar.scalar}`);
+        return {
+          kind: "numberWrapping",
+          argument,
+          scalar,
+          signed: (info as { readonly signed: boolean }).signed,
+        };
+      }
+      const literal = context.sourceLiteral(argument);
+      const proven = literal === undefined
+        ? null
+        : provenNumberLiteral(literal, scalar.scalar, context.pointerBits);
+      if (proven !== null) return { kind: "numberProvenLiteral", scalar, value: proven };
+      return context.provenCrossings?.has(parameterIndex) === true
+        ? { kind: "numberProvenCrossing", argument, scalar }
+        : { kind: "numberChecked", argument, scalar };
+    }
+    case "utf8CString": {
+      const sourceType = binding.arguments[argument]?.type;
+      if (sourceType?.kind !== "nullableString") return { kind: "cString", argument };
+      if (valueType.kind === "nullT") return { kind: "cStringNull" };
+      if (valueType.kind === "union") {
+        const arms = context.tables.unionsById.get(valueType.unionId)?.arms;
+        const stringTag = armTag(arms, (arm) => arm.kind === "string");
+        const nullTag = armTag(arms, (arm) => arm.kind === "nullT");
+        if (stringTag < 0 || nullTag < 0) {
+          fail("nullable C-string argument lacks string/null arms");
+        }
+        return { kind: "cStringOrNull", argument, stringTag };
+      }
+      if (valueType.kind !== "string") {
+        fail(`nullable C-string argument has ${valueType.kind} type`);
+      }
+      return { kind: "cString", argument };
+    }
+    case "utf8Data":
+    case "utf8ByteLength":
+    case "bytesData":
+    case "bytesByteLength":
+      return { kind: projection.kind, argument };
+    case "callbackFunction":
+    case "callbackContext":
+      return { kind: projection.kind, argument };
+    case "argument": {
+      if (parameter.type.kind !== "nativeHandle") return { kind: "direct", argument };
+      const typeId = parameter.type.typeId;
+      /* Ownership first, and it cannot collide with the nullable case below:
+       * the validator requires an owned parameter's source argument to be a
+       * REQUIRED handle, since a null arm would leave nothing to hand over.
+       * The two backends happened to test these in opposite orders, which was
+       * equivalent only because of that rule and said so nowhere. */
+      if (parameter.ownership.kind === "owned") {
+        return { kind: "handleSurrender", argument, typeId };
+      }
+      if (binding.arguments[argument]?.type.kind === "nullableNativeHandle") {
+        if (valueType.kind === "nullT") return { kind: "handleNull" };
+        if (valueType.kind === "union") {
+          const arms = context.tables.unionsById.get(valueType.unionId)?.arms;
+          const handleTag = armTag(arms, (arm) => arm.kind === "nativeHandle");
+          if (handleTag < 0) fail("nullable handle argument lacks a handle arm");
+          return { kind: "handleOrNull", argument, typeId, handleTag };
+        }
+      }
+      return { kind: "handleRequire", argument, typeId };
+    }
+  }
 }

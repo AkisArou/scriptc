@@ -90,7 +90,7 @@ import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, islandPr
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
 import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, nativeCallLifecycle, nativeCallbackPayloads, nativeTrampolineForm, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
-import { nativeResultForm } from "../native-call-plan.js";
+import { nativeArgumentForm, nativeResultForm, type NativeArgumentFormExhausted } from "../native-call-plan.js";
 import { computeMayThrow } from "../emission/may-throw.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleNativeHandleTag, mangleNativeStruct, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
@@ -7304,359 +7304,329 @@ class LlEmitter {
           callArgs.push(`${declarationParameters[0]} ${resultSlot}`);
         }
         const provenCrossings = this.provenNumberCrossings.get(e);
+        /* What each argument becomes, decided once and shared with the C
+         * backend. What stays here is physical: which LLVM type a slot has,
+         * and how an aggregate is passed. */
+        const argumentContext = {
+          argumentType: (argument: number) => args[argument]!.type,
+          sourceLiteral: (argument: number) => {
+            const source = e.args[argument];
+            return source?.kind === "numLit" ? source.value : undefined;
+          },
+          provenCrossings,
+          pointerBits: this.mod.nativeTarget?.pointerBits,
+          tables: {
+            unionsById: this.unionsById,
+            nativeTypesById: this.nativeTypesById,
+            nativeById: this.nativeById,
+          },
+        };
         binding.parameters.forEach((parameter, index) => {
-          /* The compiler's own slot: nothing in the program supplies it, so
-           * it projects no argument. The alloca is hoisted to the entry block
-           * so a call inside a loop does not grow the stack per iteration.
-           * Kept in lockstep with the C backend. */
-          if (parameter.projection.kind === "errorOut") {
-            B.line(`store ptr null, ptr ${errorSlot}`);
-            callArgs.push(`ptr ${errorSlot}`);
-            return;
-          }
-          const arg = args[parameter.projection.argument]!;
+          const form = nativeArgumentForm(binding, index, argumentContext);
           const parameterType = parameterTypes[index]?.[0];
           if (parameterType === undefined) {
             throw new Error(`llvm emitter bug: missing physical parameter in ${binding.id}`);
           }
-          switch (parameter.projection.kind) {
-            case "number": {
-              if (parameter.type.kind !== "nativeScalar" || arg.type.kind !== "f64") {
-                throw new Error(`llvm emitter bug: invalid number parameter projection in ${binding.id}`);
-              }
-              /* A double slot converts nothing: the source value is already
-               * the representation the ABI wants. A float slot rounds to
-               * nearest float — the one crossing in this family that is not
-               * exact, and the only thing storing a double in 32 bits can
-               * mean. */
-              if (parameter.type.scalar === "f64") {
-                callArgs.push(`${parameterType} ${arg.name}`);
-                break;
-              }
-              if (parameter.type.scalar === "f32") {
-                /* The runtime rounds, so both backends agree on what an
-                 * out-of-range value becomes; `fptrunc` alone would leave
-                 * that to the instruction's overflow behavior. */
-                this.declare("declare float @scr_native_f32_from_number(double)");
-                const rounded = B.tmp();
-                B.line(
-                  `${rounded} = call float @scr_native_f32_from_number(double ${arg.name})`,
-                );
-                callArgs.push(`${parameterType} ${rounded}`);
-                break;
-              }
-              if (parameter.projection.conversion === "wrap") {
-                /* The ECMAScript modulo conversion, which is total: every
-                 * double has an answer, so nothing is checked and nothing
-                 * throws. The runtime helpers keep both backends on one
-                 * definition of what ToInt32/ToUint32 mean. */
-                const info = nativeIntegerInfo(
-                  parameter.type.scalar,
-                  this.mod.nativeTarget?.pointerBits,
-                );
-                if (info === null) {
-                  throw new Error(`llvm emitter bug: wrapping conversion over ${parameter.type.scalar} in ${binding.id}`);
-                }
-                const helper = info.signed ? "scr_bit_or" : "scr_bit_ushr";
-                this.declare(`declare double @${helper}(double, double)`);
-                const wrapped = B.tmp();
-                B.line(
-                  `${wrapped} = call double @${helper}(double ${arg.name}, double 0.0)`,
-                );
-                /* The helpers answer ToInt32/ToUint32, so the value is in a
-                 * 32-bit range and the conversion to i32 is exact — signed
-                 * or unsigned per the class, because fptosi would saturate
-                 * on the unsigned half. A narrower slot then truncates,
-                 * which is the same two-step cast the C backend spells. */
-                const wide = B.tmp();
-                B.line(
-                  `${wide} = ${info.signed ? "fptosi" : "fptoui"} double ${wrapped} to i32`,
-                );
-                const slotType = this.llType(parameter.type);
-                let narrowed = wide;
-                if (slotType !== "i32") {
-                  narrowed = B.tmp();
-                  B.line(`${narrowed} = trunc i32 ${wide} to ${slotType}`);
-                }
-                callArgs.push(`${parameterType} ${narrowed}`);
-                break;
-              }
-              /* A literal argument the emitter can re-prove in place needs no
-               * runtime check: the constant IS the converted value, which is
-               * exactly what a branded exact construction would have emitted.
-               * Kept in lockstep with the C backend's peephole. */
-              const source = e.args[parameter.projection.argument];
-              const proven = source?.kind === "numLit"
-                ? provenNumberLiteral(
-                    source.value,
-                    parameter.type.scalar,
-                    this.mod.nativeTarget?.pointerBits,
-                  )
-                : null;
-              if (proven !== null) {
-                callArgs.push(`${parameterType} ${proven}`);
-                break;
-              }
-              /* The number facts proved this value whole and inside the slot
-               * on every path that reaches here, so the conversion cannot see
-               * an out-of-range double and cannot produce poison. Kept in
-               * lockstep with the C backend's cast. */
-              if (provenCrossings?.has(index) === true) {
-                const bare = this.llType(parameter.type);
-                const signedSlot = parameter.type.scalar.startsWith("i");
-                const value = B.tmp();
-                B.line(
-                  `${value} = ${signedSlot ? "fptosi" : "fptoui"} double ${arg.name} to ${bare}`,
-                );
-                callArgs.push(`${parameterType} ${value}`);
-                break;
-              }
-              const value = this.checkedNumberIngress(
-                arg.name,
-                parameter.type,
-                operation,
-              );
-              this.emitPendingCheck();
-              callArgs.push(`${parameterType} ${value}`);
-              break;
-            }
+          const valueOf = (argument: number): string => args[argument]!.name;
+          switch (form.kind) {
+            /* The compiler's own slot: nothing in the program supplies it. The
+             * alloca is hoisted to the entry block so a call inside a loop does
+             * not grow the stack per iteration. */
+            case "errorSlot":
+              B.line(`store ptr null, ptr ${errorSlot}`);
+              callArgs.push(`ptr ${errorSlot}`);
+              return;
             case "boolean": {
-              if (parameter.type.kind !== "nativeScalar" || arg.type.kind !== "bool") {
-                throw new Error(`llvm emitter bug: invalid boolean parameter projection in ${binding.id}`);
-              }
               const value = B.tmp();
               /* The select needs the bare slot type: `parameterType` carries
                * the call-argument attribute (signext/zeroext), which is not
                * a value type and is rejected here. */
-              const slotType = this.llType(parameter.type);
+              const slotType = this.llType(form.scalar);
               B.line(
-                `${value} = select i1 ${arg.name}, ${slotType} ` +
-                  `${parameter.projection.trueValue}, ${slotType} ` +
-                  `${parameter.projection.falseValue}`,
+                `${value} = select i1 ${valueOf(form.argument)}, ${slotType} ` +
+                  `${form.trueValue}, ${slotType} ${form.falseValue}`,
               );
               callArgs.push(`${parameterType} ${value}`);
-              break;
+              return;
             }
-            case "utf8CString": {
-              const sourceType = binding.arguments[parameter.projection.argument]!.type;
-              if (sourceType.kind === "nullableString") {
-                if (arg.type.kind === "nullT") {
-                  callArgs.push(`${parameterType} null`);
-                  break;
-                }
-                if (arg.type.kind === "union") {
-                  const arms = this.unionsById.get(arg.type.unionId)?.arms;
-                  const stringTag = arms?.findIndex((arm) => arm.kind === "string") ?? -1;
-                  const nullTag = arms?.findIndex((arm) => arm.kind === "nullT") ?? -1;
-                  if (stringTag < 0 || nullTag < 0) {
-                    throw new Error(`llvm emitter bug: nullable C-string argument lacks string/null arms in ${binding.id}`);
-                  }
-                  const tag = this.unionTag(arg.name);
-                  const present = B.newLabel("native.cstr.present");
-                  const absent = B.newLabel("native.cstr.absent");
-                  const done = B.newLabel("native.cstr.done");
-                  const isString = B.tmp();
-                  B.line(`${isString} = icmp eq i32 ${tag}, ${stringTag}`);
-                  B.condBr(isString, present, absent);
-                  B.startBlock(present);
-                  const payload = this.unionPeek(arg.name);
-                  this.declare("declare ptr @scr_str_c_data(ptr)");
-                  const presentData = B.tmp();
-                  B.line(`${presentData} = call ptr @scr_str_c_data(ptr ${payload})`);
-                  B.br(done);
-                  B.startBlock(absent);
-                  B.br(done);
-                  B.startBlock(done);
-                  const data = B.tmp();
-                  B.line(`${data} = phi ptr [ ${presentData}, %${present} ], [ null, %${absent} ]`);
-                  this.emitPendingCheck();
-                  callArgs.push(`${parameterType} ${data}`);
-                  break;
-                }
-                if (arg.type.kind !== "string") {
-                  throw new Error(`llvm emitter bug: nullable C-string argument has ${arg.type.kind} type in ${binding.id}`);
-                }
+            /* A double slot converts nothing: the source value is already the
+             * representation the ABI wants. */
+            case "numberIdentity":
+              callArgs.push(`${parameterType} ${valueOf(form.argument)}`);
+              return;
+            case "numberToFloat": {
+              /* The runtime rounds, so both backends agree on what an
+               * out-of-range value becomes; `fptrunc` alone would leave that
+               * to the instruction's overflow behavior. */
+              this.declare("declare float @scr_native_f32_from_number(double)");
+              const rounded = B.tmp();
+              B.line(
+                `${rounded} = call float @scr_native_f32_from_number(double ${valueOf(form.argument)})`,
+              );
+              callArgs.push(`${parameterType} ${rounded}`);
+              return;
+            }
+            case "numberWrapping": {
+              /* The ECMAScript modulo conversion, which is total: every double
+               * has an answer, so nothing is checked and nothing throws. The
+               * runtime helpers keep both backends on one definition of what
+               * ToInt32/ToUint32 mean. */
+              const helper = form.signed ? "scr_bit_or" : "scr_bit_ushr";
+              this.declare(`declare double @${helper}(double, double)`);
+              const wrapped = B.tmp();
+              B.line(
+                `${wrapped} = call double @${helper}(double ${valueOf(form.argument)}, double 0.0)`,
+              );
+              /* The helpers answer ToInt32/ToUint32, so the value is in a
+               * 32-bit range and the conversion to i32 is exact — signed or
+               * unsigned per the class, because fptosi would saturate on the
+               * unsigned half. A narrower slot then truncates, which is the
+               * same two-step cast the C backend spells. */
+              const wide = B.tmp();
+              B.line(
+                `${wide} = ${form.signed ? "fptosi" : "fptoui"} double ${wrapped} to i32`,
+              );
+              const slotType = this.llType(form.scalar);
+              let narrowed = wide;
+              if (slotType !== "i32") {
+                narrowed = B.tmp();
+                B.line(`${narrowed} = trunc i32 ${wide} to ${slotType}`);
               }
-              const data = B.tmp();
+              callArgs.push(`${parameterType} ${narrowed}`);
+              return;
+            }
+            /* The constant IS the converted value, which is exactly what a
+             * branded exact construction would have emitted. */
+            case "numberProvenLiteral":
+              callArgs.push(`${parameterType} ${form.value}`);
+              return;
+            case "numberProvenCrossing": {
+              /* Proved whole and inside the slot on every path that reaches
+               * here, so the conversion cannot see an out-of-range double and
+               * cannot produce poison. */
+              const bare = this.llType(form.scalar);
+              const signedSlot = form.scalar.scalar.startsWith("i");
+              const value = B.tmp();
+              B.line(
+                `${value} = ${signedSlot ? "fptosi" : "fptoui"} double ${valueOf(form.argument)} to ${bare}`,
+              );
+              callArgs.push(`${parameterType} ${value}`);
+              return;
+            }
+            case "numberChecked": {
+              const value = this.checkedNumberIngress(
+                valueOf(form.argument),
+                form.scalar,
+                operation,
+              );
+              this.emitPendingCheck();
+              callArgs.push(`${parameterType} ${value}`);
+              return;
+            }
+            case "cStringNull":
+              callArgs.push(`${parameterType} null`);
+              return;
+            case "cStringOrNull": {
+              const arg = args[form.argument]!;
+              const tag = this.unionTag(arg.name);
+              const present = B.newLabel("native.cstr.present");
+              const absent = B.newLabel("native.cstr.absent");
+              const done = B.newLabel("native.cstr.done");
+              const isString = B.tmp();
+              B.line(`${isString} = icmp eq i32 ${tag}, ${form.stringTag}`);
+              B.condBr(isString, present, absent);
+              B.startBlock(present);
+              const payload = this.unionPeek(arg.name);
               this.declare("declare ptr @scr_str_c_data(ptr)");
-              B.line(`${data} = call ptr @scr_str_c_data(ptr ${arg.name})`);
+              const presentData = B.tmp();
+              B.line(`${presentData} = call ptr @scr_str_c_data(ptr ${payload})`);
+              B.br(done);
+              B.startBlock(absent);
+              B.br(done);
+              B.startBlock(done);
+              const data = B.tmp();
+              B.line(`${data} = phi ptr [ ${presentData}, %${present} ], [ null, %${absent} ]`);
               this.emitPendingCheck();
               callArgs.push(`${parameterType} ${data}`);
-              break;
+              return;
+            }
+            case "cString": {
+              const data = B.tmp();
+              this.declare("declare ptr @scr_str_c_data(ptr)");
+              B.line(`${data} = call ptr @scr_str_c_data(ptr ${valueOf(form.argument)})`);
+              this.emitPendingCheck();
+              callArgs.push(`${parameterType} ${data}`);
+              return;
             }
             case "utf8Data": {
               const data = B.tmp();
-              B.line(`${data} = getelementptr inbounds %ScrStr, ptr ${arg.name}, i64 1`);
+              B.line(`${data} = getelementptr inbounds %ScrStr, ptr ${valueOf(form.argument)}, i64 1`);
               callArgs.push(`${parameterType} ${data}`);
-              break;
+              return;
             }
             case "utf8ByteLength": {
               const lenPtr = B.tmp();
               const len = B.tmp();
-              B.line(`${lenPtr} = getelementptr inbounds %ScrStr, ptr ${arg.name}, i64 0, i32 1`);
+              B.line(`${lenPtr} = getelementptr inbounds %ScrStr, ptr ${valueOf(form.argument)}, i64 0, i32 1`);
               B.line(`${len} = load ${this.sizeType}, ptr ${lenPtr}`);
               callArgs.push(`${parameterType} ${len}`);
-              break;
+              return;
             }
             case "bytesData": {
               const dataPtr = B.tmp();
               const data = B.tmp();
-              B.line(`${dataPtr} = getelementptr inbounds %ScrBytes, ptr ${arg.name}, i64 0, i32 3`);
+              B.line(`${dataPtr} = getelementptr inbounds %ScrBytes, ptr ${valueOf(form.argument)}, i64 0, i32 3`);
               B.line(`${data} = load ptr, ptr ${dataPtr}`);
               callArgs.push(`${parameterType} ${data}`);
-              break;
+              return;
             }
             case "bytesByteLength": {
               const lenPtr = B.tmp();
               const len = B.tmp();
-              B.line(`${lenPtr} = getelementptr inbounds %ScrBytes, ptr ${arg.name}, i64 0, i32 1`);
+              B.line(`${lenPtr} = getelementptr inbounds %ScrBytes, ptr ${valueOf(form.argument)}, i64 0, i32 1`);
               B.line(`${len} = load ${this.sizeType}, ptr ${lenPtr}`);
               callArgs.push(`${parameterType} ${len}`);
-              break;
+              return;
             }
             case "callbackFunction": {
-              const adapter = this.nativeCallbackAdapter(
-                binding.id,
-                parameter.projection.argument,
-              );
+              const adapter = this.nativeCallbackAdapter(binding.id, form.argument);
               callArgs.push(`${parameterType} @${adapter.symbol}`);
-              break;
+              return;
             }
-            /* The registering binding's trampoline, not one of ours: the
-             * library matches the registration on the pointer pair it was
-             * given, so a second trampoline would identify nothing. */
             case "callbackRelease": {
               const adapter = this.nativeCallbackAdapter(
-                parameter.projection.registration.binding,
-                parameter.projection.registration.argument,
+                form.registration.binding,
+                form.registration.argument,
               );
               callArgs.push(`${parameterType} @${adapter.symbol}`);
-              break;
+              return;
             }
             case "callbackContext":
               callArgs.push(
-                `${parameterType} ${retainedTokens.get(parameter.projection.argument) ?? arg.name}`,
+                `${parameterType} ${retainedTokens.get(form.argument) ?? valueOf(form.argument)}`,
               );
-              break;
-            case "argument":
-              if (parameter.type.kind === "nativeStruct") {
-                const layout = this.nativeStructLayout(parameter.type.typeId);
-                const physical = this.nativeStructSourceParameters(layout.definition);
-                const slot = B.tmp();
-                const type = this.llType(parameter.type);
-                B.entryAllocas.push(`${slot} = alloca ${type}, align ${layout.definition.alignment}`);
-                B.line(`store ${type} ${arg.name}, ptr ${slot}, align ${layout.definition.alignment}`);
-                if (physical.length === 1 && physical[0]!.type.kind === "aggregate") {
-                  callArgs.push(`${parameterType} ${arg.name}`);
-                } else if (physical.every((value) => value.type.kind === "pointer")) {
-                  if (physical.length !== 1) {
-                    throw new Error(`llvm emitter bug: aggregate ${parameter.type.typeId} has multiple indirect inputs`);
-                  }
-                  const pointer = physical[0]!.type;
-                  if (pointer.kind !== "pointer") throw new Error("llvm emitter bug: narrowed pointer disappeared");
-                  if (pointer.addressSpace === 0) {
-                    callArgs.push(`${parameterType} ${slot}`);
-                  } else {
-                    const cast = B.tmp();
-                    B.line(`${cast} = addrspacecast ptr ${slot} to ptr addrspace(${pointer.addressSpace})`);
-                    callArgs.push(`${parameterType} ${cast}`);
-                  }
-                } else {
-                  if (physical.some((value) => value.type.kind === "pointer")) {
-                    throw new Error(`llvm emitter bug: aggregate ${parameter.type.typeId} mixes indirect and direct inputs`);
-                  }
-                  const physicalTypes = physical.map((value) =>
-                    this.nativePhysicalType(value.type, layout.definition)
-                  );
-                  const representation = physicalTypes.length === 1
-                    ? physicalTypes[0]!
-                    : `{ ${physicalTypes.join(", ")} }`;
-                  const loaded = B.tmp();
-                  B.line(`${loaded} = load ${representation}, ptr ${slot}, align ${layout.definition.alignment}`);
-                  physical.forEach((_value, physicalIndex) => {
-                    let value = loaded;
-                    if (physical.length > 1) {
-                      value = B.tmp();
-                      B.line(`${value} = extractvalue ${representation} ${loaded}, ${physicalIndex}`);
-                    }
-                    callArgs.push(`${parameterTypes[index]![physicalIndex]} ${value}`);
-                  });
-                }
-              } else if (parameter.type.kind === "nativeHandle") {
-                this.declare(`declare ptr @scr_native_handle_require(ptr, ptr, ptr)`);
-                const tag = mangleNativeHandleTag(parameter.type.typeId);
-                const sourceType =
-                  binding.arguments[parameter.projection.argument]!.type;
-                if (
-                  sourceType.kind === "nullableNativeHandle" &&
-                  arg.type.kind === "nullT"
-                ) {
-                  callArgs.push(`${parameterType} null`);
-                  break;
-                }
-                if (
-                  sourceType.kind === "nullableNativeHandle" &&
-                  arg.type.kind === "union"
-                ) {
-                  // The null arm passes null without consulting the handle
-                  // table; a present handle is validated as a required one is.
-                  const arms = this.unionsById.get(arg.type.unionId)?.arms;
-                  const handleTag = arms?.findIndex(
-                    (arm) => arm.kind === "nativeHandle",
-                  ) ?? -1;
-                  if (handleTag < 0) {
-                    throw new Error(`llvm emitter bug: nullable handle argument lacks a handle arm in ${binding.id}`);
-                  }
-                  const tagValue = this.unionTag(arg.name);
-                  const isHandle = B.tmp();
-                  const present = B.newLabel("native.handle.present");
-                  const absent = B.newLabel("native.handle.absent");
-                  const joined = B.newLabel("native.handle.join");
-                  B.line(`${isHandle} = icmp eq i32 ${tagValue}, ${handleTag}`);
-                  B.condBr(isHandle, present, absent);
-                  B.startBlock(present);
-                  const peeked = this.unionPeek(arg.name);
-                  const required = B.tmp();
-                  B.line(
-                    `${required} = call ptr @scr_native_handle_require(ptr ${peeked}, ` +
-                      `ptr @${tag}, ptr ${operation})`,
-                  );
-                  B.br(joined);
-                  B.startBlock(absent);
-                  B.br(joined);
-                  B.startBlock(joined);
-                  const selected = B.tmp();
-                  B.line(
-                    `${selected} = phi ptr [ ${required}, %${present} ], [ null, %${absent} ]`,
-                  );
-                  this.emitPendingCheck();
-                  callArgs.push(`${parameterType} ${selected}`);
-                  break;
-                }
-                const raw = B.tmp();
-                /* The callee takes the reference, so the cell gives it up
-                 * here rather than holding one nobody owns: the disposal's
-                 * teardown minus freeing the object, which is the callee's
-                 * now. */
-                if (parameter.ownership.kind === "owned") {
-                  this.declare(`declare ptr @scr_native_handle_surrender(ptr, ptr, ptr)`);
-                  B.line(
-                    `${raw} = call ptr @scr_native_handle_surrender(ptr ${arg.name}, ` +
-                      `ptr @${tag}, ptr ${operation})`,
-                  );
-                } else {
-                  B.line(
-                    `${raw} = call ptr @scr_native_handle_require(ptr ${arg.name}, ` +
-                      `ptr @${tag}, ptr ${operation})`,
-                  );
-                }
-                this.emitPendingCheck();
-                callArgs.push(`${parameterType} ${raw}`);
-              } else {
-                callArgs.push(`${parameterType} ${arg.name}`);
+              return;
+            case "handleNull":
+              callArgs.push(`${parameterType} null`);
+              return;
+            case "handleOrNull": {
+              // The null arm passes null without consulting the handle table;
+              // a present handle is validated as a required one is.
+              this.declare(`declare ptr @scr_native_handle_require(ptr, ptr, ptr)`);
+              const arg = args[form.argument]!;
+              const tag = mangleNativeHandleTag(form.typeId);
+              const tagValue = this.unionTag(arg.name);
+              const isHandle = B.tmp();
+              const present = B.newLabel("native.handle.present");
+              const absent = B.newLabel("native.handle.absent");
+              const joined = B.newLabel("native.handle.join");
+              B.line(`${isHandle} = icmp eq i32 ${tagValue}, ${form.handleTag}`);
+              B.condBr(isHandle, present, absent);
+              B.startBlock(present);
+              const peeked = this.unionPeek(arg.name);
+              const required = B.tmp();
+              B.line(
+                `${required} = call ptr @scr_native_handle_require(ptr ${peeked}, ` +
+                  `ptr @${tag}, ptr ${operation})`,
+              );
+              B.br(joined);
+              B.startBlock(absent);
+              B.br(joined);
+              B.startBlock(joined);
+              const selected = B.tmp();
+              B.line(
+                `${selected} = phi ptr [ ${required}, %${present} ], [ null, %${absent} ]`,
+              );
+              this.emitPendingCheck();
+              callArgs.push(`${parameterType} ${selected}`);
+              return;
+            }
+            case "handleSurrender": {
+              /* The callee takes the reference, so the cell gives it up here
+               * rather than holding one nobody owns: the disposal's teardown
+               * minus freeing the object, which is the callee's now. */
+              this.declare(`declare ptr @scr_native_handle_surrender(ptr, ptr, ptr)`);
+              const raw = B.tmp();
+              B.line(
+                `${raw} = call ptr @scr_native_handle_surrender(ptr ${valueOf(form.argument)}, ` +
+                  `ptr @${mangleNativeHandleTag(form.typeId)}, ptr ${operation})`,
+              );
+              this.emitPendingCheck();
+              callArgs.push(`${parameterType} ${raw}`);
+              return;
+            }
+            case "handleRequire": {
+              this.declare(`declare ptr @scr_native_handle_require(ptr, ptr, ptr)`);
+              const raw = B.tmp();
+              B.line(
+                `${raw} = call ptr @scr_native_handle_require(ptr ${valueOf(form.argument)}, ` +
+                  `ptr @${mangleNativeHandleTag(form.typeId)}, ptr ${operation})`,
+              );
+              this.emitPendingCheck();
+              callArgs.push(`${parameterType} ${raw}`);
+              return;
+            }
+            case "direct": {
+              /* An aggregate crossing by value is where the two backends
+               * genuinely differ: C hands the struct over and the compiler
+               * settles the convention, while here the physical classification
+               * decides between one aggregate operand, one indirect pointer,
+               * and a spread of direct fields. That is a fact about LLVM, not
+               * about the contract, so it stays. */
+              if (parameter.type.kind !== "nativeStruct") {
+                callArgs.push(`${parameterType} ${valueOf(form.argument)}`);
+                return;
               }
-              break;
+              const layout = this.nativeStructLayout(parameter.type.typeId);
+              const physical = this.nativeStructSourceParameters(layout.definition);
+              const slot = B.tmp();
+              const type = this.llType(parameter.type);
+              B.entryAllocas.push(`${slot} = alloca ${type}, align ${layout.definition.alignment}`);
+              B.line(`store ${type} ${valueOf(form.argument)}, ptr ${slot}, align ${layout.definition.alignment}`);
+              if (physical.length === 1 && physical[0]!.type.kind === "aggregate") {
+                callArgs.push(`${parameterType} ${valueOf(form.argument)}`);
+                return;
+              }
+              if (physical.every((value) => value.type.kind === "pointer")) {
+                if (physical.length !== 1) {
+                  throw new Error(`llvm emitter bug: aggregate ${parameter.type.typeId} has multiple indirect inputs`);
+                }
+                const pointer = physical[0]!.type;
+                if (pointer.kind !== "pointer") throw new Error("llvm emitter bug: narrowed pointer disappeared");
+                if (pointer.addressSpace === 0) {
+                  callArgs.push(`${parameterType} ${slot}`);
+                } else {
+                  const cast = B.tmp();
+                  B.line(`${cast} = addrspacecast ptr ${slot} to ptr addrspace(${pointer.addressSpace})`);
+                  callArgs.push(`${parameterType} ${cast}`);
+                }
+                return;
+              }
+              if (physical.some((value) => value.type.kind === "pointer")) {
+                throw new Error(`llvm emitter bug: aggregate ${parameter.type.typeId} mixes indirect and direct inputs`);
+              }
+              const physicalTypes = physical.map((value) =>
+                this.nativePhysicalType(value.type, layout.definition)
+              );
+              const representation = physicalTypes.length === 1
+                ? physicalTypes[0]!
+                : `{ ${physicalTypes.join(", ")} }`;
+              const loaded = B.tmp();
+              B.line(`${loaded} = load ${representation}, ptr ${slot}, align ${layout.definition.alignment}`);
+              physical.forEach((_value, physicalIndex) => {
+                let value = loaded;
+                if (physical.length > 1) {
+                  value = B.tmp();
+                  B.line(`${value} = extractvalue ${representation} ${loaded}, ${physicalIndex}`);
+                }
+                callArgs.push(`${parameterTypes[index]![physicalIndex]} ${value}`);
+              });
+              return;
+            }
           }
+          /* See the C backend's matching line: an arm added to
+           * `NativeArgumentForm` and forgotten here stops this compiling. */
+          form satisfies NativeArgumentFormExhausted;
         });
         const cancellationArgument = nativeCallbackCancellationArgument(
           this.mod.nativeBindings ?? [],
