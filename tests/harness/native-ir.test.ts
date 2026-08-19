@@ -542,7 +542,7 @@ const localNativeInput: NativeFrontendInput = {
        * round-trip. */
       id: "scriptc.fixture.c-v1@0.0.0#wide_to_number",
       declaration: { module: nativePackage, name: "wideToNumber" },
-      entry: { kind: "c-symbol", symbol: "nts_i64_passthrough" },
+      entry: { symbol: "nts_i64_passthrough" },
       sourceCall: { kind: "function" },
       error: NO_NATIVE_ERROR,
       ...directSignature([
@@ -558,7 +558,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#number_pair32_transform",
       declaration: { module: nativePackage, name: "numberPair32Transform" },
-      entry: { kind: "c-symbol", symbol: "nts_pair32_transform" },
+      entry: { symbol: "nts_pair32_transform" },
       sourceCall: { kind: "function" },
       error: NO_NATIVE_ERROR,
       ...directSignature([{
@@ -577,7 +577,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#subscribe_number",
       declaration: { module: nativePackage, name: "subscribeNumber" },
-      entry: { kind: "c-symbol", symbol: "nts_subscription_create" },
+      entry: { symbol: "nts_subscription_create" },
       sourceCall: { kind: "function" },
       error: NULL_IS_FAILURE,
       arguments: [{
@@ -616,7 +616,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#call_scoped_number",
       declaration: { module: nativePackage, name: "callScopedNumber" },
-      entry: { kind: "c-symbol", symbol: "nts_call_scoped" },
+      entry: { symbol: "nts_call_scoped" },
       sourceCall: { kind: "function" },
       error: NO_NATIVE_ERROR,
       arguments: [
@@ -658,7 +658,7 @@ const localNativeInput: NativeFrontendInput = {
        * the handler receives the double it widens to. */
       id: "scriptc.fixture.c-v1@0.0.0#call_scoped_f32",
       declaration: { module: nativePackage, name: "callScopedFloat" },
-      entry: { kind: "c-symbol", symbol: "nts_call_scoped_f32" },
+      entry: { symbol: "nts_call_scoped_f32" },
       sourceCall: { kind: "function" },
       error: NO_NATIVE_ERROR,
       arguments: [
@@ -744,7 +744,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#nativeNot",
       declaration: { module: nativePackage, name: "nativeNot" },
-      entry: { kind: "c-symbol", symbol: "nts_boolean_not" },
+      entry: { symbol: "nts_boolean_not" },
       sourceCall: { kind: "function" },
       error: NO_NATIVE_ERROR,
       arguments: [{ name: "value", type: { kind: "bool" } }],
@@ -770,7 +770,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#padded_roundtrip",
       declaration: { module: nativePackage, name: "paddedRoundtrip" },
-      entry: { kind: "c-symbol", symbol: "nts_padded_roundtrip" },
+      entry: { symbol: "nts_padded_roundtrip" },
       sourceCall: { kind: "function" },
       error: NO_NATIVE_ERROR,
       ...directSignature([{ name: "value", type: PADDED, passMode: "value", ownership: { kind: "value" } }]),
@@ -779,7 +779,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#pair32_transform",
       declaration: { module: nativePackage, name: "pair32Transform" },
-      entry: { kind: "c-symbol", symbol: "nts_pair32_transform" },
+      entry: { symbol: "nts_pair32_transform" },
       sourceCall: { kind: "function" },
       error: NO_NATIVE_ERROR,
       ...directSignature([{ name: "value", type: PAIR32, passMode: "value", ownership: { kind: "value" } }]),
@@ -788,7 +788,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#pair_f64_transform",
       declaration: { module: nativePackage, name: "pairF64Transform" },
-      entry: { kind: "c-symbol", symbol: "nts_pair_f64_transform" },
+      entry: { symbol: "nts_pair_f64_transform" },
       sourceCall: { kind: "function" },
       error: NO_NATIVE_ERROR,
       ...directSignature([{ name: "value", type: PAIR_F64, passMode: "value", ownership: { kind: "value" } }]),
@@ -797,7 +797,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#pair_f64_verify",
       declaration: { module: nativePackage, name: "pairF64Verify" },
-      entry: { kind: "c-symbol", symbol: "nts_pair_f64_verify" },
+      entry: { symbol: "nts_pair_f64_verify" },
       sourceCall: { kind: "function" },
       error: NO_NATIVE_ERROR,
       ...directSignature([{ name: "value", type: PAIR_F64, passMode: "value", ownership: { kind: "value" } }]),
@@ -806,7 +806,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#nested_pair32_transform",
       declaration: { module: nativePackage, name: "nestedPair32Transform" },
-      entry: { kind: "c-symbol", symbol: "nts_nested_pair32_transform" },
+      entry: { symbol: "nts_nested_pair32_transform" },
       sourceCall: { kind: "function" },
       error: NO_NATIVE_ERROR,
       ...directSignature([{ name: "value", type: NESTED_PAIR32, passMode: "value", ownership: { kind: "value" } }]),
@@ -815,7 +815,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#hash_utf8",
       declaration: { module: nativePackage, name: "hashUtf8" },
-      entry: { kind: "c-symbol", symbol: "nts_hash_utf8" },
+      entry: { symbol: "nts_hash_utf8" },
       sourceCall: { kind: "function" },
       error: NO_NATIVE_ERROR,
       arguments: [{ name: "data", type: { kind: "string" } }],
@@ -840,7 +840,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#c_string_observe",
       declaration: { module: nativePackage, name: "cStringObserve" },
-      entry: { kind: "c-symbol", symbol: "nts_c_string_observe" },
+      entry: { symbol: "nts_c_string_observe" },
       sourceCall: { kind: "function" },
       error: NO_NATIVE_ERROR,
       arguments: [{ name: "data", type: { kind: "string" } }],
@@ -858,7 +858,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#nullable_c_string_observe",
       declaration: { module: nativePackage, name: "nullableCStringObserve" },
-      entry: { kind: "c-symbol", symbol: "nts_nullable_c_string_observe" },
+      entry: { symbol: "nts_nullable_c_string_observe" },
       sourceCall: { kind: "function" },
       error: NO_NATIVE_ERROR,
       arguments: [{ name: "data", type: { kind: "nullableString" } }],
@@ -876,7 +876,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#hash_bytes",
       declaration: { module: nativePackage, name: "hashBytes" },
-      entry: { kind: "c-symbol", symbol: "nts_hash_bytes" },
+      entry: { symbol: "nts_hash_bytes" },
       sourceCall: { kind: "function" },
       error: NO_NATIVE_ERROR,
       arguments: [{ name: "data", type: { kind: "bytes", elem: "u8" } }],
@@ -901,7 +901,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#call_scoped",
       declaration: { module: nativePackage, name: "callScoped" },
-      entry: { kind: "c-symbol", symbol: "nts_call_scoped" },
+      entry: { symbol: "nts_call_scoped" },
       sourceCall: { kind: "function" },
       error: NO_NATIVE_ERROR,
       arguments: [
@@ -936,7 +936,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#error_handle_fail",
       declaration: { module: nativePackage, name: "errorHandleFail" },
-      entry: { kind: "c-symbol", symbol: "nts_error_handle_fail" },
+      entry: { symbol: "nts_error_handle_fail" },
       sourceCall: { kind: "function" },
       error: {
         detect: { kind: "resultIsNotNull" },
@@ -958,7 +958,7 @@ const localNativeInput: NativeFrontendInput = {
        * slot, so the result stays the call's own. */
       id: "scriptc.fixture.c-v1@0.0.0#error_out_divide",
       declaration: { module: nativePackage, name: "errorOutDivide" },
-      entry: { kind: "c-symbol", symbol: "nts_error_out_divide" },
+      entry: { symbol: "nts_error_out_divide" },
       sourceCall: { kind: "function" },
       error: {
         detect: { kind: "outParameterIsNotNull", parameter: 2 },
@@ -997,7 +997,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#fixture_errors_outstanding",
       declaration: { module: nativePackage, name: "fixtureErrorsOutstanding" },
-      entry: { kind: "c-symbol", symbol: "nts_fixture_errors_outstanding" },
+      entry: { symbol: "nts_fixture_errors_outstanding" },
       sourceCall: { kind: "function" },
       error: NO_NATIVE_ERROR,
       ...directSignature([]),
@@ -1006,7 +1006,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#fail_errno",
       declaration: { module: nativePackage, name: "failErrno" },
-      entry: { kind: "c-symbol", symbol: "nts_fail_errno" },
+      entry: { symbol: "nts_fail_errno" },
       sourceCall: { kind: "function" },
       error: errnoFailure("-1"),
       ...directSignature([
@@ -1020,7 +1020,7 @@ const localNativeInput: NativeFrontendInput = {
        * shape `gtk_widget_add_controller` has. */
       id: "scriptc.fixture.c-v1@0.0.0#vault_create",
       declaration: { module: nativePackage, name: "createVault" },
-      entry: { kind: "c-symbol", symbol: "nts_vault_create" },
+      entry: { symbol: "nts_vault_create" },
       sourceCall: { kind: "function" },
       error: NULL_IS_FAILURE,
       ...directSignature([]),
@@ -1038,7 +1038,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#vault_adopt",
       declaration: { module: nativePackage, name: "Vault.adopt" },
-      entry: { kind: "c-symbol", symbol: "nts_vault_adopt" },
+      entry: { symbol: "nts_vault_adopt" },
       sourceCall: { kind: "method", receiverArgument: 0 },
       error: NO_NATIVE_ERROR,
       arguments: [
@@ -1066,7 +1066,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#vault_value",
       declaration: { module: nativePackage, name: "Vault.value" },
-      entry: { kind: "c-symbol", symbol: "nts_vault_value" },
+      entry: { symbol: "nts_vault_value" },
       sourceCall: { kind: "method", receiverArgument: 0 },
       error: NO_NATIVE_ERROR,
       ...directSignature([
@@ -1077,7 +1077,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#vault_destroy",
       declaration: { module: nativePackage, name: "Vault.dispose" },
-      entry: { kind: "c-symbol", symbol: "nts_vault_destroy" },
+      entry: { symbol: "nts_vault_destroy" },
       sourceCall: { kind: "method", receiverArgument: 0 },
       error: NO_NATIVE_ERROR,
       ...directSignature([
@@ -1095,7 +1095,7 @@ const localNativeInput: NativeFrontendInput = {
        * owns the registration, and disposing it is the cancellation. */
       id: "scriptc.fixture.c-v1@0.0.0#asker_create",
       declaration: { module: nativePackage, name: "askFor" },
-      entry: { kind: "c-symbol", symbol: "nts_asker_create" },
+      entry: { symbol: "nts_asker_create" },
       sourceCall: { kind: "function" },
       error: NULL_IS_FAILURE,
       arguments: [
@@ -1134,7 +1134,7 @@ const localNativeInput: NativeFrontendInput = {
        * exact storage value each one means. */
       id: "scriptc.fixture.c-v1@0.0.0#answerer_create",
       declaration: { module: nativePackage, name: "answerWith" },
-      entry: { kind: "c-symbol", symbol: "nts_answerer_create" },
+      entry: { symbol: "nts_answerer_create" },
       sourceCall: { kind: "function" },
       error: NULL_IS_FAILURE,
       arguments: [
@@ -1170,7 +1170,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#answerer_destroy",
       declaration: { module: nativePackage, name: "Answerer.dispose" },
-      entry: { kind: "c-symbol", symbol: "nts_answerer_destroy" },
+      entry: { symbol: "nts_answerer_destroy" },
       sourceCall: { kind: "method", receiverArgument: 0 },
       error: NO_NATIVE_ERROR,
       ...directSignature([
@@ -1186,7 +1186,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#asker_ask",
       declaration: { module: nativePackage, name: "Asker.ask" },
-      entry: { kind: "c-symbol", symbol: "nts_asker_ask" },
+      entry: { symbol: "nts_asker_ask" },
       sourceCall: { kind: "method", receiverArgument: 0 },
       error: NO_NATIVE_ERROR,
       ...directSignature([
@@ -1198,7 +1198,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#asker_asked",
       declaration: { module: nativePackage, name: "Asker.asked" },
-      entry: { kind: "c-symbol", symbol: "nts_asker_asked" },
+      entry: { symbol: "nts_asker_asked" },
       sourceCall: { kind: "method", receiverArgument: 0 },
       error: NO_NATIVE_ERROR,
       ...directSignature([
@@ -1209,7 +1209,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#asker_destroy",
       declaration: { module: nativePackage, name: "Asker.dispose" },
-      entry: { kind: "c-symbol", symbol: "nts_asker_destroy" },
+      entry: { symbol: "nts_asker_destroy" },
       sourceCall: { kind: "method", receiverArgument: 0 },
       error: NO_NATIVE_ERROR,
       ...directSignature([
@@ -1225,7 +1225,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#subscription_create",
       declaration: { module: nativePackage, name: "subscribe" },
-      entry: { kind: "c-symbol", symbol: "nts_subscription_create" },
+      entry: { symbol: "nts_subscription_create" },
       sourceCall: { kind: "function" },
       error: NULL_IS_FAILURE,
       arguments: [
@@ -1266,7 +1266,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#subscription_destroy",
       declaration: { module: nativePackage, name: "Subscription.dispose" },
-      entry: { kind: "c-symbol", symbol: "nts_subscription_destroy" },
+      entry: { symbol: "nts_subscription_destroy" },
       sourceCall: { kind: "method", receiverArgument: 0 },
       error: NO_NATIVE_ERROR,
       ...directSignature([
@@ -1323,7 +1323,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#counter_add",
       declaration: { module: nativePackage, name: "Counter.add" },
-      entry: { kind: "c-symbol", symbol: "nts_counter_add" },
+      entry: { symbol: "nts_counter_add" },
       sourceCall: { kind: "method", receiverArgument: 0 },
       error: NO_NATIVE_ERROR,
       ...directSignature([
@@ -1335,7 +1335,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#counter_create",
       declaration: { module: nativePackage, name: "createCounter" },
-      entry: { kind: "c-symbol", symbol: "nts_counter_create" },
+      entry: { symbol: "nts_counter_create" },
       sourceCall: { kind: "function" },
       error: NO_NATIVE_ERROR,
       ...directSignature([
@@ -1355,7 +1355,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#counter_destroy",
       declaration: { module: nativePackage, name: "Counter.dispose" },
-      entry: { kind: "c-symbol", symbol: "nts_counter_destroy" },
+      entry: { symbol: "nts_counter_destroy" },
       sourceCall: { kind: "method", receiverArgument: 0 },
       error: NO_NATIVE_ERROR,
       ...directSignature([
@@ -1366,7 +1366,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#counter_destroyed_count",
       declaration: { module: nativePackage, name: "counterDestroyedCount" },
-      entry: { kind: "c-symbol", symbol: "nts_counter_destroyed_count" },
+      entry: { symbol: "nts_counter_destroyed_count" },
       sourceCall: { kind: "function" },
       error: NO_NATIVE_ERROR,
       ...directSignature([]),
@@ -1375,7 +1375,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#counter_value_or",
       declaration: { module: nativePackage, name: "counterValueOr" },
-      entry: { kind: "c-symbol", symbol: "nts_counter_value_or" },
+      entry: { symbol: "nts_counter_value_or" },
       sourceCall: { kind: "function" },
       error: NO_NATIVE_ERROR,
       // The source argument is optional while the ABI slot stays one pointer,
@@ -1409,7 +1409,7 @@ const localNativeInput: NativeFrontendInput = {
        * take, which is the shape any nullable base-typed object input has. */
       id: "scriptc.fixture.c-v1@0.0.0#counter_base_value_or",
       declaration: { module: nativePackage, name: "counterBaseValueOr" },
-      entry: { kind: "c-symbol", symbol: "nts_counter_base_value_or" },
+      entry: { symbol: "nts_counter_base_value_or" },
       sourceCall: { kind: "function" },
       error: NO_NATIVE_ERROR,
       arguments: [
@@ -1437,7 +1437,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#counter_value",
       declaration: { module: nativePackage, name: "CounterBase.value" },
-      entry: { kind: "c-symbol", symbol: "nts_counter_value" },
+      entry: { symbol: "nts_counter_value" },
       sourceCall: { kind: "method", receiverArgument: 0 },
       error: NO_NATIVE_ERROR,
       ...directSignature([
@@ -1448,7 +1448,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#counter_label",
       declaration: { module: nativePackage, name: "Counter.label" },
-      entry: { kind: "c-symbol", symbol: "nts_counter_label" },
+      entry: { symbol: "nts_counter_label" },
       sourceCall: { kind: "method", receiverArgument: 0 },
       error: NO_NATIVE_ERROR,
       ...directSignature([
@@ -1464,7 +1464,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#counter_required_label",
       declaration: { module: nativePackage, name: "Counter.requiredLabel" },
-      entry: { kind: "c-symbol", symbol: "nts_counter_required_label" },
+      entry: { symbol: "nts_counter_required_label" },
       sourceCall: { kind: "method", receiverArgument: 0 },
       error: NO_NATIVE_ERROR,
       ...directSignature([
@@ -1480,7 +1480,7 @@ const localNativeInput: NativeFrontendInput = {
     {
       id: "scriptc.fixture.c-v1@0.0.0#counter_verify",
       declaration: { module: nativePackage, name: "counterVerify" },
-      entry: { kind: "c-symbol", symbol: "nts_counter_verify" },
+      entry: { symbol: "nts_counter_verify" },
       sourceCall: { kind: "function" },
       error: NO_NATIVE_ERROR,
       ...directSignature([
@@ -1517,7 +1517,7 @@ function frontendNativeInput(): NativeFrontendInput {
       {
         id: "scriptc-test@1#isize-identity",
         declaration: { module: "scriptc-native-test", name: "isizeIdentity" },
-        entry: { kind: "c-symbol", symbol: "scriptc_test_isize_identity" },
+        entry: { symbol: "scriptc_test_isize_identity" },
         sourceCall: { kind: "function" },
         error: NO_NATIVE_ERROR,
         ...directSignature([{ name: "value", type: ISIZE, passMode: "value", ownership: { kind: "value" } }]),
@@ -1526,7 +1526,7 @@ function frontendNativeInput(): NativeFrontendInput {
       {
         id: "scriptc-test@1#exit",
         declaration: { module: "scriptc-native-test", name: "exit" },
-        entry: { kind: "c-symbol", symbol: "exit" },
+        entry: { symbol: "exit" },
         sourceCall: { kind: "function" },
         error: NO_NATIVE_ERROR,
         ...directSignature([{ name: "status", type: I32, passMode: "value", ownership: { kind: "value" } }]),
@@ -1535,7 +1535,7 @@ function frontendNativeInput(): NativeFrontendInput {
       {
         id: "scriptc-test@1#unused",
         declaration: { module: "scriptc-native-test", name: "unused" },
-        entry: { kind: "c-symbol", symbol: "scriptc_test_unlinked" },
+        entry: { symbol: "scriptc_test_unlinked" },
         sourceCall: { kind: "function" },
         error: NO_NATIVE_ERROR,
         ...directSignature([{ name: "value", type: I32, passMode: "value", ownership: { kind: "value" } }]),
@@ -1544,7 +1544,7 @@ function frontendNativeInput(): NativeFrontendInput {
       {
         id: "scriptc-test@1#verify-exact-integers",
         declaration: { module: "scriptc-native-test", name: "verifyExactIntegers" },
-        entry: { kind: "c-symbol", symbol: "scriptc_test_verify_exact_integers" },
+        entry: { symbol: "scriptc_test_verify_exact_integers" },
         sourceCall: { kind: "function" },
         error: NO_NATIVE_ERROR,
         ...directSignature([
@@ -1564,7 +1564,7 @@ function frontendNativeInput(): NativeFrontendInput {
       {
         id: "scriptc-test@1#verify-padded",
         declaration: { module: "scriptc-native-test", name: "verifyPadded" },
-        entry: { kind: "c-symbol", symbol: "scriptc_test_verify_padded" },
+        entry: { symbol: "scriptc_test_verify_padded" },
         sourceCall: { kind: "function" },
         error: NO_NATIVE_ERROR,
         ...directSignature([
@@ -1578,7 +1578,7 @@ function frontendNativeInput(): NativeFrontendInput {
       {
         id: "scriptc-test@1#verify-utf8-hash",
         declaration: { module: "scriptc-native-test", name: "verifyUtf8Hash" },
-        entry: { kind: "c-symbol", symbol: "scriptc_test_verify_utf8_hash" },
+        entry: { symbol: "scriptc_test_verify_utf8_hash" },
         sourceCall: { kind: "function" },
         error: NO_NATIVE_ERROR,
         ...directSignature([
@@ -1589,7 +1589,7 @@ function frontendNativeInput(): NativeFrontendInput {
       {
         id: "scriptc-test@1#verify-bytes-hash",
         declaration: { module: "scriptc-native-test", name: "verifyBytesHash" },
-        entry: { kind: "c-symbol", symbol: "scriptc_test_verify_bytes_hash" },
+        entry: { symbol: "scriptc_test_verify_bytes_hash" },
         sourceCall: { kind: "function" },
         error: NO_NATIVE_ERROR,
         ...directSignature([
@@ -1600,7 +1600,7 @@ function frontendNativeInput(): NativeFrontendInput {
       {
         id: "scriptc-test@1#verify-call-scoped",
         declaration: { module: "scriptc-native-test", name: "verifyCallScoped" },
-        entry: { kind: "c-symbol", symbol: "scriptc_test_verify_call_scoped" },
+        entry: { symbol: "scriptc_test_verify_call_scoped" },
         sourceCall: { kind: "function" },
         error: NO_NATIVE_ERROR,
         ...directSignature([
@@ -1612,7 +1612,7 @@ function frontendNativeInput(): NativeFrontendInput {
       {
         id: "scriptc-test@1#callback-errno",
         declaration: { module: "scriptc-native-test", name: "callbackErrno" },
-        entry: { kind: "c-symbol", symbol: "scriptc_test_callback_errno" },
+        entry: { symbol: "scriptc_test_callback_errno" },
         sourceCall: { kind: "function" },
         error: errnoFailure("-1"),
         arguments: [
@@ -1647,7 +1647,7 @@ function frontendNativeInput(): NativeFrontendInput {
       {
         id: "scriptc-test@1#nullable-counter",
         declaration: { module: "scriptc-native-test", name: "createNullableCounter" },
-        entry: { kind: "c-symbol", symbol: "scriptc_test_nullable_counter" },
+        entry: { symbol: "scriptc_test_nullable_counter" },
         sourceCall: { kind: "function" },
         error: NULL_IS_FAILURE,
         ...directSignature([
@@ -1667,7 +1667,7 @@ function frontendNativeInput(): NativeFrontendInput {
       {
         id: "scriptc-test@1#callback-nullable-counter",
         declaration: { module: "scriptc-native-test", name: "callbackNullableCounter" },
-        entry: { kind: "c-symbol", symbol: "scriptc_test_callback_nullable_counter" },
+        entry: { symbol: "scriptc_test_callback_nullable_counter" },
         sourceCall: { kind: "function" },
         error: NULL_IS_FAILURE,
         arguments: [
@@ -1746,9 +1746,7 @@ function frontendNativeInput(): NativeFrontendInput {
           module: "scriptc-native-test",
           name: "callbacksConfigureAttached",
         },
-        entry: {
-          kind: "c-symbol",
-          symbol: "scriptc_test_callbacks_configure_attached",
+        entry: { symbol: "scriptc_test_callbacks_configure_attached",
         },
         sourceCall: { kind: "function" },
         error: NO_NATIVE_ERROR,
@@ -1766,9 +1764,7 @@ function frontendNativeInput(): NativeFrontendInput {
           module: "scriptc-native-test",
           name: "callbacksConfigureAttachedTimer",
         },
-        entry: {
-          kind: "c-symbol",
-          symbol: "scriptc_test_callbacks_configure_attached_timer",
+        entry: { symbol: "scriptc_test_callbacks_configure_attached_timer",
         },
         sourceCall: { kind: "function" },
         error: NO_NATIVE_ERROR,
@@ -1786,9 +1782,7 @@ function frontendNativeInput(): NativeFrontendInput {
           module: "scriptc-native-test",
           name: "callbacksObserveAttached",
         },
-        entry: {
-          kind: "c-symbol",
-          symbol: "scriptc_test_callbacks_observe_attached",
+        entry: { symbol: "scriptc_test_callbacks_observe_attached",
         },
         sourceCall: { kind: "function" },
         error: NO_NATIVE_ERROR,
@@ -1808,7 +1802,7 @@ function frontendNativeInput(): NativeFrontendInput {
       {
         id: "scriptc-test@1#verify-retained",
         declaration: { module: "scriptc-native-test", name: "verifyRetained" },
-        entry: { kind: "c-symbol", symbol: "scriptc_test_verify_retained" },
+        entry: { symbol: "scriptc_test_verify_retained" },
         sourceCall: { kind: "function" },
         error: NO_NATIVE_ERROR,
         ...directSignature([
@@ -1878,7 +1872,7 @@ describe.each(["llvm", "c"] as const)("exact Native IR library exports, %s emiss
               module: nativePackage,
               name: "FixtureLibraryExports.ntsTsAddI32",
             },
-            entry: { kind: "c-symbol", symbol: "nts_ts_add_i32" },
+            entry: { symbol: "nts_ts_add_i32" },
             error: NO_NATIVE_ERROR,
             parameters: [
               { name: "left", type: I32, passMode: "value", ownership: { kind: "value" } },
@@ -1983,7 +1977,7 @@ function exactI32Module(value = "42"): IrModule {
         id: "fixture.i32_identity",
         declaration: { module: "@scriptc/native-abi-fixture", name: "i32Identity" },
         sourceAccess: "call",
-        entry: { kind: "c-symbol", symbol: "nts_i32_identity" },
+        entry: { symbol: "nts_i32_identity" },
         error: NO_NATIVE_ERROR,
         ...directSignature([{ name: "value", type: I32, passMode: "value", ownership: { kind: "value" } }]),
         result: { type: I32, passMode: "value", ownership: { kind: "value" as const }, projection: DIRECT_RESULT },
@@ -1992,7 +1986,7 @@ function exactI32Module(value = "42"): IrModule {
         id: "process.exit",
         declaration: { module: "scriptc:test", name: "exit" },
         sourceAccess: "call",
-        entry: { kind: "c-symbol", symbol: "exit" },
+        entry: { symbol: "exit" },
         error: NO_NATIVE_ERROR,
         ...directSignature([{ name: "status", type: I32, passMode: "value", ownership: { kind: "value" } }]),
         result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" as const }, projection: DIRECT_RESULT },
@@ -2136,7 +2130,7 @@ function pointerScalarCallModule(pointerBits: 32 | 64): IrModule {
         id: "fixture.pointer_sizes",
         declaration: { module: "scriptc:test", name: "pointerSizes" },
         sourceAccess: "call",
-        entry: { kind: "c-symbol", symbol: "scriptc_test_pointer_sizes" },
+        entry: { symbol: "scriptc_test_pointer_sizes" },
         error: NO_NATIVE_ERROR,
         ...directSignature([
           { name: "signedSize", type: ISIZE, passMode: "value", ownership: { kind: "value" as const } },
@@ -3306,9 +3300,7 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
             {
               id: "scriptc.fixture.c-v1@0.0.0#counter_construct",
               declaration: { module: nativePackage, name: "NativeCounter" },
-              entry: {
-                kind: "c-symbol",
-                symbol: "nts_counter_create_with_initial_value",
+              entry: { symbol: "nts_counter_create_with_initial_value",
               },
               sourceCall: { kind: "constructor" },
               error: NO_NATIVE_ERROR,
@@ -3326,7 +3318,7 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
                 module: nativePackage,
                 name: "NativeCounter.withInitialValue",
               },
-              entry: { kind: "c-symbol", symbol: "nts_counter_create_static" },
+              entry: { symbol: "nts_counter_create_static" },
               sourceCall: { kind: "function" },
               error: NO_NATIVE_ERROR,
               ...directSignature([{

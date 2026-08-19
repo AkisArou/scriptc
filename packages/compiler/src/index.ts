@@ -1720,10 +1720,7 @@ function resolveNativeLibraryExports(
       continue;
     }
     ids.add(entry.id);
-    if (
-      entry.entry.kind !== "c-symbol" ||
-      !C_NATIVE_EXPORT_SYMBOL.test(entry.entry.symbol)
-    ) {
+    if (!C_NATIVE_EXPORT_SYMBOL.test(entry.entry.symbol)) {
       diagnostics.push(nativeBindingDiag(entry.id, `the export entry is not a valid C symbol ('${entry.entry.symbol}')`, loc));
       continue;
     }

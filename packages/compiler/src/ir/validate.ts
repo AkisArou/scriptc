@@ -1799,12 +1799,6 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     if (nativeById.has(binding.id)) {
       errors.push({ message: `duplicate Native IR binding id "${binding.id}"`, loc: moduleLoc });
     }
-    if (binding.entry.kind !== "c-symbol") {
-      errors.push({
-        message: `Native IR binding "${binding.id}" has unsupported entry kind "${String(binding.entry.kind)}"`,
-        loc: moduleLoc,
-      });
-    }
     if (!cIdentifier.test(binding.entry.symbol)) {
       errors.push({
         message: `Native IR binding "${binding.id}" has invalid C symbol "${binding.entry.symbol}"`,

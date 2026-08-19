@@ -440,7 +440,7 @@ export function desugarFfiValueBinding(
      * unable to collide with an embedder's module. */
     declaration: { module: FFI_DECLARATION_MODULE, name: entry.name },
     sourceAccess: "call",
-    entry: { kind: "c-symbol", symbol: entry.symbol },
+    entry: { symbol: entry.symbol },
     // A profile states no failure convention: native code returns normally.
     error: {
       detect: { kind: "never" },

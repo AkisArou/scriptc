@@ -24,7 +24,7 @@ import type {
 } from "../src/native-manifest.js";
 
 const source = readFileSync(
-  fileURLToPath(new URL("../src/native-manifest.ts", import.meta.url)),
+  fileURLToPath(new URL("../src/native-manifest.d.ts", import.meta.url)),
   "utf8",
 );
 

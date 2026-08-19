@@ -452,7 +452,11 @@ export interface IrNativeBinding {
   /** Source operation role. Read and write may intentionally share one
    * declaration identity for a native accessor pair. */
   sourceAccess: "call" | "read" | "write";
-  entry: { kind: "c-symbol"; symbol: string };
+  /** How the call is materialized. One field today, because a C symbol is the
+   * only call target implemented; it is a record rather than a bare string
+   * because that is the position a descriptor or a capsule occupies when
+   * another one is. */
+  entry: { symbol: string };
   /** Exact foreign failure convention. This is mandatory so backends never
    * infer error semantics from a symbol, declaration, or native type.
    *
@@ -676,7 +680,6 @@ export interface NativeFrontendBinding {
     readonly name: string;
   };
   readonly entry: {
-    readonly kind: "c-symbol";
     readonly symbol: string;
   };
   readonly error:
@@ -740,7 +743,6 @@ export interface NativeFrontendExport {
     readonly name: string;
   };
   readonly entry: {
-    readonly kind: "c-symbol";
     readonly symbol: string;
   };
   readonly error: {

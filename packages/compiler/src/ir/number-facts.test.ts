@@ -926,7 +926,7 @@ function numberBinding(id: string, scalar: "i32" | "u8"): IrNativeBinding {
     id,
     declaration: { module: "fixture", name: id },
     sourceAccess: "call",
-    entry: { kind: "c-symbol", symbol: `nts_${id}` },
+    entry: { symbol: `nts_${id}` },
     error: {
       detect: { kind: "never" },
       message: { kind: "none" },
