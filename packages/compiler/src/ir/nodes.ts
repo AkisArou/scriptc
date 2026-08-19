@@ -239,6 +239,19 @@ export interface IrNativeCallbackType {
   signature: IrNativeCallbackSignature;
 }
 
+/** The slot a failable call writes its error object into.
+ *
+ * Compiler-supplied like the closure context beside it, and opaque for the
+ * same reason: the object is read through the contract's message and release
+ * symbols and never becomes a source value. The compiler allocates the
+ * pointer, initialises it to null, and passes its address — which is what a
+ * `GError **` trailing parameter is, and what makes the call's own result
+ * free to carry something useful. */
+export interface IrNativeErrorOutType {
+  kind: "nativeErrorOut";
+  addressSpace: 0;
+}
+
 /** Opaque ScriptC closure context passed beside a native callback pointer. */
 export interface IrNativeContextType {
   kind: "nativeContext";
@@ -552,7 +565,8 @@ export type IrNativeAbiType =
   | IrNativeValueType
   | IrNativePointerType
   | IrNativeCallbackType
-  | IrNativeContextType;
+  | IrNativeContextType
+  | IrNativeErrorOutType;
 export type IrNativeArgumentType =
   | IrNativeValueType
   /** A plain JavaScript number crossing into a checked exact-integer slot.
@@ -599,6 +613,9 @@ export type IrNativeParameterProjection =
   | { kind: "utf8ByteLength"; argument: number }
   | { kind: "bytesData"; argument: number }
   | { kind: "bytesByteLength"; argument: number }
+  /** The compiler's own error slot. It projects no source argument: nothing
+   * in the program supplies it, and nothing reads it but the error contract. */
+  | { kind: "errorOut" }
   | { kind: "callbackFunction"; argument: number }
   | { kind: "callbackContext"; argument: number }
   /** The trampoline of a registration this call is UNMAKING. It is the same
@@ -1343,7 +1360,7 @@ export function isRefCounted(t: IrType): boolean {
 /* ── module ────────────────────────────────────────────────────────────── */
 
 /** Current wire-format version for every producer and consumer of Native IR. */
-export const IR_VERSION = 33 as const;
+export const IR_VERSION = 34 as const;
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
@@ -1442,6 +1459,11 @@ export type IrNativeFailureDetection =
   | { kind: "resultIsNull" }
   /** The result IS the error object: non-null means failure, null success. */
   | { kind: "resultIsNotNull" }
+  /** An OUT PARAMETER is the error object: non-null after the call means
+   * failure. The result is the call's own, so unlike `resultIsNotNull` this
+   * leaves a failable call free to hand something back — which is what 289 of
+   * the 481 failable callables across GTK, Gio and GLib do. */
+  | { kind: "outParameterIsNotNull"; parameter: number }
   | { kind: "resultEquals"; value: string };
 
 /** Where the thrown message comes from. `none` means the detection names the

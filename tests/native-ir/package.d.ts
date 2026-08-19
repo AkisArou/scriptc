@@ -116,6 +116,8 @@ export declare class NativeCounter {
  * shape a C error object takes once an adapter has absorbed its
  * out-parameter. */
 export declare function errorHandleFail(code: i32): void;
+/** Fails through a trailing out-parameter, so the quotient survives. */
+export declare function errorOutDivide(numerator: i32, divisor: i32): i32;
 export declare function fixtureErrorsOutstanding(): i32;
 
 export declare function i8Identity(value: i8): i8;

@@ -1852,7 +1852,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         : null;
       const detect = shape === null
         ? null
-        : axis(shape.detect, "kind") ?? axis(shape.detect, "kind,value");
+        : axis(shape.detect, "kind") ?? axis(shape.detect, "kind,value") ??
+          axis(shape.detect, "kind,parameter");
       const message = shape === null ? null : axis(shape.message, "kind") ?? axis(shape.message, "kind,symbol");
       const release = shape === null ? null : axis(shape.release, "kind") ?? axis(shape.release, "kind,symbol");
       if (detect === null || message === null || release === null) {
@@ -1905,6 +1906,25 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             projection?.kind !== "errorChannel"
           ) {
             invalid = "error-object";
+          }
+        } else if (combination === "outParameterIsNotNull/symbol/symbol") {
+          /* The same two foreign entries as the error-object contract above,
+           * with the object arriving in a slot instead of as the result —
+           * which is the whole point: the result stays the call's own, so a
+           * failable operation can hand something back. The named parameter
+           * must BE the error slot, and the result must not also claim to be
+           * the error. */
+          const projection = binding.result.projection as { kind?: unknown } | undefined;
+          const slot = binding.parameters[Number(detect["parameter"])];
+          if (
+            !symbolValid(message) || !symbolValid(release) ||
+            message["symbol"] === release["symbol"] ||
+            !Number.isSafeInteger(detect["parameter"]) ||
+            slot?.type.kind !== "nativeErrorOut" ||
+            slot.projection.kind !== "errorOut" ||
+            projection?.kind === "errorChannel"
+          ) {
+            invalid = "error-out";
           }
         } else {
           errors.push({
@@ -2015,9 +2035,13 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       const pointerParameter = parameter.type.kind === "nativePointer";
       const callbackParameter = parameter.type.kind === "nativeCallback";
       const contextParameter = parameter.type.kind === "nativeContext";
+      /* The error slot is an address the callee stores through, so it crosses
+       * as a pointer like every other slot that is not a value. */
+      const errorOutParameter = parameter.type.kind === "nativeErrorOut";
       if (
         parameter.passMode !==
-          (handleParameter || pointerParameter || callbackParameter || contextParameter
+          (handleParameter || pointerParameter || callbackParameter ||
+              contextParameter || errorOutParameter
             ? "pointer"
             : "value")
       ) {
@@ -2052,12 +2076,33 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           ? validNativeCallback(parameter.type)
           : parameter.type.kind === "nativeContext"
             ? validNativeContext(parameter.type)
-            : validNativeValue(parameter.type);
+            : parameter.type.kind === "nativeErrorOut"
+              ? Object.keys(parameter.type).sort().join(",") === "addressSpace,kind" &&
+                parameter.type.addressSpace === 0
+              : validNativeValue(parameter.type);
       if (!validParameterType) {
         errors.push({
           message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an unsupported exact type`,
           loc: moduleLoc,
         });
+      }
+      /* The error slot projects nothing: the compiler supplies it, the callee
+       * writes it, and no source value is involved at either end. Every rule
+       * below is about a projection that names an argument, so it leaves
+       * here — with its own rules stated where the contract is checked. */
+      if (parameter.projection.kind === "errorOut") {
+        if (
+          Object.keys(parameter.projection).length !== 1 ||
+          parameter.type.kind !== "nativeErrorOut" ||
+          parameter.passMode !== "pointer" ||
+          parameter.ownership.kind !== "value"
+        ) {
+          errors.push({
+            message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an invalid error-out projection`,
+            loc: moduleLoc,
+          });
+        }
+        continue;
       }
       const sourceArgument = binding.arguments[parameter.projection.argument];
       if (
@@ -2095,6 +2140,10 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             sourceArgument.type.kind === "nullableNativeHandle" ||
             sourceArgument.type.kind === "bytes" ||
             sourceArgument.type.kind === "func" ||
+            /* The error slot never reaches a direct projection — it left the
+             * loop above — so a `nativeErrorOut` here is a malformed binding
+             * rather than a type to compare. */
+            parameter.type.kind === "nativeErrorOut" ||
             !typeEquals(parameter.type, sourceArgument.type))
           ) {
             errors.push({

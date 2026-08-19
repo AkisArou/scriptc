@@ -954,6 +954,47 @@ const localNativeInput: NativeFrontendInput = {
       },
     },
     {
+      /* The shape an absorbing adapter cannot serve: failure arrives in a
+       * slot, so the result stays the call's own. */
+      id: "scriptc.fixture.c-v1@0.0.0#error_out_divide",
+      declaration: { module: nativePackage, name: "errorOutDivide" },
+      entry: { kind: "c-symbol", symbol: "nts_error_out_divide" },
+      sourceCall: { kind: "function" },
+      error: {
+        detect: { kind: "outParameterIsNotNull", parameter: 2 },
+        message: { kind: "symbol", symbol: "nts_fixture_error_message" },
+        release: { kind: "symbol", symbol: "nts_fixture_error_free" },
+      },
+      arguments: [
+        { name: "numerator", type: I32 },
+        { name: "divisor", type: I32 },
+      ],
+      parameters: [
+        {
+          name: "numerator",
+          type: I32,
+          passMode: "value",
+          ownership: { kind: "value" },
+          projection: { kind: "argument", argument: 0 },
+        },
+        {
+          name: "divisor",
+          type: I32,
+          passMode: "value",
+          ownership: { kind: "value" },
+          projection: { kind: "argument", argument: 1 },
+        },
+        {
+          name: "error",
+          type: { kind: "nativeErrorOut", addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "value" },
+          projection: { kind: "errorOut" },
+        },
+      ],
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
       id: "scriptc.fixture.c-v1@0.0.0#fixture_errors_outstanding",
       declaration: { module: nativePackage, name: "fixtureErrorsOutstanding" },
       entry: { kind: "c-symbol", symbol: "nts_fixture_errors_outstanding" },

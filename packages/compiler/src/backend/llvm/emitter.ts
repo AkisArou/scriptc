@@ -1438,7 +1438,8 @@ class LlEmitter {
     if (
       t.kind === "nativePointer" ||
       t.kind === "nativeCallback" ||
-      t.kind === "nativeContext"
+      t.kind === "nativeContext" ||
+      t.kind === "nativeErrorOut"
     ) return "ptr";
     if (t.kind === "nativeStruct") {
       const definition = this.nativeTypesById.get(t.typeId);
@@ -7282,12 +7283,28 @@ class LlEmitter {
         this.declare(
           `declare ${returnType} @${binding.entry.symbol}(${declarationParameters.join(", ")})`,
         );
+        /* A failable call that keeps its own result reports the error through
+         * a slot the compiler owns. Kept in lockstep with the C backend. */
+        let errorSlot: string | null = null;
+        if (binding.parameters.some((p) => p.projection.kind === "errorOut")) {
+          errorSlot = B.slot();
+          B.entryAllocas.push(`${errorSlot} = alloca ptr`);
+        }
         const callArgs: string[] = [];
         if (aggregateResult !== null && returnStorage !== null) {
           callArgs.push(`${declarationParameters[0]} ${resultSlot}`);
         }
         const provenCrossings = this.provenNumberCrossings.get(e);
         binding.parameters.forEach((parameter, index) => {
+          /* The compiler's own slot: nothing in the program supplies it, so
+           * it projects no argument. The alloca is hoisted to the entry block
+           * so a call inside a loop does not grow the stack per iteration.
+           * Kept in lockstep with the C backend. */
+          if (parameter.projection.kind === "errorOut") {
+            B.line(`store ptr null, ptr ${errorSlot}`);
+            callArgs.push(`ptr ${errorSlot}`);
+            return;
+          }
           const arg = args[parameter.projection.argument]!;
           const parameterType = parameterTypes[index]?.[0];
           if (parameterType === undefined) {
@@ -7673,7 +7690,50 @@ class LlEmitter {
           `${callArgs.join(", ")})`;
         /* Everything that has to happen the moment the native call returns,
          * in the order the lifecycle gives. */
-        const afterCall: (() => void)[] = lifecycle.teardown.map((step) => () => {
+        /* The error is read the moment the call returns and before the result
+         * is projected: on failure the result is not a value, and the pending
+         * check below unwinds before anything tries to make one of it. Kept in
+         * lockstep with the C backend. */
+        const errorCheck: (() => void)[] = errorSlot === null ? [] : [() => {
+          const detect = binding.error.detect;
+          if (
+            detect.kind !== "outParameterIsNotNull" ||
+            binding.error.message.kind !== "symbol" ||
+            binding.error.release.kind !== "symbol"
+          ) {
+            throw new Error(`llvm emitter bug: error slot without an error object in ${binding.id}`);
+          }
+          this.declare(`declare ptr @${binding.error.message.symbol}(ptr)`);
+          this.declare(`declare void @${binding.error.release.symbol}(ptr)`);
+          this.declare(`declare void @scr_native_throw_native_error(ptr, ptr)`);
+          this.declare(`declare zeroext i1 @scr_exc_pending()`);
+          const held = B.tmp();
+          const failed = B.tmp();
+          const fail = B.newLabel("err.fail");
+          const raise = B.newLabel("err.raise");
+          const release = B.newLabel("err.release");
+          const done = B.newLabel("err.ok");
+          B.line(`${held} = load ptr, ptr ${errorSlot}`);
+          B.line(`${failed} = icmp ne ptr ${held}, null`);
+          B.condBr(failed, fail, done);
+          B.startBlock(fail);
+          const message = B.tmp();
+          const pending = B.tmp();
+          B.line(`${message} = call ptr @${binding.error.message.symbol}(ptr ${held})`);
+          /* A callback may already have thrown during the call, and that
+           * exception wins — but the object is released either way, which is
+           * why both paths meet at the release rather than one skipping it. */
+          B.line(`${pending} = call zeroext i1 @scr_exc_pending()`);
+          B.condBr(pending, release, raise);
+          B.startBlock(raise);
+          B.line(`call void @scr_native_throw_native_error(ptr ${message}, ptr ${operation})`);
+          B.br(release);
+          B.startBlock(release);
+          B.line(`call void @${binding.error.release.symbol}(ptr ${held})`);
+          B.br(done);
+          B.startBlock(done);
+        }];
+        const afterCall: (() => void)[] = [...errorCheck, ...lifecycle.teardown.map((step) => () => {
           const token = retainedTokens.get(step.argument);
           if (step.kind === "restoreClosure") {
             B.line(`store ptr ${saved.get(step.argument)}, ptr @${step.slot}`);
@@ -7703,7 +7763,7 @@ class LlEmitter {
           B.line(
             `call void @scr_retained_callbacks_release_process(ptr ${token}, i1 ${step.foreign})`,
           );
-        });
+        })];
         if (afterCall.length > 0) {
           if (returnType === "void") {
             B.line(call);
@@ -7719,6 +7779,9 @@ class LlEmitter {
             call = `select i1 true, ${returnType} ${bound}, ${returnType} ${bound}`;
           }
           for (const emit of afterCall) emit();
+          /* On failure the result is not a value. Unwinding here is what lets
+           * every projection below assume it is looking at a success. */
+          if (errorSlot !== null) this.emitPendingCheck();
         }
         if (aggregateResult !== null && returnStorage !== null) {
           B.line(call);

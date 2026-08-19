@@ -2326,7 +2326,20 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           return { name: "", type: e.type };
         }
         const provenCrossings = E.provenNumberCrossings.get(e);
+        /* A failable call that keeps its own result reports the error through
+         * a slot the compiler owns. One per call site, named before the
+         * arguments are built because the check after the call reads it. */
+        const errorSlot = binding.parameters.some((p) => p.projection.kind === "errorOut")
+          ? `sc_t${E.tempCounter++}`
+          : null;
         const nativeArgs = binding.parameters.map((parameter, parameterIndex) => {
+          /* The compiler's own slot: nothing in the program supplies it, so
+           * it projects no argument. Declared null here, and its ADDRESS is
+           * what the callee is handed — the callee stores through it. */
+          if (parameter.projection.kind === "errorOut") {
+            E.line(`void *${errorSlot} = NULL;`);
+            return `&${errorSlot}`;
+          }
           const arg = args[parameter.projection.argument]!;
           switch (parameter.projection.kind) {
             case "boolean": {
@@ -2560,7 +2573,31 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
          * first, and only then is a released registration unpinned — the
          * library may flush it one last time on the way out, and the pin is
          * what keeps that legal. */
-        const afterCall = lifecycle.teardown.flatMap((step) => {
+        /* The error is read the moment the call returns and before the result
+         * is projected: on failure the result is not a value, and the pending
+         * check below unwinds before anything tries to make one of it. */
+        const errorCheck = errorSlot === null ? [] : (() => {
+          const detect = binding.error.detect;
+          if (
+            detect.kind !== "outParameterIsNotNull" ||
+            binding.error.message.kind !== "symbol" ||
+            binding.error.release.kind !== "symbol"
+          ) {
+            throw new Error(`emitter bug: error slot without an error object in ${binding.id}`);
+          }
+          const message = `sc_t${E.tempCounter++}`;
+          return [
+            `if (${errorSlot} != NULL) {`,
+            `  const char *${message} = ${binding.error.message.symbol}(${errorSlot});`,
+            /* A callback may already have thrown during the call, and that
+             * exception wins. The object is released either way, so a pending
+             * exception cannot strand it. */
+            `  if (!scr_exc_pending()) scr_native_throw_native_error(${message}, ${operation});`,
+            `  ${binding.error.release.symbol}(${errorSlot});`,
+            `}`,
+          ];
+        })();
+        const afterCall = [...errorCheck, ...lifecycle.teardown.flatMap((step) => {
           const token = retainedTokens.get(step.argument);
           switch (step.kind) {
             case "restoreClosure":
@@ -2576,7 +2613,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
                 `scr_retained_callbacks_release_process(${token}, ${step.foreign});`,
               ];
           }
-        });
+        })];
         if (afterCall.length > 0) {
           if (binding.result.type.kind === "void") {
             E.line(`${call};${E.srcComment(e.loc)}`);
@@ -2593,6 +2630,9 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             call = bound;
           }
           for (const line of afterCall) E.line(line);
+          /* On failure the result is not a value. Unwinding here is what lets
+           * every projection below assume it is looking at a success. */
+          if (errorSlot !== null) E.emitPendingCheck();
         }
         if (binding.result.type.kind === "void") {
           E.line(`${call};${E.srcComment(e.loc)}`);

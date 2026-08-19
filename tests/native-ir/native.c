@@ -274,6 +274,22 @@ NtsFixtureError *nts_error_handle_fail(int32_t code) {
   return error;
 }
 
+/* The shape a failable C API actually has, and the one an absorbing adapter
+ * cannot serve: the error arrives in a trailing out-parameter, so the result
+ * is free to carry something the caller wants. GIO is built from this — 289 of
+ * the 481 failable callables across GTK, Gio and GLib return a real value.
+ *
+ * On failure the result is deliberately a value that would be WRONG to use,
+ * so a test that forgets to unwind reads it and says so. */
+int32_t nts_error_out_divide(int32_t numerator, int32_t divisor,
+                             NtsFixtureError **error) {
+  if (divisor == 0) {
+    *error = nts_error_handle_fail(numerator);
+    return -12345;
+  }
+  return numerator / divisor;
+}
+
 const char *nts_fixture_error_message(NtsFixtureError *error) {
   return error->message;
 }

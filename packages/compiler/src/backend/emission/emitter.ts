@@ -836,6 +836,10 @@ export class CEmitter {
               ? nativeCallbackPointerTypeC(type)
               : type.kind === "nativeContext"
                 ? "void *"
+              /* The callee stores THROUGH it, which is why it is a pointer to
+               * the error pointer rather than the error pointer itself. */
+              : type.kind === "nativeErrorOut"
+                ? "void **"
             : cType(type).trim();
       const params = binding.parameters.map((parameter) => nativeAbiType(parameter.type));
       out.push(
