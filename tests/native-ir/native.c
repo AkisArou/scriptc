@@ -147,6 +147,13 @@ int32_t nts_cstring_array_measure(const char **items) {
   return total * 100 + count;
 }
 
+/* The same measurement where the vector may be absent. An absent vector is
+ * not an empty one — no list at all against a list of nothing — so this
+ * answers -1 for NULL and the ordinary measurement otherwise. */
+int32_t nts_cstring_array_measure_optional(const char **items) {
+  return items == NULL ? -1 : nts_cstring_array_measure(items);
+}
+
 /* The same measurement with a plain string BESIDE the vector, so a program
  * can put a throwing conversion after a successful borrow. That ordering is
  * the one where a vector could be stranded: the release below the call is

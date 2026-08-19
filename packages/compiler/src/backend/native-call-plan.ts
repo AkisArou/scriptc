@@ -356,6 +356,14 @@ export type NativeArgumentForm =
    * only argument family that leaves something to clean up: the vector is
    * built before the call and released after it, whatever the call did. */
   | { readonly kind: "cStringArray"; readonly argument: number }
+  /** A nullable vector argument whose value is statically the null arm. */
+  | { readonly kind: "cStringArrayNull" }
+  /** A nullable vector argument that is a union at runtime. */
+  | {
+      readonly kind: "cStringArrayOrNull";
+      readonly argument: number;
+      readonly arrayTag: number;
+    }
   /** A nullable string argument whose value is statically the null arm. */
   | { readonly kind: "cStringNull" }
   /** A nullable string argument that is a union at runtime. */
@@ -498,8 +506,33 @@ export function nativeArgumentForm(
       }
       return { kind: "cString", argument };
     }
-    case "utf8CStringArray":
+    case "utf8CStringArray": {
+      const sourceType = binding.arguments[argument]?.type;
+      if (sourceType?.kind !== "nullableStringArray") {
+        return { kind: "cStringArray", argument };
+      }
+      /* Statically absent: the call site narrowed to null, so there is no
+       * vector to build and NULL is the whole conversion. */
+      if (valueType.kind === "nullT") return { kind: "cStringArrayNull" };
+      if (valueType.kind === "union") {
+        const arms = context.tables.unionsById.get(valueType.unionId)?.arms;
+        const arrayTag = armTag(
+          arms,
+          (arm) => arm.kind === "array" && arm.elem.kind === "string",
+        );
+        const nullTag = armTag(arms, (arm) => arm.kind === "nullT");
+        if (arrayTag < 0 || nullTag < 0) {
+          fail("nullable C-string-array argument lacks array/null arms");
+        }
+        return { kind: "cStringArrayOrNull", argument, arrayTag };
+      }
+      /* Statically present: narrowed to the array arm, so it borrows like a
+       * required vector. */
+      if (!(valueType.kind === "array" && valueType.elem.kind === "string")) {
+        fail(`nullable C-string-array argument has ${valueType.kind} type`);
+      }
       return { kind: "cStringArray", argument };
+    }
     case "utf8Data":
     case "utf8ByteLength":
     case "bytesData":

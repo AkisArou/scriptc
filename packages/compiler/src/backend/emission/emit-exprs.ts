@@ -2477,6 +2477,26 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               emitConversionPendingCheck();
               return raw;
             }
+            case "cStringArrayNull":
+              /* Nothing to build and nothing to release: the absent vector is
+               * NULL, which is what a C API distinguishing "no list" from "an
+               * empty list" is asking for. */
+              return "NULL";
+            case "cStringArrayOrNull": {
+              const arg = args[form.argument]!;
+              const raw = `sc_t${E.tempCounter++}`;
+              E.line(
+                `const char **${raw} = ${arg.name}->tag == ${form.arrayTag} ` +
+                  `? scr_native_cstring_array_borrow(` +
+                  `(ScrArr *)scr_union_peek(${arg.name}), ${operation}) : NULL;`,
+              );
+              emitConversionPendingCheck();
+              /* Recorded even when the arm was null, because the release is
+               * `free` and takes NULL — one unconditional call instead of a
+               * branch the teardown would otherwise have to carry. */
+              borrowedArrays.set(form.argument, raw);
+              return raw;
+            }
             case "cStringArray": {
               /* The vector is this call's, not the program's: the strings
                * belong to the managed array and outlive the call, so what is

@@ -620,6 +620,29 @@ const localNativeInput: NativeFrontendInput = {
       },
     },
     {
+      /* The same vector where the source may omit it. Absence reaches the
+       * callee as NULL, which a C API distinguishes from an empty vector. */
+      id: "scriptc.fixture.c-v1@0.0.0#cstring_array_measure_optional",
+      declaration: { module: nativePackage, name: "cstringArrayMeasureOptional" },
+      entry: { symbol: "nts_cstring_array_measure_optional" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      arguments: [{ name: "items", type: { kind: "nullableStringArray" } }],
+      parameters: [{
+        name: "items",
+        type: { kind: "nativePointer", pointee: "ptr", const: true, addressSpace: 0 },
+        passMode: "pointer" as const,
+        ownership: { kind: "borrowed" as const, scope: "call" as const },
+        projection: { kind: "utf8CStringArray" as const, argument: 0 },
+      }],
+      result: {
+        type: I32,
+        passMode: "value" as const,
+        ownership: { kind: "value" as const },
+        projection: DIRECT_RESULT,
+      },
+    },
+    {
       /* A vector and a plain string, in that order, so a program can make the
        * SECOND conversion throw while the first has already allocated. */
       id: "scriptc.fixture.c-v1@0.0.0#cstring_array_measure_named",
@@ -3722,6 +3745,13 @@ describe.each(["c", "llvm"] as const)("Native IR checked-number boundary, %s bac
     const releases = generated.split("scr_native_cstring_array_release").length - 1;
     expect(borrows).toBeGreaterThan(0);
     expect(releases).toBeGreaterThan(borrows);
+    /* The nullable call site reads its tag at RUNTIME. The program feeds it a
+     * variable the emitter cannot narrow, so a build that folded the arm away
+     * would still exit 42 while testing nothing — this is what says the union
+     * path ran rather than a constant. */
+    expect(generated).toMatch(
+      backend === "c" ? /tag == \d+ \? scr_native_cstring_array_borrow/u : /native\.cstrv\.present/u,
+    );
     const run = spawnSync(result.binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
       status: 42,

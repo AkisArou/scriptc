@@ -285,6 +285,16 @@ function matchesNativeArgumentSource(
       handleArms.some((arm) => typeEquals(arm, handle)) &&
       handleArms.some((arm) => arm.kind === "nullT");
   }
+  if (expected.kind === "nullableStringArray") {
+    const isStringArray = (type: IrType): boolean =>
+      type.kind === "array" && type.elem.kind === "string";
+    if (isStringArray(mapped) || mapped.kind === "nullT") return true;
+    if (mapped.kind !== "union") return false;
+    const vectorArms = L.unions.get(mapped.unionId)?.arms;
+    return vectorArms?.length === 2 &&
+      vectorArms.some(isStringArray) &&
+      vectorArms.some((arm) => arm.kind === "nullT");
+  }
   if (expected.kind !== "nullableString") {
     return typeEquals(mapped, nativeArgumentScriptType(expected));
   }
@@ -301,6 +311,7 @@ function formatNativeArgumentType(
   type: NativeInputBinding["arguments"][number]["type"],
 ): string {
   if (type.kind === "nullableString") return "string | null";
+  if (type.kind === "nullableStringArray") return "string[] | null";
   if (type.kind === "nullableNativeHandle") {
     return `${L.fmt({ kind: "nativeHandle", typeId: type.typeId })} | null`;
   }
@@ -579,8 +590,12 @@ function lowerNativeInvocation(
   refuseUnprovableNumberLiterals(L, binding, argumentNodes);
   const args = argumentNodes.map((argument, index) => {
     const expected = binding.arguments[index]!.type;
+    /* The three nullable source forms are unions the call site may narrow, so
+     * they are lowered from the CONTEXTUAL type below rather than against one
+     * expected script type. Everything else has exactly one. */
     if (
       expected.kind !== "nullableString" &&
+      expected.kind !== "nullableStringArray" &&
       expected.kind !== "nullableNativeHandle"
     ) {
       return L.lowerExprExpecting(argument, nativeArgumentScriptType(expected));

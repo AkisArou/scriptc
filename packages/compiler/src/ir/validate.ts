@@ -1993,6 +1993,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
          * receives. One element type, because a terminated vector cannot
          * carry an absent element without ending itself where it is. */
         !(argument.type.kind === "array" && argument.type.elem.kind === "string") &&
+        argument.type.kind !== "nullableStringArray" &&
         !validNativeCallbackArgument(argument.type) &&
         !validNativeValue(argument.type)
       ) {
@@ -2147,6 +2148,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             // Any optional handle that reaches here disagreed with its
             // parameter, since the agreeing case short-circuited above.
             sourceArgument.type.kind === "nullableNativeHandle" ||
+            sourceArgument.type.kind === "nullableStringArray" ||
             sourceArgument.type.kind === "bytes" ||
             sourceArgument.type.kind === "func" ||
             /* The error slot never reaches a direct projection — it left the
@@ -2248,8 +2250,11 @@ export function validateModule(mod: IrModule): IrValidationError[] {
            * spelling here, because a NUL-terminated vector cannot hold one
            * without ending itself. */
           if (
-            sourceArgument.type.kind !== "array" ||
-            sourceArgument.type.elem.kind !== "string" ||
+            !(
+              (sourceArgument.type.kind === "array" &&
+                sourceArgument.type.elem.kind === "string") ||
+              sourceArgument.type.kind === "nullableStringArray"
+            ) ||
             parameter.type.kind !== "nativePointer" ||
             parameter.type.pointee !== "ptr" ||
             parameter.type.const !== true ||
@@ -2605,7 +2610,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
               ? projections.total === 1 && projections.number === 1
             /* A string array fills ONE slot, unlike a byte span: the vector
              * carries its own end, so there is no length beside it. */
-            : argument.type.kind === "array"
+            : argument.type.kind === "array" ||
+                argument.type.kind === "nullableStringArray"
               ? projections.total === 1 && projections.utf8CStringArray === 1
             : argument.type.kind === "bytes"
               ? projections.total === 2 &&
@@ -4765,6 +4771,21 @@ function validateFunction(
                   arms.some((arm) => arm.kind === "nullT"))
               ) {
                 err(`Native IR call ${e.binding} arg ${i} must be string | null`, arg.loc);
+              }
+            } else if (argument.type.kind === "nullableStringArray") {
+              const arms = arg.type.kind === "union"
+                ? unions.get(arg.type.unionId)?.arms
+                : undefined;
+              const isStringArray = (type: IrType): boolean =>
+                type.kind === "array" && type.elem.kind === "string";
+              if (
+                !isStringArray(arg.type) &&
+                arg.type.kind !== "nullT" &&
+                !(arms?.length === 2 &&
+                  arms.some(isStringArray) &&
+                  arms.some((arm) => arm.kind === "nullT"))
+              ) {
+                err(`Native IR call ${e.binding} arg ${i} must be string[] | null`, arg.loc);
               }
             } else if (argument.type.kind === "nullableNativeHandle") {
               const handle = {

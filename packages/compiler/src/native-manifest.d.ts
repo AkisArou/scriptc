@@ -344,6 +344,12 @@ export type IrNativeArgumentType =
    * terminated vector cannot carry an absent element without ending itself
    * where the absence is. */
   | { kind: "array"; elem: { kind: "string" } }
+  /** The same, where the source may omit it. Absence reaches the callee as
+   * NULL, which is what a C API distinguishing "no list" from "an empty list"
+   * asks for — and the reason this is a separate arm rather than a nullable
+   * flag on the one above: an empty vector is a vector, and the two must not
+   * collapse. */
+  | { kind: "nullableStringArray" }
   | IrNativeCallbackArgumentType;
 
 export type IrNativeParameterProjection =

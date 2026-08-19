@@ -214,6 +214,11 @@ export interface Answered {
  * `total * 100 + count` so a wrong pointer and a wrong length are different
  * wrong answers. */
 export declare function cstringArrayMeasure(items: readonly string[]): i32;
+/** The same measurement where the vector may be absent. Answers -1 for the
+ * absent vector, which is not the empty one. */
+export declare function cstringArrayMeasureOptional(
+  items: readonly string[] | null,
+): i32;
 /** The same measurement with a string beside the vector, so a program can put
  * a throwing conversion after a successful borrow. */
 export declare function cstringArrayMeasureNamed(

@@ -15,6 +15,7 @@
 import {
   cstringArrayMeasure,
   cstringArrayMeasureNamed,
+  cstringArrayMeasureOptional,
   type i32,
 } from "@scriptc/native-abi-fixture";
 import { exit } from "scriptc-native-test";
@@ -88,6 +89,22 @@ function measure(): number {
     strandedRejected = true;
   }
   check(strandedRejected);
+
+  /* An absent vector is not an empty one. A C API that takes `char **` uses
+   * NULL for "no list at all" and a terminator at slot zero for "a list of
+   * nothing", and a program that could not tell them apart could not say the
+   * first. */
+  check(cstringArrayMeasureOptional(null) === (-1 as i32));
+  check(cstringArrayMeasureOptional([]) === (0 as i32));
+  check(cstringArrayMeasureOptional(["one", "three", "to"]) === (1003 as i32));
+
+  /* Through a value the emitter cannot narrow, so the tag is read at runtime
+   * rather than folded: the same call site takes both arms. */
+  let optional: string[] | null = null;
+  for (let round = 0; round < 2; round = round + 1) {
+    check(cstringArrayMeasureOptional(optional) === (round === 0 ? (-1 as i32) : (804 as i32)));
+    optional = built;
+  }
 
   return failures;
 }

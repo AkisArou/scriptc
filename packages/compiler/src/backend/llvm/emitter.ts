@@ -7497,6 +7497,43 @@ class LlEmitter {
               callArgs.push(`${parameterType} ${data}`);
               return;
             }
+            case "cStringArrayNull":
+              /* Nothing to build and nothing to release: the absent vector is
+               * NULL, which is what a C API distinguishing "no list" from "an
+               * empty list" is asking for. */
+              callArgs.push(`${parameterType} null`);
+              return;
+            case "cStringArrayOrNull": {
+              const arg = args[form.argument]!;
+              const tag = this.unionTag(arg.name);
+              const present = B.newLabel("native.cstrv.present");
+              const absent = B.newLabel("native.cstrv.absent");
+              const done = B.newLabel("native.cstrv.done");
+              const isArray = B.tmp();
+              B.line(`${isArray} = icmp eq i32 ${tag}, ${form.arrayTag}`);
+              B.condBr(isArray, present, absent);
+              B.startBlock(present);
+              const payload = this.unionPeek(arg.name);
+              this.declare("declare ptr @scr_native_cstring_array_borrow(ptr, ptr)");
+              const built = B.tmp();
+              B.line(
+                `${built} = call ptr @scr_native_cstring_array_borrow(` +
+                  `ptr ${payload}, ptr ${operation})`,
+              );
+              B.br(done);
+              B.startBlock(absent);
+              B.br(done);
+              B.startBlock(done);
+              const vector = B.tmp();
+              B.line(`${vector} = phi ptr [ ${built}, %${present} ], [ null, %${absent} ]`);
+              emitConversionPendingCheck();
+              /* Recorded even when the arm was null, because the release is
+               * `free` and takes NULL — one unconditional call instead of a
+               * branch the teardown would otherwise have to carry. */
+              borrowedArrays.set(form.argument, vector);
+              callArgs.push(`${parameterType} ${vector}`);
+              return;
+            }
             case "cStringArray": {
               /* The vector is this call's, not the program's: the strings
                * belong to the managed array and outlive the call, so what is
