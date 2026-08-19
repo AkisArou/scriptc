@@ -809,8 +809,21 @@ describe.each(["c", "llvm"] as const)("FFI binding identity, %s backend", (backe
         );
       }
 
-      const node = spawnSync(process.execPath, [entry], { encoding: "utf8" });
-      const native = spawnSync(result.binaryPath, [], { encoding: "utf8" });
+      /* Compare what the programs PRINT, not how a terminal would style it.
+       * Node colorizes an inspected number when colour is forced, so with
+       * FORCE_COLOR set in the environment its `22` arrives wrapped in escape
+       * codes and the compiled program's does not — a difference about the
+       * harness's terminal, not about either program. */
+      const plain = { ...process.env };
+      delete plain["FORCE_COLOR"];
+      const node = spawnSync(process.execPath, [entry], {
+        encoding: "utf8",
+        env: plain,
+      });
+      const native = spawnSync(result.binaryPath, [], {
+        encoding: "utf8",
+        env: plain,
+      });
       expect({
         stdout: native.stdout,
         stderr: native.stderr,
