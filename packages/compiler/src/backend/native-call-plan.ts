@@ -488,3 +488,70 @@ export function nativeArgumentForm(
     }
   }
 }
+
+/**
+ * How this call reports failure at the point the check has to happen, resolved
+ * and checked.
+ *
+ * The result forms above cover the two detections that ARE the result — an
+ * error object returned, a NULL that means failure — because for those the
+ * check and the projection are one act. What is left is the two that happen
+ * beside the result: a slot the compiler owns, read after the call, and a
+ * sentinel value compared against the result once it is bound.
+ *
+ * Splitting it this way is not a taxonomy: it follows where the emitters have
+ * to put the code. A slot is read before the result is projected, because a
+ * failed call has no result to project; a sentinel is compared after, because
+ * the value being compared IS the result.
+ */
+export type NativeFailureForm =
+  /** Nothing to check here — either the call cannot fail, or its failure is
+   * the result itself and the result form carries it. */
+  | { readonly kind: "none" }
+  /** A compiler-owned slot, non-null after the call. Read before the result is
+   * projected, so every projection may assume it looks at a success. */
+  | {
+      readonly kind: "errorSlot";
+      readonly message: string;
+      readonly release: string;
+    }
+  /** A sentinel result with the failure detail in `errno`. */
+  | {
+      readonly kind: "sentinel";
+      readonly scalar: IrNativeScalarType;
+      readonly value: string;
+    };
+
+export function nativeFailureForm(binding: IrNativeBinding): NativeFailureForm {
+  const fail = (detail: string): never => {
+    throw new NativeCallPlanError(binding.id, detail);
+  };
+  const detect = binding.error.detect;
+
+  if (detect.kind === "outParameterIsNotNull") {
+    if (binding.error.message.kind !== "symbol" || binding.error.release.kind !== "symbol") {
+      fail("error slot without an error object");
+    }
+    const message = binding.error.message as { readonly symbol: string };
+    const release = binding.error.release as { readonly symbol: string };
+    return { kind: "errorSlot", message: message.symbol, release: release.symbol };
+  }
+
+  if (detect.kind === "resultEquals") {
+    if (binding.result.type.kind !== "nativeScalar" || binding.result.type.scalar === "f64") {
+      fail("sentinel failure over a non-integer result");
+    }
+    /* The only lowered message for a sentinel result is errno. A bare
+     * sentinel — failure with nothing to say — is admissible in the shape and
+     * has no emission yet; the validator refuses it, so reaching here means
+     * the two disagree. */
+    if (binding.error.message.kind !== "errno") fail("unlowered sentinel message");
+    return {
+      kind: "sentinel",
+      scalar: binding.result.type as IrNativeScalarType,
+      value: detect.value,
+    };
+  }
+
+  return { kind: "none" };
+}

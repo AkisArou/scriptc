@@ -10,7 +10,7 @@ import { dynDestrCheckHelper, dynIterNHelper, dynKeyGetHelper } from "./emit-wal
 import { genResultThunkFor } from "./emit-async.js";
 import { nativeCallbackCancellationArgument } from "../native-callbacks.js";
 import { nativeCallLifecycle } from "../native-callbacks.js";
-import { nativeArgumentForm, nativeResultForm, type NativeArgumentFormExhausted } from "../native-call-plan.js";
+import { nativeArgumentForm, nativeFailureForm, nativeResultForm, type NativeArgumentFormExhausted } from "../native-call-plan.js";
 
 function streamTypedRefCommitAdapter(
   E: CEmitter,
@@ -2271,6 +2271,9 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         /* What the result becomes, resolved and checked once rather than by a
          * ladder each backend maintains. Every arm below reads what it needs
          * off this and asks the contract nothing. */
+        /* How failure is reported where the check has to happen: a slot read
+         * before the result is projected, or a sentinel compared after. */
+        const failureForm = nativeFailureForm(binding);
         const resultForm = nativeResultForm(binding, e.type, {
           unionsById: E.unionsById,
           nativeTypesById: E.nativeTypesById,
@@ -2556,24 +2559,16 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         /* The error is read the moment the call returns and before the result
          * is projected: on failure the result is not a value, and the pending
          * check below unwinds before anything tries to make one of it. */
-        const errorCheck = errorSlot === null ? [] : (() => {
-          const detect = binding.error.detect;
-          if (
-            detect.kind !== "outParameterIsNotNull" ||
-            binding.error.message.kind !== "symbol" ||
-            binding.error.release.kind !== "symbol"
-          ) {
-            throw new Error(`emitter bug: error slot without an error object in ${binding.id}`);
-          }
+        const errorCheck = failureForm.kind !== "errorSlot" ? [] : (() => {
           const message = `sc_t${E.tempCounter++}`;
           return [
             `if (${errorSlot} != NULL) {`,
-            `  const char *${message} = ${binding.error.message.symbol}(${errorSlot});`,
+            `  const char *${message} = ${failureForm.message}(${errorSlot});`,
             /* A callback may already have thrown during the call, and that
              * exception wins. The object is released either way, so a pending
              * exception cannot strand it. */
             `  if (!scr_exc_pending()) scr_native_throw_native_error(${message}, ${operation});`,
-            `  ${binding.error.release.symbol}(${errorSlot});`,
+            `  ${failureForm.release}(${errorSlot});`,
             `}`,
           ];
         })();
@@ -2850,21 +2845,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         const remaining: "direct" = resultForm.kind;
         void remaining;
         const result = E.newTemp(e.type, call);
-        if (binding.error.detect.kind === "resultEquals") {
-          const resultType = binding.result.type;
-          if (resultType.kind !== "nativeScalar" || resultType.scalar === "f64") {
-            throw new Error(`emitter bug: sentinel failure over non-integer result in ${binding.id}`);
-          }
-          /* The only lowered message for a sentinel result is errno. A bare
-           * sentinel — failure with nothing to say — is admissible in the
-           * shape and has no emission yet; the validator refuses it, so
-           * reaching here means the two disagree. */
-          if (binding.error.message.kind !== "errno") {
-            throw new Error(`emitter bug: unlowered sentinel message in ${binding.id}`);
-          }
+        if (failureForm.kind === "sentinel") {
           const failure = cNativeScalarLiteral(
-            resultType,
-            binding.error.detect.value,
+            failureForm.scalar,
+            failureForm.value,
             E.mod.nativeTarget?.pointerBits,
           );
           const errorNumber = `sc_t${E.tempCounter++}`;

@@ -90,7 +90,7 @@ import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, islandPr
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
 import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, nativeCallLifecycle, nativeCallbackPayloads, nativeTrampolineForm, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
-import { nativeArgumentForm, nativeResultForm, type NativeArgumentFormExhausted } from "../native-call-plan.js";
+import { nativeArgumentForm, nativeFailureForm, nativeResultForm, type NativeArgumentFormExhausted } from "../native-call-plan.js";
 import { computeMayThrow } from "../emission/may-throw.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleNativeHandleTag, mangleNativeStruct, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
@@ -7179,6 +7179,9 @@ class LlEmitter {
         /* What the result becomes, resolved and checked once rather than by a
          * ladder each backend maintains. Every arm below reads what it needs
          * off this and asks the contract nothing. */
+        /* How failure is reported where the check has to happen: a slot read
+         * before the result is projected, or a sentinel compared after. */
+        const failureForm = nativeFailureForm(binding);
         const resultForm = nativeResultForm(binding, e.type, {
           unionsById: this.unionsById,
           nativeTypesById: this.nativeTypesById,
@@ -7673,17 +7676,9 @@ class LlEmitter {
          * is projected: on failure the result is not a value, and the pending
          * check below unwinds before anything tries to make one of it. Kept in
          * lockstep with the C backend. */
-        const errorCheck: (() => void)[] = errorSlot === null ? [] : [() => {
-          const detect = binding.error.detect;
-          if (
-            detect.kind !== "outParameterIsNotNull" ||
-            binding.error.message.kind !== "symbol" ||
-            binding.error.release.kind !== "symbol"
-          ) {
-            throw new Error(`llvm emitter bug: error slot without an error object in ${binding.id}`);
-          }
-          this.declare(`declare ptr @${binding.error.message.symbol}(ptr)`);
-          this.declare(`declare void @${binding.error.release.symbol}(ptr)`);
+        const errorCheck: (() => void)[] = failureForm.kind !== "errorSlot" ? [] : [() => {
+          this.declare(`declare ptr @${failureForm.message}(ptr)`);
+          this.declare(`declare void @${failureForm.release}(ptr)`);
           this.declare(`declare void @scr_native_throw_native_error(ptr, ptr)`);
           this.declare(`declare zeroext i1 @scr_exc_pending()`);
           const held = B.tmp();
@@ -7698,7 +7693,7 @@ class LlEmitter {
           B.startBlock(fail);
           const message = B.tmp();
           const pending = B.tmp();
-          B.line(`${message} = call ptr @${binding.error.message.symbol}(ptr ${held})`);
+          B.line(`${message} = call ptr @${failureForm.message}(ptr ${held})`);
           /* A callback may already have thrown during the call, and that
            * exception wins — but the object is released either way, which is
            * why both paths meet at the release rather than one skipping it. */
@@ -7708,7 +7703,7 @@ class LlEmitter {
           B.line(`call void @scr_native_throw_native_error(ptr ${message}, ptr ${operation})`);
           B.br(release);
           B.startBlock(release);
-          B.line(`call void @${binding.error.release.symbol}(ptr ${held})`);
+          B.line(`call void @${failureForm.release}(ptr ${held})`);
           B.br(done);
           B.startBlock(done);
         }];
@@ -8186,20 +8181,13 @@ class LlEmitter {
         void remaining;
         const result = B.tmp();
         B.line(`${result} = ${call}`);
-        if (binding.error.detect.kind === "resultEquals") {
-          const resultType = binding.result.type;
-          if (resultType.kind !== "nativeScalar" || resultType.scalar === "f64") {
-            throw new Error(`llvm emitter bug: errno over non-integer result in ${binding.id}`);
-          }
+        if (failureForm.kind === "sentinel") {
           const failed = B.tmp();
-          if (binding.error.message.kind !== "errno") {
-            throw new Error(`emitter bug: unlowered sentinel message in ${binding.id}`);
-          }
-          const failure = binding.error.detect.value;
+          const failure = failureForm.value;
           const failureBlock = B.newLabel("native.errno");
           const throwBlock = B.newLabel("native.errno.throw");
           const continuation = B.newLabel("native.errno.ok");
-          B.line(`${failed} = icmp eq ${this.llType(resultType)} ${result}, ${failure}`);
+          B.line(`${failed} = icmp eq ${this.llType(failureForm.scalar)} ${result}, ${failure}`);
           B.condBr(failed, failureBlock, continuation);
           B.startBlock(failureBlock);
           this.declare("declare i32 @scr_native_errno_snapshot()");
