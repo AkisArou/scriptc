@@ -10,6 +10,7 @@ import { dynDestrCheckHelper, dynIterNHelper, dynKeyGetHelper } from "./emit-wal
 import { genResultThunkFor } from "./emit-async.js";
 import { nativeCallbackCancellationArgument } from "../native-callbacks.js";
 import { nativeCallLifecycle } from "../native-callbacks.js";
+import { nativeResultForm } from "../native-call-plan.js";
 
 function streamTypedRefCommitAdapter(
   E: CEmitter,
@@ -2267,6 +2268,14 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           (bindingId, argument) => E.nativeCallbackAdapter(bindingId, argument),
         );
         const retainedOwnerArguments = lifecycle.registrationOwnerArguments;
+        /* What the result becomes, resolved and checked once rather than by a
+         * ladder each backend maintains. Every arm below reads what it needs
+         * off this and asks the contract nothing. */
+        const resultForm = nativeResultForm(binding, e.type, {
+          unionsById: E.unionsById,
+          nativeTypesById: E.nativeTypesById,
+          nativeById: E.nativeById,
+        });
         for (const step of lifecycle.setup) {
           const closure = args[step.argument]!.name;
           const token = `sc_t${E.tempCounter++}`;
@@ -2615,7 +2624,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           }
         })];
         if (afterCall.length > 0) {
-          if (binding.result.type.kind === "void") {
+          if (resultForm.kind === "void") {
             E.line(`${call};${E.srcComment(e.loc)}`);
             call = "(void)0";
           } else {
@@ -2634,7 +2643,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
            * every projection below assume it is looking at a success. */
           if (errorSlot !== null) E.emitPendingCheck();
         }
-        if (binding.result.type.kind === "void") {
+        if (resultForm.kind === "void") {
           E.line(`${call};${E.srcComment(e.loc)}`);
           if (cancellationStarted !== undefined) {
             E.line(
@@ -2646,16 +2655,9 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           releaseArguments();
           return { name: "", type: e.type };
         }
-        if (binding.result.projection.kind === "errorChannel") {
-          if (
-            binding.error.detect.kind !== "resultIsNotNull" ||
-            binding.error.message.kind !== "symbol" ||
-            binding.error.release.kind !== "symbol"
-          ) {
-            throw new Error(`emitter bug: error channel without an error object in ${binding.id}`);
-          }
-          const messageSymbol = binding.error.message.symbol;
-          const releaseSymbol = binding.error.release.symbol;
+        if (resultForm.kind === "errorChannel") {
+          const messageSymbol = resultForm.message;
+          const releaseSymbol = resultForm.release;
           const raw = `sc_t${E.tempCounter++}`;
           const message = `sc_t${E.tempCounter++}`;
           E.line(`void *${raw} = ${call};${E.srcComment(e.loc)}`);
@@ -2677,26 +2679,18 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           releaseArguments();
           return { name: "", type: e.type };
         }
-        if (binding.result.projection.kind === "utf8CString") {
+        if (resultForm.kind === "utf8CString" || resultForm.kind === "utf8CStringOrNull") {
           const raw = `sc_t${E.tempCounter++}`;
           const managed = `sc_t${E.tempCounter++}`;
           E.line(`const char *${raw} = ${call};${E.srcComment(e.loc)}`);
           E.line(`ScrStr *${managed} = scr_str_from_c_data(${raw});`);
-          if (binding.result.projection.nullable) {
-            if (e.type.kind !== "union") {
-              throw new Error(`emitter bug: nullable C-string result is not a union in ${binding.id}`);
-            }
-            const arms = E.unionsById.get(e.type.unionId)?.arms;
-            const stringTag = arms?.findIndex((arm) => typeEquals(arm, STRING)) ?? -1;
-            const nullTag = arms?.findIndex((arm) => arm.kind === "nullT") ?? -1;
-            if (stringTag < 0 || nullTag < 0) {
-              throw new Error(`emitter bug: nullable C-string result lacks string/null arms in ${binding.id}`);
-            }
+          if (resultForm.kind === "utf8CStringOrNull") {
+            const { stringTag, nullTag } = resultForm;
             const adapters = vAdapters(STRING);
             const present =
               `scr_union_new_ref(${stringTag}, ${managed}, ` +
               `&${adapters.retain}, &${adapters.release}, ${E.traceArgC(STRING)})`;
-            const absent = E.unitInstanceRef(e.type.unionId, nullTag);
+            const absent = E.unitInstanceRef(resultForm.unionId, nullTag);
             const result = E.newTemp(
               e.type,
               `${raw} != NULL ? ${present} : scr_union_retain(${absent})`,
@@ -2705,34 +2699,28 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             releaseArguments();
             return result;
           }
-          if (e.type.kind !== "string") {
-            throw new Error(`emitter bug: non-null C-string result is not a string in ${binding.id}`);
-          }
           const result = E.newTemp(e.type, managed);
           E.line(`if (${result.name} == NULL) scr_native_throw_null(${operation});`);
           E.emitPendingCheck();
           releaseArguments();
           return result;
         }
-        if (binding.result.projection.kind === "boolean") {
-          if (binding.result.type.kind !== "nativeScalar" || e.type.kind !== "bool") {
-            throw new Error(`emitter bug: invalid boolean result projection in ${binding.id}`);
-          }
-          const raw = E.newTemp(binding.result.type, call);
-          if (binding.result.projection.conversion === "nonZero") {
+        if (resultForm.kind === "booleanNonZero" || resultForm.kind === "booleanExact") {
+          const raw = E.newTemp(resultForm.scalar, call);
+          if (resultForm.kind === "booleanNonZero") {
             // C's own truth test: nothing to validate, nothing to throw.
             const result = E.newTemp(e.type, `(${raw.name} != 0)`);
             releaseArguments();
             return result;
           }
           const trueValue = cNativeScalarLiteral(
-            binding.result.type,
-            binding.result.projection.trueValue,
+            resultForm.scalar,
+            resultForm.trueValue,
             E.mod.nativeTarget?.pointerBits,
           );
           const falseValue = cNativeScalarLiteral(
-            binding.result.type,
-            binding.result.projection.falseValue,
+            resultForm.scalar,
+            resultForm.falseValue,
             E.mod.nativeTarget?.pointerBits,
           );
           E.line(
@@ -2744,21 +2732,18 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           releaseArguments();
           return result;
         }
-        if (binding.result.projection.kind === "number") {
-          if (binding.result.type.kind !== "nativeScalar" || e.type.kind !== "f64") {
-            throw new Error(`emitter bug: invalid number result projection in ${binding.id}`);
-          }
+        if (resultForm.kind === "numberWidened" || resultForm.kind === "numberChecked") {
           /* Exact widening: every value of an at-most-32-bit integer, and
            * every float, is a representable f64, so the cast is the whole
            * conversion. Egress is exact even where the matching ingress
            * rounds. Wider integers have values no double denotes, so they go
            * through the checked helper and can throw where the round trip
            * does not hold. */
-          const raw = E.newTemp(binding.result.type, call);
-          if (!nativeScalarWidensToNumber(binding.result.type.scalar)) {
+          const raw = E.newTemp(resultForm.scalar, call);
+          if (resultForm.kind === "numberChecked") {
             const checked = E.newTemp(
               e.type,
-              `scr_native_${binding.result.type.scalar}_to_number(${raw.name})`,
+              `scr_native_${resultForm.scalar.scalar}_to_number(${raw.name})`,
             );
             E.emitPendingCheck();
             releaseArguments();
@@ -2769,32 +2754,12 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           releaseArguments();
           return result;
         }
-        if (binding.result.projection.kind === "nullableHandle") {
+        if (resultForm.kind === "handleOrNull") {
           /* Absence is a value: NULL becomes the union's null arm rather than
            * a throw, so a container with no child has answered rather than
            * failed. A present object still goes through the identity map, so
            * two reads of one object name one cell. */
-          if (
-            binding.result.type.kind !== "nativeHandle" ||
-            e.type.kind !== "union"
-          ) {
-            throw new Error(`emitter bug: nullable handle result is not a union in ${binding.id}`);
-          }
-          const definition = E.nativeTypesById.get(binding.result.type.typeId);
-          const destructor = binding.result.ownership.kind === "owned"
-            ? E.nativeById.get(binding.result.ownership.destructor)
-            : undefined;
-          if (definition?.kind !== "handle" || destructor === undefined) {
-            throw new Error(`emitter bug: incomplete nullable handle metadata in ${binding.id}`);
-          }
-          const arms = E.unionsById.get(e.type.unionId)?.arms;
-          const handleTag = arms?.findIndex((arm) =>
-            arm.kind === "nativeHandle" && arm.typeId === definition.id
-          ) ?? -1;
-          const nullTag = arms?.findIndex((arm) => arm.kind === "nullT") ?? -1;
-          if (handleTag < 0 || nullTag < 0) {
-            throw new Error(`emitter bug: nullable handle result lacks handle/null arms in ${binding.id}`);
-          }
+          const { definition, destructor, handleTag, nullTag } = resultForm;
           const handleType = { kind: "nativeHandle", typeId: definition.id } as const;
           const raw = `sc_t${E.tempCounter++}`;
           const cell = `sc_t${E.tempCounter++}`;
@@ -2806,13 +2771,13 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           E.line(`${cell} = scr_native_handle_interned(&${mangleNativeHandleTag(definition.id)}, ${raw});`);
           E.line(`if (${cell} != NULL) {`);
           E.indent++;
-          E.line(`${destructor.entry.symbol}(${raw});`);
+          E.line(`${destructor}(${raw});`);
           E.indent--;
           E.line("} else {");
           E.indent++;
           E.line(
             `ScrNativeHandle *${prepared} = scr_native_handle_prepare(` +
-              `&${destructor.entry.symbol}, &${mangleNativeHandleTag(definition.id)}, ` +
+              `&${destructor}, &${mangleNativeHandleTag(definition.id)}, ` +
               `${cStringLiteral(Buffer.from(definition.nativeName, "utf8"))});`,
           );
           E.line(`scr_native_handle_commit(${prepared}, ${raw});`);
@@ -2825,7 +2790,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           const present =
             `scr_union_new_ref(${handleTag}, ${cell}, ` +
             `&${adapters.retain}, &${adapters.release}, ${E.traceArgC(handleType)})`;
-          const absent = E.unitInstanceRef(e.type.unionId, nullTag);
+          const absent = E.unitInstanceRef(resultForm.unionId, nullTag);
           const result = E.newTemp(
             e.type,
             `${cell} != NULL ? ${present} : scr_union_retain(${absent})`,
@@ -2834,20 +2799,13 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           releaseArguments();
           return result;
         }
-        if (binding.result.type.kind === "nativeHandle") {
-          if (binding.result.ownership.kind !== "owned") {
-            throw new Error(`emitter bug: native handle result without ownership in ${binding.id}`);
-          }
-          const destructor = E.nativeById.get(binding.result.ownership.destructor);
-          const definition = E.nativeTypesById.get(binding.result.type.typeId);
-          if (!destructor || definition?.kind !== "handle") {
-            throw new Error(`emitter bug: incomplete native handle metadata in ${binding.id}`);
-          }
+        if (resultForm.kind === "handle") {
+          const { definition, destructor } = resultForm;
           const raw = `sc_t${E.tempCounter++}`;
           const prepared = `sc_t${E.tempCounter++}`;
           E.line(
             `ScrNativeHandle *${prepared} = scr_native_handle_prepare(` +
-              `&${destructor.entry.symbol}, &${mangleNativeHandleTag(definition.id)}, ` +
+              `&${destructor}, &${mangleNativeHandleTag(definition.id)}, ` +
               `${cStringLiteral(Buffer.from(definition.nativeName, "utf8"))});`,
           );
           if (retainedOwnerArguments.size > 1) {
@@ -2880,7 +2838,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             E.line(`if (${existing} != NULL) {`);
             E.indent++;
             E.line(`scr_native_handle_abandon(${prepared});`);
-            E.line(`${destructor.entry.symbol}(${raw});`);
+            E.line(`${destructor}(${raw});`);
             E.line(`${result.name} = ${existing};`);
             E.indent--;
             E.line(`} else if (${raw} == NULL) {`);
@@ -2912,6 +2870,14 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           releaseArguments();
           return result;
         }
+        /* Everything except a direct crossing was handled above. Naming the
+         * remainder is what makes the compiler check that: add an arm to
+         * `NativeResultForm` and forget it here, and this stops compiling
+         * rather than falling through to a projection that does not apply.
+         * Both backends carry this line, which is the whole point — the
+         * lockstep is checked rather than remembered. */
+        const remaining: "direct" = resultForm.kind;
+        void remaining;
         const result = E.newTemp(e.type, call);
         if (binding.error.detect.kind === "resultEquals") {
           const resultType = binding.result.type;

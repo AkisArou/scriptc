@@ -90,6 +90,7 @@ import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, islandPr
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
 import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, nativeCallLifecycle, nativeCallbackPayloads, nativeTrampolineForm, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
+import { nativeResultForm } from "../native-call-plan.js";
 import { computeMayThrow } from "../emission/may-throw.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleNativeHandleTag, mangleNativeStruct, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
@@ -7175,6 +7176,14 @@ class LlEmitter {
           (bindingId, argument) => this.nativeCallbackAdapter(bindingId, argument),
         );
         const retainedOwnerArguments = lifecycle.registrationOwnerArguments;
+        /* What the result becomes, resolved and checked once rather than by a
+         * ladder each backend maintains. Every arm below reads what it needs
+         * off this and asks the contract nothing. */
+        const resultForm = nativeResultForm(binding, e.type, {
+          unionsById: this.unionsById,
+          nativeTypesById: this.nativeTypesById,
+          nativeById: this.nativeById,
+        });
         for (const step of lifecycle.setup) {
           const closure = args[step.argument]!.name;
           const token = B.tmp();
@@ -7821,7 +7830,7 @@ class LlEmitter {
           releaseArguments();
           return { name: result, type: e.type };
         }
-        if (binding.result.type.kind === "void") {
+        if (resultForm.kind === "void") {
           B.line(call);
           if (cancellationStarted !== undefined) {
             this.declare(`declare void @scr_native_handle_callbacks_complete(ptr)`);
@@ -7840,18 +7849,11 @@ class LlEmitter {
           releaseArguments();
           return { name: "", type: e.type };
         }
-        if (binding.result.projection.kind === "errorChannel") {
-          if (
-            binding.error.detect.kind !== "resultIsNotNull" ||
-            binding.error.message.kind !== "symbol" ||
-            binding.error.release.kind !== "symbol"
-          ) {
-            throw new Error(`llvm emitter bug: error channel without an error handle in ${binding.id}`);
-          }
+        if (resultForm.kind === "errorChannel") {
           const raw = B.tmp();
           B.line(`${raw} = ${call}`);
-          const messageSymbol = binding.error.message.symbol;
-          const releaseSymbol = binding.error.release.symbol;
+          const messageSymbol = resultForm.message;
+          const releaseSymbol = resultForm.release;
           this.declare(`declare ptr @${messageSymbol}(ptr)`);
           this.declare(`declare void @${releaseSymbol}(ptr)`);
           this.declare("declare zeroext i1 @scr_exc_pending()");
@@ -7885,36 +7887,25 @@ class LlEmitter {
           releaseArguments();
           return { name: "", type: e.type };
         }
-        if (binding.result.projection.kind === "utf8CString") {
+        if (resultForm.kind === "utf8CString" || resultForm.kind === "utf8CStringOrNull") {
           const raw = B.tmp();
           B.line(`${raw} = ${call}`);
           this.declare("declare ptr @scr_str_from_c_data(ptr)");
           const managed = B.tmp();
           B.line(`${managed} = call ptr @scr_str_from_c_data(ptr ${raw})`);
-          if (binding.result.projection.nullable) {
-            if (e.type.kind !== "union") {
-              throw new Error(`llvm emitter bug: nullable C-string result is not a union in ${binding.id}`);
-            }
-            const arms = this.unionsById.get(e.type.unionId)?.arms;
-            const stringTag = arms?.findIndex((arm) => typeEquals(arm, STRING)) ?? -1;
-            const nullTag = arms?.findIndex((arm) => arm.kind === "nullT") ?? -1;
-            if (stringTag < 0 || nullTag < 0) {
-              throw new Error(`llvm emitter bug: nullable C-string result lacks string/null arms in ${binding.id}`);
-            }
+          if (resultForm.kind === "utf8CStringOrNull") {
+            const { stringTag, nullTag, unionId } = resultForm;
             const value = this.wrapNullable(
               raw,
               managed,
               STRING,
               stringTag,
-              e.type,
+              { kind: "union", unionId },
               nullTag,
             );
             if (callbacksMayThrow) this.emitPendingCheck();
             releaseArguments();
             return value;
-          }
-          if (e.type.kind !== "string") {
-            throw new Error(`llvm emitter bug: non-null C-string result is not a string in ${binding.id}`);
           }
           const value = this.own({ name: managed, type: e.type });
           const isNull = B.tmp();
@@ -7931,24 +7922,22 @@ class LlEmitter {
           releaseArguments();
           return value;
         }
-        if (binding.result.projection.kind === "number") {
-          if (binding.result.type.kind !== "nativeScalar" || e.type.kind !== "f64") {
-            throw new Error(`llvm emitter bug: invalid number result projection in ${binding.id}`);
-          }
+        if (resultForm.kind === "numberWidened" || resultForm.kind === "numberChecked") {
+          const scalarType = resultForm.scalar;
           /* Exact widening: every value of an at-most-32-bit integer is a
            * representable f64, so one conversion is the whole projection —
            * and a double slot needs not even that. */
           const signedScalars = new Set(["i8", "i16", "i32"]);
           const raw = B.tmp();
           B.line(`${raw} = ${call}`);
-          if (binding.result.type.scalar === "f64") {
+          if (scalarType.scalar === "f64") {
             if (callbacksMayThrow) this.emitPendingCheck();
             releaseArguments();
             return { name: raw, type: e.type };
           }
           /* Every float is a double, so egress from a 32-bit slot is exact
            * even though the matching ingress rounds. */
-          if (binding.result.type.scalar === "f32") {
+          if (scalarType.scalar === "f32") {
             const widened = B.tmp();
             B.line(`${widened} = fpext float ${raw} to double`);
             if (callbacksMayThrow) this.emitPendingCheck();
@@ -7959,36 +7948,34 @@ class LlEmitter {
            * so the conversion is the runtime's checked one and throws where
            * the round trip does not hold — the same helper the declared
            * `toNumber` operation calls, so one definition answers for both. */
-          if (!nativeScalarWidensToNumber(binding.result.type.scalar)) {
-            const symbol = `scr_native_${binding.result.type.scalar}_to_number`;
-            const scalarType = this.llType(binding.result.type);
-            this.declare(`declare double @${symbol}(${scalarType})`);
+          if (resultForm.kind === "numberChecked") {
+            const symbol = `scr_native_${scalarType.scalar}_to_number`;
+            const llvmType = this.llType(scalarType);
+            this.declare(`declare double @${symbol}(${llvmType})`);
             const checked = B.tmp();
-            B.line(`${checked} = call double @${symbol}(${scalarType} ${raw})`);
+            B.line(`${checked} = call double @${symbol}(${llvmType} ${raw})`);
             this.emitPendingCheck();
             releaseArguments();
             return { name: checked, type: e.type };
           }
           const value = B.tmp();
           B.line(
-            `${value} = ${signedScalars.has(binding.result.type.scalar) ? "sitofp" : "uitofp"} ` +
-              `${this.llType(binding.result.type)} ${raw} to double`,
+            `${value} = ${signedScalars.has(scalarType.scalar) ? "sitofp" : "uitofp"} ` +
+              `${this.llType(scalarType)} ${raw} to double`,
           );
           if (callbacksMayThrow) this.emitPendingCheck();
           releaseArguments();
           return { name: value, type: e.type };
         }
-        if (binding.result.projection.kind === "boolean") {
-          if (binding.result.type.kind !== "nativeScalar" || e.type.kind !== "bool") {
-            throw new Error(`llvm emitter bug: invalid boolean result projection in ${binding.id}`);
-          }
+        if (resultForm.kind === "booleanNonZero" || resultForm.kind === "booleanExact") {
+          const booleanScalar = resultForm.scalar;
           const raw = B.tmp();
           B.line(`${raw} = ${call}`);
-          if (binding.result.projection.conversion === "nonZero") {
+          if (resultForm.kind === "booleanNonZero") {
             // C's own truth test: nothing to validate, nothing to throw.
             const truthy = B.tmp();
             B.line(
-              `${truthy} = icmp ne ${this.llType(binding.result.type)} ${raw}, 0`,
+              `${truthy} = icmp ne ${this.llType(booleanScalar)} ${raw}, 0`,
             );
             releaseArguments();
             return { name: truthy, type: e.type };
@@ -8000,12 +7987,12 @@ class LlEmitter {
           const throwBlock = B.newLabel("native.boolean.throw");
           const continuation = B.newLabel("native.boolean.ok");
           B.line(
-            `${value} = icmp eq ${this.llType(binding.result.type)} ${raw}, ` +
-              `${binding.result.projection.trueValue}`,
+            `${value} = icmp eq ${this.llType(booleanScalar)} ${raw}, ` +
+              `${resultForm.trueValue}`,
           );
           B.line(
-            `${isFalse} = icmp eq ${this.llType(binding.result.type)} ${raw}, ` +
-              `${binding.result.projection.falseValue}`,
+            `${isFalse} = icmp eq ${this.llType(booleanScalar)} ${raw}, ` +
+              `${resultForm.falseValue}`,
           );
           B.line(`${valid} = or i1 ${value}, ${isFalse}`);
           B.condBr(valid, continuation, invalidBlock);
@@ -8023,31 +8010,12 @@ class LlEmitter {
           releaseArguments();
           return { name: value, type: e.type };
         }
-        if (binding.result.projection.kind === "nullableHandle") {
+        if (resultForm.kind === "handleOrNull") {
           /* Absence is a value: NULL becomes the union's null arm rather than
            * a throw. A present object still goes through the identity map. */
-          if (
-            binding.result.type.kind !== "nativeHandle" ||
-            binding.result.ownership.kind !== "owned" ||
-            e.type.kind !== "union"
-          ) {
-            throw new Error(`llvm emitter bug: invalid nullable handle result in ${binding.id}`);
-          }
-          const destructor = this.nativeById.get(binding.result.ownership.destructor);
-          const definition = this.nativeTypesById.get(binding.result.type.typeId);
-          if (!destructor || definition?.kind !== "handle") {
-            throw new Error(`llvm emitter bug: incomplete nullable handle metadata in ${binding.id}`);
-          }
+          const { definition, destructor, handleTag, nullTag } = resultForm;
           const handleType = { kind: "nativeHandle", typeId: definition.id } as const;
-          const arms = this.unionsById.get(e.type.unionId)?.arms;
-          const handleTag = arms?.findIndex((arm) =>
-            arm.kind === "nativeHandle" && arm.typeId === definition.id
-          ) ?? -1;
-          const nullTag = arms?.findIndex((arm) => arm.kind === "nullT") ?? -1;
-          if (handleTag < 0 || nullTag < 0) {
-            throw new Error(`llvm emitter bug: nullable handle result lacks handle/null arms in ${binding.id}`);
-          }
-          this.declare(`declare void @${destructor.entry.symbol}(ptr)`);
+          this.declare(`declare void @${destructor}(ptr)`);
           this.declare(`declare ptr @scr_native_handle_prepare(ptr, ptr, ptr)`);
           this.declare(`declare void @scr_native_handle_commit(ptr, ptr)`);
           this.declare(`declare void @scr_native_handle_abandon(ptr)`);
@@ -8055,7 +8023,7 @@ class LlEmitter {
           const prepared = B.tmp();
           B.line(
             `${prepared} = call ptr @scr_native_handle_prepare(` +
-              `ptr @${destructor.entry.symbol}, ptr @${mangleNativeHandleTag(definition.id)}, ` +
+              `ptr @${destructor}, ptr @${mangleNativeHandleTag(definition.id)}, ` +
               `ptr ${this.cstr(definition.nativeName)})`,
           );
           const raw = B.tmp();
@@ -8086,7 +8054,7 @@ class LlEmitter {
           B.condBr(hasExisting, reuseBlock, freshBlock);
           B.startBlock(reuseBlock);
           B.line(`call void @scr_native_handle_abandon(ptr ${prepared})`);
-          B.line(`call void @${destructor.entry.symbol}(ptr ${raw})`);
+          B.line(`call void @${destructor}(ptr ${raw})`);
           B.line(`store ptr ${existing}, ptr ${cellSlot}`);
           B.br(continuation);
           B.startBlock(freshBlock);
@@ -8101,30 +8069,23 @@ class LlEmitter {
             cell,
             handleType,
             handleTag,
-            e.type,
+            { kind: "union", unionId: resultForm.unionId },
             nullTag,
           );
           this.emitPendingCheck();
           releaseArguments();
           return value;
         }
-        if (binding.result.type.kind === "nativeHandle") {
-          if (binding.result.ownership.kind !== "owned") {
-            throw new Error(`llvm emitter bug: native handle result without ownership in ${binding.id}`);
-          }
-          const destructor = this.nativeById.get(binding.result.ownership.destructor);
-          const definition = this.nativeTypesById.get(binding.result.type.typeId);
-          if (!destructor || definition?.kind !== "handle") {
-            throw new Error(`llvm emitter bug: incomplete native handle metadata in ${binding.id}`);
-          }
-          this.declare(`declare void @${destructor.entry.symbol}(ptr)`);
+        if (resultForm.kind === "handle") {
+          const { definition, destructor } = resultForm;
+          this.declare(`declare void @${destructor}(ptr)`);
           this.declare(`declare ptr @scr_native_handle_prepare(ptr, ptr, ptr)`);
           this.declare(`declare void @scr_native_handle_commit(ptr, ptr)`);
           this.declare(`declare void @scr_native_handle_abandon(ptr)`);
           const prepared = B.tmp();
           B.line(
             `${prepared} = call ptr @scr_native_handle_prepare(` +
-              `ptr @${destructor.entry.symbol}, ptr @${mangleNativeHandleTag(definition.id)}, ` +
+              `ptr @${destructor}, ptr @${mangleNativeHandleTag(definition.id)}, ` +
               `ptr ${this.cstr(definition.nativeName)})`,
           );
           if (retainedOwnerArguments.size > 1) {
@@ -8174,8 +8135,8 @@ class LlEmitter {
             B.condBr(hasExisting, reuseBlock, freshBlock);
             B.startBlock(reuseBlock);
             B.line(`call void @scr_native_handle_abandon(ptr ${prepared})`);
-            this.declare(`declare void @${destructor.entry.symbol}(ptr)`);
-            B.line(`call void @${destructor.entry.symbol}(ptr ${raw})`);
+            this.declare(`declare void @${destructor}(ptr)`);
+            B.line(`call void @${destructor}(ptr ${raw})`);
             B.line(`store ptr ${existing}, ptr ${resultSlot}`);
             B.br(continuation);
             B.startBlock(freshBlock);
@@ -8248,6 +8209,11 @@ class LlEmitter {
           releaseArguments();
           return value;
         }
+        /* Everything except a direct crossing was handled above; see the C
+         * backend's matching line. Adding an arm to `NativeResultForm` and
+         * forgetting it here stops this compiling. */
+        const remaining: "direct" = resultForm.kind;
+        void remaining;
         const result = B.tmp();
         B.line(`${result} = ${call}`);
         if (binding.error.detect.kind === "resultEquals") {
