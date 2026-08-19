@@ -1466,6 +1466,25 @@ export type IrNativeFailureDetection =
   | { kind: "outParameterIsNotNull"; parameter: number }
   | { kind: "resultEquals"; value: string };
 
+/**
+ * Whether a failure contract decides by reading the call's own result.
+ *
+ * A projection that TRANSFORMS the result — widening an exact scalar into a
+ * double, reading an integer as a boolean, treating NULL as absence — can only
+ * sit beside a detection that does not read it. The two would be looking at
+ * the same slot and disagreeing about what it means: the source sees the
+ * projected value, and a sentinel compares the raw one.
+ *
+ * Failure arriving in a slot reads nothing, so it constrains no projection.
+ * That is the whole reason a failable call can hand something back, and it is
+ * why this is one predicate rather than a `never` check repeated per arm.
+ */
+export function nativeFailureReadsResult(
+  detect: IrNativeFailureDetection,
+): boolean {
+  return detect.kind !== "never" && detect.kind !== "outParameterIsNotNull";
+}
+
 /** Where the thrown message comes from. `none` means the detection names the
  * failure by itself, which is what a bare sentinel contract has to offer. */
 export type IrNativeFailureMessage =

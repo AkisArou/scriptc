@@ -25,7 +25,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "./nodes.js";
-import { arrayOf, BIGINT, BOOL, BYTES_U8, nativeCallbackIsOwnerScoped, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, ffiClassType, ffiSourceParamTypes, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, nativeArgumentScriptType, nativeIntegerInfo, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID, isFfiReleaseParam } from "./nodes.js";
+import { arrayOf, BIGINT, BOOL, BYTES_U8, nativeCallbackIsOwnerScoped, nativeFailureReadsResult, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, ffiClassType, ffiSourceParamTypes, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, islandPromisePayloadTag, isJsonSafeType, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, nativeArgumentScriptType, nativeIntegerInfo, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID, isFfiReleaseParam } from "./nodes.js";
 
 /** Per-method signature for strIntrinsic: `argTypes` lists every argument
  * position (optional ones included); `minArgs` is how many may be omitted
@@ -2636,7 +2636,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       resultProjection?.kind === "boolean" && resultProjection.conversion === "nonZero"
     ) {
       /* C's own truth test over an integer slot. Nothing can fail, so the
-       * binding must not also claim a failure the source would never see. */
+       * binding must not also claim a failure read from the same slot. */
       if (
         Object.keys(resultProjection).sort().join(",") !== "conversion,kind" ||
         binding.result.type.kind !== "nativeScalar" ||
@@ -2646,7 +2646,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         ) === null ||
         binding.result.passMode !== "value" ||
         binding.result.ownership.kind !== "value" ||
-        binding.error.detect.kind !== "never"
+        nativeFailureReadsResult(binding.error.detect)
       ) {
         errors.push({
           message: `Native IR binding "${binding.id}" has an invalid nonzero boolean result projection`,
@@ -2676,7 +2676,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         trueValue > info.max ||
         binding.result.passMode !== "value" ||
         binding.result.ownership.kind !== "value" ||
-        binding.error.detect.kind !== "never"
+        nativeFailureReadsResult(binding.error.detect)
       ) {
         errors.push({
           message: `Native IR binding "${binding.id}" has an invalid boolean result projection`,
@@ -2684,8 +2684,12 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         });
       }
     } else if (resultProjection?.kind === "number") {
-      /* A failure contract would have nothing to detect either way: the raw
-       * scalar a sentinel would compare is the value the source never sees.
+      /* A detection that read this result would compare the raw scalar, which
+       * is the value the source never sees — so a sentinel and a widening
+       * cannot describe the same slot. A failure in a slot of its own reads
+       * nothing here and leaves the widening alone, which is what lets a
+       * failable call answer with a count.
+       *
        * What differs by width is whether the conversion itself can fail — at
        * 64 bits and pointer width it throws where no double denotes the
        * value — and that is a throw after the call rather than a failure of
@@ -2695,7 +2699,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         !numberCarryingScalarType(binding.result.type) ||
         binding.result.passMode !== "value" ||
         binding.result.ownership.kind !== "value" ||
-        binding.error.detect.kind !== "never"
+        nativeFailureReadsResult(binding.error.detect)
       ) {
         errors.push({
           message: `Native IR binding "${binding.id}" has an invalid number result projection`,
@@ -2716,7 +2720,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         ownership.kind !== "borrowed" ||
         ownership.scope !== "receiver" ||
         anchor?.type.kind !== "nativeHandle" ||
-        binding.error.detect.kind !== "never" ||
+        nativeFailureReadsResult(binding.error.detect) ||
         typeof resultProjection.nullable !== "boolean"
       ) {
         errors.push({
@@ -2726,14 +2730,15 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       }
     } else if (resultProjection?.kind === "nullableHandle") {
       /* An owned handle the callee may report as absent. Absence is a value,
-       * so the binding must not also claim NULL is a failure: the two contracts
-       * would disagree about the same pointer. */
+       * so no detection may also claim NULL is a failure: the two would
+       * disagree about the same pointer. A failure reported in a slot makes
+       * no claim about the pointer at all, so absence stays a value. */
       if (
         binding.result.type.kind !== "nativeHandle" ||
         binding.result.passMode !== "pointer" ||
         binding.result.ownership.kind !== "owned" ||
         binding.result.ownership.transfer !== "to-runtime" ||
-        binding.error.detect.kind !== "never"
+        nativeFailureReadsResult(binding.error.detect)
       ) {
         errors.push({
           message: `Native IR binding "${binding.id}" has an invalid nullable handle result projection`,
