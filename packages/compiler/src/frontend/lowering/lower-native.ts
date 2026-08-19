@@ -1106,6 +1106,12 @@ export function lowerNativeStructAssertion(
     ) {
       return { name, value: L.lowerExprExpecting(initializer, { kind: "f64" }) };
     }
+    /* Writing the truth test back: a boolean has exactly two values, so there
+     * is no literal to prove and nothing to refuse. 1 and 0 are the canonical
+     * pair the same test reads. */
+    if (field.projection === "boolean") {
+      return { name, value: L.lowerExprExpecting(initializer, { kind: "bool" }) };
+    }
     if (field.projection === "number" && field.type.kind === "nativeScalar") {
       const pointerBits = L.nativeInput?.target.pointerBits;
       if (pointerBits !== 32 && pointerBits !== 64) {
@@ -1160,7 +1166,11 @@ export function lowerNativeStructFieldRead(
     field: field.name,
     /* A marked field reads as an ordinary number: the exact value widens at
      * the read, so everything downstream is plain f64 arithmetic. */
-    type: field.projection === "number" ? { kind: "f64" } : { ...field.type },
+    type: field.projection === "number"
+      ? { kind: "f64" }
+      : field.projection === "boolean"
+        ? { kind: "bool" }
+        : { ...field.type },
     loc: locOf(expr),
   };
 }

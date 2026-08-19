@@ -1429,9 +1429,17 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           /* The number marker only means something where the source view is
            * exact — a double as itself, an at-most-32-bit integer widened.
            * On any other field it would promise a conversion the backends
-           * refuse to invent. */
-          (field.projection !== undefined &&
-            (field.projection !== "number" || !widenableScalarType(field.type))) ||
+           * refuse to invent. The boolean marker wants an integer to run C's
+           * truth test over, which a float is not: `0.0 != 0` is a question
+           * about a representation rather than about truth, and no binding
+           * has asked it. */
+          (field.projection === "number" && !widenableScalarType(field.type)) ||
+          (field.projection === "boolean" &&
+            (field.type.kind !== "nativeScalar" ||
+              nativeIntegerInfo(
+                field.type.scalar,
+                validNativeTarget ? nativePointerBits : undefined,
+              ) === null)) ||
           (abiOnlyScalar(field.type) && field.projection !== "number")
         ) {
           errors.push({ message: `Native IR type "${definition.id}" has an invalid field "${field.name}"`, loc: moduleLoc });
@@ -3611,7 +3619,14 @@ function validateFunction(
         for (const field of definition.fields) {
           const value = fields.get(field.name);
           if (value === undefined) err(`native struct literal is missing field "${field.name}"`, e.loc);
-          else expectType(value, field.type, `native struct field ${field.name}`);
+          /* A projected field is written in the source view it is read in: a
+           * boolean field takes a boolean and the canonical pair is stored
+           * for it. The number projection is the other case and is not here
+           * because its construction stays exact — the initializer has to be
+           * a provably in-range literal, which the lowering discharges. */
+          else if (field.projection === "boolean") {
+            expectType(value, { kind: "bool" }, `native struct field ${field.name}`);
+          } else expectType(value, field.type, `native struct field ${field.name}`);
           fields.delete(field.name);
         }
         for (const name of fields.keys()) err(`native struct literal has unknown field "${name}"`, e.loc);
@@ -3633,7 +3648,11 @@ function validateFunction(
           !typeEquals(e.type, field.type) &&
           /* A marked field reads as plain f64: the exact value widens when
            * the read happens, so the expression type is the widened one. */
-          !(field.projection === "number" && e.type.kind === "f64")
+          !(field.projection === "number" && e.type.kind === "f64") &&
+          /* A boolean field reads as an ordinary boolean: C's truth test runs
+           * at the read, so the expression type is `bool` rather than the
+           * integer it is stored in. */
+          !(field.projection === "boolean" && e.type.kind === "bool")
         ) err(`nativeStructGet ${definition.id}.${e.field} type mismatch`, e.loc);
         break;
       }

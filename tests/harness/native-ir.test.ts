@@ -294,6 +294,28 @@ const NUMBER_PAIR32_DEFINITION = {
     { name: "second", type: I32, offset: 4, projection: "number" },
   ],
 } as const satisfies NativeFrontendInput["types"][number];
+const ANSWERED_ID = "scriptc.fixture.c-v1@0.0.0#type:answered";
+const ANSWERED = { kind: "nativeStruct", typeId: ANSWERED_ID } as const;
+/* The answer-as-a-field shape. Physically two int32 slots like Pair32, read
+ * two different ways: one as C's own truth test, one as a plain number. It is
+ * what a predicate with an out-parameter becomes once the out-parameter is a
+ * field of the result — a call that fills storage and says whether it did,
+ * where reporting absence instead would throw away a usable value. */
+const ANSWERED_DEFINITION = {
+  kind: "struct",
+  id: ANSWERED_ID,
+  declaration: { module: nativePackage, name: "Answered" },
+  size: 8,
+  alignment: 4,
+  packing: "default",
+  triviallyCopyable: true,
+  destruction: "trivial",
+  abi: DIRECT_I64_AGGREGATE_ABI,
+  fields: [
+    { name: "answered", type: I32, offset: 0, projection: "boolean" },
+    { name: "value", type: I32, offset: 4, projection: "number" },
+  ],
+} as const satisfies NativeFrontendInput["types"][number];
 const COUNTER_BASE_DEFINITION = {
   kind: "handle",
   id: COUNTER_BASE_ID,
@@ -429,6 +451,7 @@ const localNativeInput: NativeFrontendInput = {
     { declaration: { module: nativePackage, name: "Padded" }, type: PADDED },
     { declaration: { module: nativePackage, name: "Pair32" }, type: PAIR32 },
     { declaration: { module: nativePackage, name: "NumberPair32" }, type: NUMBER_PAIR32 },
+    { declaration: { module: nativePackage, name: "Answered" }, type: ANSWERED },
     { declaration: { module: nativePackage, name: "PairF64" }, type: PAIR_F64 },
     { declaration: { module: nativePackage, name: "NestedPair32" }, type: NESTED_PAIR32 },
     { declaration: { module: nativePackage, name: "CounterBase" }, type: COUNTER_BASE },
@@ -485,6 +508,7 @@ const localNativeInput: NativeFrontendInput = {
     PADDED_DEFINITION,
     PAIR32_DEFINITION,
     NUMBER_PAIR32_DEFINITION,
+    ANSWERED_DEFINITION,
     PAIR_F64_DEFINITION,
     NESTED_PAIR32_DEFINITION,
     COUNTER_BASE_DEFINITION,
@@ -569,6 +593,42 @@ const localNativeInput: NativeFrontendInput = {
       }]),
       result: {
         type: NUMBER_PAIR32,
+        passMode: "value" as const,
+        ownership: { kind: "value" as const },
+        projection: DIRECT_RESULT,
+      },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#answered_above",
+      declaration: { module: nativePackage, name: "answeredAbove" },
+      entry: { symbol: "nts_answered_above" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "value", type: I32, passMode: "value", ownership: { kind: "value" } },
+        { name: "threshold", type: I32, passMode: "value", ownership: { kind: "value" } },
+      ]),
+      result: {
+        type: ANSWERED,
+        passMode: "value" as const,
+        ownership: { kind: "value" as const },
+        projection: DIRECT_RESULT,
+      },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#answered_raw",
+      declaration: { module: nativePackage, name: "answeredRaw" },
+      entry: { symbol: "nts_answered_raw" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([{
+        name: "value",
+        type: ANSWERED,
+        passMode: "value",
+        ownership: { kind: "value" },
+      }]),
+      result: {
+        type: I32,
         passMode: "value" as const,
         ownership: { kind: "value" as const },
         projection: DIRECT_RESULT,
@@ -3526,6 +3586,35 @@ describe.each(["c", "llvm"] as const)("Native IR checked-number boundary, %s bac
       expect(generated).not.toContain("@llvm.trunc.f64");
     }
     expect(generated).not.toContain("scr_native_throw_number");
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+
+  localFixtureTest("reads an answer beside the value it answers about", async () => {
+    const outDir = join(scratch, `answered-field-${backend}`);
+    const result = await compile(join(repoRoot, "tests/native-ir/answered-field.ts"), {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend,
+      sanitize,
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+      nativeLinkInputs: [fixtureObject(), supportObject()],
+    });
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    const generated = readFileSync(
+      join(outDir, backend === "c" ? "answered-field.c" : "answered-field.ll"),
+      "utf8",
+    );
+    /* C's truth test is total, so a boolean field read emits no validation
+     * and no throw — including in the sanitized build, where a reading that
+     * COULD fail would keep its check. That is the difference between this
+     * projection and the exact one a boolean result may declare. */
+    expect(generated).not.toContain("scr_native_throw_boolean");
     const run = spawnSync(result.binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
       status: 42,

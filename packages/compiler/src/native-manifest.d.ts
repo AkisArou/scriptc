@@ -522,11 +522,22 @@ export interface IrNativeStructDef {
     name: string;
     type: IrNativeScalarType | IrNativeStructType;
     offset: number;
-    /** Source reads this at-most-32-bit integer field as a plain f64 number,
-     * widened exactly. Physical layout and construction are unchanged: a
-     * struct literal still supplies the exact field type, so nothing here
-     * loosens what may be written. */
-    projection?: "number";
+    /** How source reads this field, when it does not read the exact scalar.
+     *
+     * `number` widens an at-most-32-bit integer into a plain f64, exactly.
+     * Physical layout is unchanged and construction still supplies the exact
+     * field type, so nothing here loosens what may be written.
+     *
+     * `boolean` is C's own truth test over an integer field: nonzero is true.
+     * It is the TOTAL reading rather than the exact one a boolean RESULT may
+     * declare, and deliberately so — a field read is not a call, and admitting
+     * a reading that can fail would make every struct field access a throwing
+     * site with a pending check after it. What a C predicate means is
+     * "nonzero", which is what the answer-as-a-field shape carries: a call
+     * that fills storage and says whether it worked. Construction writes 1 for
+     * true and 0 for false, which is the canonical pair the same truth test
+     * reads back. */
+    projection?: "number" | "boolean";
   }[];
 }
 

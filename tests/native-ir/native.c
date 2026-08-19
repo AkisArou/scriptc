@@ -18,6 +18,16 @@ typedef struct NtsPair32 {
   int32_t second;
 } NtsPair32;
 
+/* The answer-as-a-field shape: a call that fills storage and separately says
+ * whether it managed to. It is what a C predicate with an out-parameter looks
+ * like once the out-parameter has become a field of the result, and the two
+ * fields are read differently — one as a truth test, one as a number — from
+ * the same pair of int32 slots. */
+typedef struct NtsAnswered {
+  int32_t answered;
+  int32_t value;
+} NtsAnswered;
+
 typedef struct NtsPairF64 {
   double first;
   double second;
@@ -121,6 +131,21 @@ NtsPair32 nts_pair32_transform(NtsPair32 value) {
   if (value.first != 40 || value.second != 2) abort();
   NtsPair32 result = { value.second, value.first + 2 };
   return result;
+}
+
+/* Answers whether `value` is above `threshold`, and hands back the value it
+ * looked at either way — the distinction that makes this shape worth having,
+ * since a call that reported absence instead would discard a usable value. */
+NtsAnswered nts_answered_above(int32_t value, int32_t threshold) {
+  NtsAnswered result = { value > threshold, value };
+  return result;
+}
+
+/* Reads one back, so the round trip is exercised in both directions: the
+ * program constructs an NtsAnswered from a TypeScript boolean and this
+ * reports what actually landed in the slot. */
+int32_t nts_answered_raw(NtsAnswered value) {
+  return value.answered;
 }
 
 NtsPairF64 nts_pair_f64_transform(NtsPairF64 value) {

@@ -5738,8 +5738,15 @@ class LlEmitter {
           if (value === undefined || index === undefined) {
             throw new Error(`llvm emitter bug: missing native struct field ${field.name}`);
           }
+          /* A boolean-projected field stores the canonical pair the same truth
+           * test reads back, so writing is the inverse of reading. */
+          let stored = value.name;
+          if (field.projection === "boolean") {
+            stored = B.tmp();
+            B.line(`${stored} = zext i1 ${value.name} to ${this.llType(field.type)}`);
+          }
           B.line(
-            `${next} = insertvalue ${this.llType(e.type)} ${aggregate}, ${this.llType(field.type)} ${value.name}, ${index}`,
+            `${next} = insertvalue ${this.llType(e.type)} ${aggregate}, ${this.llType(field.type)} ${stored}, ${index}`,
           );
           aggregate = next;
         }
@@ -5756,6 +5763,13 @@ class LlEmitter {
         const value = this.emitExpr(e.value);
         const result = B.tmp();
         B.line(`${result} = extractvalue ${this.llType(e.value.type)} ${value.name}, ${index}`);
+        /* A boolean-projected field extracts at its physical type and runs
+         * C's truth test, which is total: nonzero is true and nothing fails. */
+        if (e.type.kind === "bool" && field !== undefined) {
+          const truthy = B.tmp();
+          B.line(`${truthy} = icmp ne ${this.llType(field.type)} ${result}, 0`);
+          return { name: truthy, type: e.type };
+        }
         /* A number-projected field extracts at its physical type and widens;
          * typing the extract by the widened f64 would be an ill-typed module. */
         if (

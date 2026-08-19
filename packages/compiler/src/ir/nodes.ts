@@ -1063,7 +1063,7 @@ export type {
 };
 
 /** Current wire-format version for every producer and consumer of Native IR. */
-export const IR_VERSION = 34 as const;
+export const IR_VERSION = 35 as const;
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
@@ -4666,9 +4666,14 @@ export type IrExpr =
       kind: "nativeStructGet";
       value: IrExpr;
       field: string;
-      /** The field's exact type, or f64 when the field carries the number
-       * projection and the read widens. */
-      type: IrNativeScalarType | IrNativeStructType | { kind: "f64" };
+      /** The field's exact type, or the projected one: f64 where the field
+       * carries the number projection and the read widens, bool where it
+       * carries the boolean projection and the read runs C's truth test. */
+      type:
+        | IrNativeScalarType
+        | IrNativeStructType
+        | { kind: "f64" }
+        | { kind: "bool" };
       loc: SrcLoc;
     }
   /** Exact egress to a plain JavaScript number, named at the source level

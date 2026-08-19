@@ -615,7 +615,14 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         }
         const values = new Map(e.fields.map((field) => [field.name, E.emitExpr(field.value)]));
         const initializer = definition.fields
-          .map((field) => `.${mangleNativeField(field.name)} = ${values.get(field.name)!.name}`)
+          .map((field) => {
+            const value = values.get(field.name)!.name;
+            /* A boolean-projected field stores the canonical pair the same
+             * truth test reads back, so writing is the inverse of reading and
+             * neither has to consult a declared representation. */
+            const stored = field.projection === "boolean" ? `(${value} ? 1 : 0)` : value;
+            return `.${mangleNativeField(field.name)} = ${stored}`;
+          })
           .join(", ");
         return E.newTemp(e.type, `(${cType(e.type)}){ ${initializer} }`);
       }
@@ -624,9 +631,15 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         /* A number-projected field reads as f64. C would widen implicitly,
          * but the cast is the conversion the IR named, so it is written. */
         const access = `${value.name}.${mangleNativeField(e.field)}`;
+        /* A boolean-projected field reads as C's own truth test, which is
+         * total: nonzero is true and nothing can fail, so no check follows. */
         return E.newTemp(
           e.type,
-          e.type.kind === "f64" ? `(double)${access}` : access,
+          e.type.kind === "f64"
+            ? `(double)${access}`
+            : e.type.kind === "bool"
+              ? `(${access} != 0)`
+              : access,
         );
       }
       case "boolLit":

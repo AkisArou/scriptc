@@ -200,6 +200,18 @@ export interface NumberPair32 {
   readonly second: number;
 }
 export declare function numberPair32Transform(value: NumberPair32): NumberPair32;
+
+/** A call that fills storage and separately says whether it managed to. The
+ * answer is a field rather than the result, because a call that reported
+ * absence instead would throw away the value it looked at. */
+export interface Answered {
+  readonly answered: boolean;
+  readonly value: number;
+}
+export declare function answeredAbove(value: i32, threshold: i32): Answered;
+/** What actually landed in the slot, so the write is observable and not only
+ * the read. */
+export declare function answeredRaw(value: Answered): i32;
 export declare function counterDestroyedCount(): i32;
 export declare function counterVerify(
   actualValue: i32,
