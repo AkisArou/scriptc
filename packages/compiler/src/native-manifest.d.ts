@@ -496,6 +496,19 @@ export type IrNativeResultProjection =
    * managed storage, then dispose through a named symbol or nothing, with the
    * ownership beside it pinned to match. */
   | { kind: "bytes"; elem: IrNativeSpanElem; release: IrNativeRelease }
+  /** UTF-8 text the callee produced, copied into a managed string.
+   *
+   * The byte-span result with a decode on the end — same pointer, same
+   * compiler-owned length slot, same disposal question. What it buys is the
+   * one case a NUL-terminated string cannot express: text containing U+0000.
+   * A terminator makes the first NUL the end of the value, so a producer
+   * holding such a string can only refuse, which is what a JVM boundary does
+   * today for a Java string that contains one.
+   *
+   * Decoded the way every other foreign byte sequence is — maximal-subpart
+   * U+FFFD replacement — and NOT scanned for a terminator, because there
+   * isn't one. */
+  | { kind: "utf8Span"; release: IrNativeRelease }
   /** An owned handle the callee may report as absent, projected as a union of
    * the handle and null. Absence is a value, not a failure. */
   | { kind: "nullableHandle" }

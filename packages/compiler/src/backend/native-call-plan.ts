@@ -84,6 +84,19 @@ export type NativeResultForm =
       readonly release: string | null;
       readonly lengthParameter: number;
     }
+  /** UTF-8 text the callee produced, copied into a managed string.
+   *
+   * The byte-span result with a decode on the end, and the same length slot.
+   * What it buys is the case a NUL-terminated string cannot express at all:
+   * text containing U+0000. A terminator makes the first NUL the end of the
+   * value, so a producer holding such a string can only refuse — which is
+   * what the JVM boundary does today, by name, for a Java string that
+   * contains one. */
+  | {
+      readonly kind: "utf8SpanResult";
+      readonly release: string | null;
+      readonly lengthParameter: number;
+    }
   /** The same, where the callee may answer with NULL and absence is a value. */
   | {
       readonly kind: "utf8CStringArrayOrNull";
@@ -214,6 +227,21 @@ export function nativeResultForm(
     );
     if (lengthParameter < 0) fail("byte-span result without a length slot");
     return { kind: "bytesResult", elem: projection.elem, release, lengthParameter };
+  }
+
+  if (projection.kind === "utf8Span") {
+    const release = projection.release.kind === "symbol" ? projection.release.symbol : null;
+    if (!typeEquals(sourceType, STRING)) {
+      fail("UTF-8 span result does not project as a string");
+    }
+    /* The same slot the byte-span result reads, and for the same reason: a
+     * length that arrives beside the pointer is the only way text containing
+     * NUL can cross at all. */
+    const lengthParameter = binding.parameters.findIndex(
+      (parameter) => parameter.projection.kind === "bytesLengthOut",
+    );
+    if (lengthParameter < 0) fail("UTF-8 span result without a length slot");
+    return { kind: "utf8SpanResult", release, lengthParameter };
   }
 
   if (projection.kind === "utf8CStringArray") {

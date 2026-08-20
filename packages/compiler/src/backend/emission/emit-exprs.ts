@@ -2990,6 +2990,33 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           releaseArguments();
           return result;
         }
+        if (resultForm.kind === "utf8SpanResult") {
+          /* The byte-span result with a decode on the end, and deliberately
+           * the same order: copy into managed storage first, then free, so
+           * nothing that survives points into storage the release reclaims. */
+          const raw = `sc_t${E.tempCounter++}`;
+          E.line(`const void *${raw} = ${call};${E.srcComment(e.loc)}`);
+          /* The contract says the text is there. A callee answering NULL has
+           * violated it, and this is where that becomes catchable rather
+           * than a trap or a silently empty string — the same distinction
+           * between absent and empty the span family is careful about. */
+          E.line(`if (${raw} == NULL) scr_native_throw_null(${operation});`);
+          E.emitPendingCheck();
+          /* Length in BYTES here, not elements: UTF-8 is a byte encoding, and
+           * the decoder is handed exactly the bytes the callee produced —
+           * never scanned for a terminator, because the whole point of this
+           * projection is text that may contain one. */
+          const managed = E.newTemp(
+            e.type,
+            `scr_str_from_utf8_lossy((const uint8_t *)${raw}, ${bytesLengthSlot})`,
+          );
+          if (resultForm.release !== null) {
+            E.line(`if (${raw} != NULL) ${resultForm.release}((void *)${raw});`);
+          }
+          if (callbacksMayThrow) E.emitPendingCheck();
+          releaseArguments();
+          return managed;
+        }
         /* Everything except a direct crossing was handled above. Naming the
          * remainder is what makes the compiler check that: add an arm to
          * `NativeResultForm` and forget it here, and this stops compiling

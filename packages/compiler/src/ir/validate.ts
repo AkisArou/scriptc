@@ -2675,6 +2675,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       | { kind: "utf8CString"; nullable?: unknown; release?: unknown }
       | { kind: "utf8CStringArray"; nullable?: unknown; release?: unknown }
       | { kind: "bytes"; elem?: unknown; release?: unknown }
+      | { kind: "utf8Span"; release?: unknown }
       | { kind: "nullableHandle" }
       | { kind: "errorChannel" }
       | undefined;
@@ -2863,6 +2864,39 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       ) {
         errors.push({
           message: `Native IR binding "${binding.id}" has an invalid byte-span result projection`,
+          loc: moduleLoc,
+        });
+      }
+    } else if (resultProjection?.kind === "utf8Span") {
+      /* The same slot and the same rule as a byte span — a pointer whose
+       * extent arrives in the compiler's own out slot — with one difference
+       * that is the whole reason the projection exists: no element kind,
+       * because UTF-8 is bytes by definition, and the length counts them. */
+      const lengthSlots = binding.parameters.filter(
+        (parameter) => parameter.projection.kind === "bytesLengthOut",
+      ).length;
+      const release = resultProjection.release as
+        | { kind?: unknown; symbol?: unknown }
+        | undefined;
+      const releaseValid =
+        release?.kind === "none" ||
+        (release?.kind === "symbol" &&
+          typeof release.symbol === "string" &&
+          release.symbol.length > 0);
+      if (
+        binding.result.type.kind !== "nativePointer" ||
+        !validNativePointer(binding.result.type) ||
+        binding.result.type.pointee === "ptr" ||
+        binding.result.passMode !== "pointer" ||
+        lengthSlots !== 1 ||
+        !releaseValid ||
+        /* Consumed by the projection like every other copied span: the text
+         * is in managed storage before the release runs. */
+        binding.result.ownership.kind !== "value" ||
+        nativeFailureReadsResult(binding.error.detect)
+      ) {
+        errors.push({
+          message: `Native IR binding "${binding.id}" has an invalid UTF-8 span result projection`,
           loc: moduleLoc,
         });
       }

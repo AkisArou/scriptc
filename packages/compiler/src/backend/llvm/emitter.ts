@@ -8038,6 +8038,52 @@ class LlEmitter {
           releaseArguments();
           return value;
         }
+        if (resultForm.kind === "utf8SpanResult") {
+          /* The byte-span result with a decode on the end, in the same order:
+           * copy into managed storage, then free, so nothing that survives
+           * points into storage the release reclaims. */
+          const raw = B.tmp();
+          B.line(`${raw} = ${call}`);
+          {
+            const absent = B.tmp();
+            const missing = B.newLabel("native.utf8span.null");
+            const present = B.newLabel("native.utf8span.ok");
+            B.line(`${absent} = icmp eq ptr ${raw}, null`);
+            B.condBr(absent, missing, present);
+            B.startBlock(missing);
+            this.declare("declare void @scr_native_throw_null(ptr)");
+            B.line(`call void @scr_native_throw_null(ptr ${operation})`);
+            B.br(present);
+            B.startBlock(present);
+            this.emitPendingCheck();
+          }
+          const length = B.tmp();
+          B.line(`${length} = load i64, ptr ${bytesLengthSlot}`);
+          /* BYTES, not elements: UTF-8 is a byte encoding, and the decoder
+           * receives exactly what the callee produced — never scanned for a
+           * terminator, since text that may contain one is the point. */
+          this.declare("declare ptr @scr_str_from_utf8_lossy(ptr, i64)");
+          const managed = B.tmp();
+          B.line(
+            `${managed} = call ptr @scr_str_from_utf8_lossy(ptr ${raw}, i64 ${length})`,
+          );
+          if (resultForm.release !== null) {
+            this.declare(`declare void @${resultForm.release}(ptr)`);
+            const present = B.newLabel("native.utf8span.free");
+            const freed = B.newLabel("native.utf8span.freed");
+            const wasNull = B.tmp();
+            B.line(`${wasNull} = icmp eq ptr ${raw}, null`);
+            B.condBr(wasNull, freed, present);
+            B.startBlock(present);
+            B.line(`call void @${resultForm.release}(ptr ${raw})`);
+            B.br(freed);
+            B.startBlock(freed);
+          }
+          const value = this.own({ name: managed, type: e.type });
+          if (callbacksMayThrow) this.emitPendingCheck();
+          releaseArguments();
+          return value;
+        }
         if (
           resultForm.kind === "utf8CStringArray" ||
           resultForm.kind === "utf8CStringArrayOrNull"
