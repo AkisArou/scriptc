@@ -1603,11 +1603,40 @@ export interface LibArchiveOptions {
   textDecoderLegacy?: boolean;
   nativeHandle?: boolean;
   retainedCallbacks?: boolean;
+  /**
+   * Receives every driver and archiver invocation instead of running it.
+   *
+   * The same seam `compileC` offers, for the same reason: an embedder that
+   * owns a build graph needs ScriptC's exact commands without ScriptC
+   * executing them, materializing objects, or populating caches behind the
+   * graph. Supplying it disables every persistent tier — a command that was
+   * merely ASKED for must not leave an artifact anywhere.
+   */
+  commandExecutor?: (command: Readonly<CcCommand>) => Promise<void>;
 }
 
 export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> {
   const rtDir = runtimeSrcDir();
   const driver = resolveCc();
+  /* One place both the compiler and the archiver go through, so an embedder
+   * that asked for the commands gets ALL of them — a build that planned its
+   * compiles and then quietly ran `ar` would leave an artifact the graph did
+   * not know about. */
+  const runLibraryCommand = async (
+    executable: string,
+    commandArguments: readonly string[],
+  ): Promise<void> => {
+    if (opts.commandExecutor === undefined) {
+      await execFileAsync(executable, [...commandArguments]);
+      return;
+    }
+    await opts.commandExecutor(Object.freeze({
+      executable,
+      arguments: Object.freeze([...commandArguments]),
+      runtimeDirectory: dirname(rtDir),
+      targetPlatform: targetPlatform(driver),
+    }));
+  };
   const sanitize = opts.sanitize ?? false;
   const optimization = opts.optimization ?? "release";
   const regex = opts.regex ?? false;
@@ -1671,6 +1700,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
   const configuredCacheRoot = cacheRootDir();
   const toolchainEnv = toolchainEnvironmentFingerprint();
   const persistentDriverCache =
+    opts.commandExecutor === undefined &&
     cachePolicy.runtimeObjects &&
     configuredCacheRoot !== null &&
     await compilerDriverSupportsPersistentCache(driver, toolchainEnv);
@@ -1822,6 +1852,28 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
         `scriptc-lib-vendor-${process.pid}-${Math.random().toString(36).slice(2)}`,
       );
   const vendorCacheRoot = transientVendorRoot ?? vendorBuildCacheRoot();
+  /* Two producers this seam does not yet describe, refused rather than run.
+   *
+   * Vendored objects (the regex engine, zlib) are BUILT by their own cached
+   * helpers, and localization rewrites objects through the driver and the
+   * archiver. Both would materialize artifacts an embedder's graph never
+   * declared — the exact thing asking for commands instead of running them
+   * exists to prevent. They are separate slices, and each announces itself
+   * here rather than silently producing a build the graph cannot reproduce. */
+  if (opts.commandExecutor !== undefined) {
+    const unplanned = [
+      ...(regex ? ["the regex engine"] : []),
+      ...(opts.zlib === true ? ["zlib"] : []),
+      ...(opts.localizeSymbols === undefined ? [] : ["symbol localization"]),
+    ];
+    if (unplanned.length > 0) {
+      throw new Error(
+        `ScriptC cannot yet PLAN a library archive that needs ${unplanned.join(" and ")}: ` +
+          "those steps build artifacts of their own, which an external build " +
+          "graph has to declare before they can be produced.",
+      );
+    }
+  }
   try {
     const lreObjects = regex
       ? await ensureLreObjects(sanitize, driver, vendorBuildIdentity, vendorCacheRoot)
@@ -1852,7 +1904,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
           "-o", obj,
         ];
         try {
-          await execFileAsync(driver.argv[0] ?? "clang", args);
+          await runLibraryCommand(driver.argv[0] ?? "clang", args);
         } catch (err) {
           const stderr = subprocessFailureDetail(err);
           throw new Error(
@@ -1948,15 +2000,23 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
         cachedArchive === null && opts.localizeSymbols === undefined
           ? opts.outPath
           : join(buildDir, "artifact.lib.a");
-      await rm(archiveOutput, { force: true }); // `ar r` would append into a stale archive
-      await mkdir(dirname(archiveOutput), { recursive: true });
-      await execFileAsync(arArgv[0] ?? "ar", [
+      /* Preparing the output path is part of PRODUCING the archive, so an
+       * external executor — which produces nothing — must not do it. Asking
+       * for a command has to leave the filesystem exactly as it found it,
+       * including the directory the caller named. */
+      if (opts.commandExecutor === undefined) {
+        await rm(archiveOutput, { force: true }); // `ar r` would append into a stale archive
+        await mkdir(dirname(archiveOutput), { recursive: true });
+      }
+      await runLibraryCommand(arArgv[0] ?? "ar", [
         ...arArgv.slice(1),
         "rcs",
         archiveOutput,
         ...archiveMembers,
       ]);
-      if (archiveOutput !== opts.outPath) await installArtifact(archiveOutput, opts.outPath);
+      if (opts.commandExecutor === undefined && archiveOutput !== opts.outPath) {
+        await installArtifact(archiveOutput, opts.outPath);
+      }
       let runtimeStillMatchesKey = false;
       if (
         cachedArchive !== null &&

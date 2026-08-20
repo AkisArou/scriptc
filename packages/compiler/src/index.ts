@@ -38,6 +38,11 @@ import {
   type ExecutableCompilationPlan,
   type ExecutableNativeBuildPlan,
 } from "./executable-plan.js";
+import {
+  defineLibraryCompilationPlan,
+  type LibraryCompilationPlan,
+  type LibraryNativeBuildPlan,
+} from "./library-plan.js";
 
 export const VERSION = "0.0.1";
 
@@ -139,6 +144,15 @@ export {
   type ExternalRuntimeObject,
   type ExecutableNativeBuildPlan,
 } from "./executable-plan.js";
+export {
+  emitLibraryCompilationPlan,
+  planLibraryExternalCBuild,
+  type LibraryCompilationPlan,
+  type LibraryExternalBuild,
+  type LibraryExternalBuildArtifacts,
+  type LibraryExternalObject,
+  type LibraryNativeBuildPlan,
+} from "./library-plan.js";
 export { wasiGuestPath, type HostPathFlavor } from "./wasi-paths.js";
 export {
   setProvenanceSources,
@@ -1470,18 +1484,26 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
  * emission; there is no fallback concept on this path (an out-of-tier
  * program under emission "llvm" is SC3001, fail-loudly). */
 
-export interface CompileLibraryOptions {
+/** What the library FRONTEND reads. Building adds output locations to it and
+ * planning adds nothing, which is the honest way to say that preparation has
+ * no opinion about where anything lands — an earlier draft handed the shared
+ * preparation an unused output directory so the types would line up, which is
+ * a path entering a planner for no reason. */
+export interface LibraryFrontendOptions {
   profilePath: string;
+  /** Declaration surfaces and manifest-neutral Native IR contracts used by
+   * exact native imports and C-callable exports in the library graph. */
+  externalTypes?: Readonly<Record<string, string>>;
+  native?: NativeFrontendInput;
+}
+
+export interface CompileLibraryOptions extends LibraryFrontendOptions {
   /** Where the archive and the kept program TU land. */
   outDir: string;
   /** Archive path. Default: <outDir>/<stem>.lib.a. */
   outPath?: string;
   emitIr?: boolean;
   sanitize?: boolean;
-  /** Declaration surfaces and manifest-neutral Native IR contracts used by
-   * exact native imports and C-callable exports in the library graph. */
-  externalTypes?: Readonly<Record<string, string>>;
-  native?: NativeFrontendInput;
 }
 
 export type CompileLibraryResult =
@@ -2016,24 +2038,38 @@ function mergeSidecarIntSlots(
   return { ok: true, config: cfg };
 }
 
-export async function compileLibrary(opts: CompileLibraryOptions): Promise<CompileLibraryResult> {
-  const timingOn = process.env["SCRIPTC_TIMING"] === "1";
-  const timingStart = performance.now();
-  let timingLast = timingStart;
-  const timing = (phase: string, detail: Record<string, unknown> = {}): void => {
-    if (!timingOn) return;
-    const now = performance.now();
-    process.stderr.write(
-      `scriptc timing ${JSON.stringify({
-        phase,
-        phase_ms: Math.round((now - timingLast) * 10) / 10,
-        total_ms: Math.round((now - timingStart) * 10) / 10,
-        rss_mb: Math.round(process.memoryUsage().rss / 1024 / 1024),
-        ...detail,
-      })}\n`,
-    );
-    timingLast = now;
-  };
+/** What both library entry points need before anything is written: the
+ * profile loaded, the program lowered, every fence and proof discharged, and
+ * the IR validated. Extracted so `compileLibrary` and `planLibraryCompilation`
+ * cannot drift — a planner that prepared its module differently from the
+ * builder would produce a plan describing a program the builder never makes.
+ *
+ * Every early return here is a FAILURE; the success arm is the bundle below,
+ * which is why the extraction is mechanical rather than a rewrite. */
+type PreparedLibraryFailure = {
+  ok: false;
+  diagnostics: ScrDiagnostic[];
+  sourceTexts: Map<string, string>;
+};
+
+interface PreparedLibraryCompilation {
+  readonly module: IrModule;
+  /** The resolved library section, carried beside the module because
+   * preparation is what produces it. Reaching for `module.lib` here would
+   * need a non-null assertion for a fact this bundle can simply state. */
+  readonly librarySection: NonNullable<IrModule["lib"]>;
+  readonly entryText: string;
+  readonly profile: LibraryProfile;
+  readonly sidecarJson: string | null;
+  readonly entryPath: string;
+  readonly sourceTexts: Map<string, string>;
+  readonly buildPlatform: string;
+}
+
+async function prepareLibraryCompilation(
+  opts: LibraryFrontendOptions,
+  timing: (phase: string, detail?: Record<string, unknown>) => void,
+): Promise<PreparedLibraryFailure | ({ ok: true } & PreparedLibraryCompilation)> {
   const loadedProfile = loadLibraryProfile(resolve(opts.profilePath));
   timing("profile-load");
   if (!loadedProfile.ok) {
@@ -2138,7 +2174,7 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
     // Every library refusal leaves through the ask-5 teaching decoration:
     // profile text attaches by code, manifest id, or fence coverage as the
     // attributed note (the SC4004/SC4005 rider generalized).
-    const fail = (diagnostics: ScrDiagnostic[]): CompileLibraryResult => ({
+    const fail = (diagnostics: ScrDiagnostic[]): PreparedLibraryFailure => ({
       ok: false,
       diagnostics: decorateLibraryRefusals(diagnostics, profile),
       sourceTexts: fe.sourceTexts(),
@@ -2256,7 +2292,7 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
   const mod = lowered.module!;
   timing("frontend-dispose");
 
-  const fail = (diagnostics: ScrDiagnostic[]): CompileLibraryResult => ({
+  const fail = (diagnostics: ScrDiagnostic[]): PreparedLibraryFailure => ({
     ok: false,
     diagnostics: decorateLibraryRefusals(diagnostics, profile),
     sourceTexts,
@@ -2355,6 +2391,134 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
   const validation = validateModule(mod);
   if (validation.length > 0) return fail(validation.map((v) => iceDiag(v.message, v.loc)));
   timing("ir-validate");
+  return {
+    ok: true,
+    module: mod,
+    librarySection: resolved.lib,
+    entryText,
+    profile,
+    sidecarJson,
+    entryPath,
+    sourceTexts,
+    buildPlatform,
+  };
+}
+
+export interface PlanLibraryCompilationOptions extends LibraryFrontendOptions {
+  sanitize?: boolean;
+}
+
+export type PlanLibraryCompilationResult =
+  | { ok: true; plan: LibraryCompilationPlan; sourceTexts: Map<string, string> }
+  | { ok: false; diagnostics: ScrDiagnostic[]; sourceTexts: Map<string, string> };
+
+/**
+ * Plans a library the way `planExecutableCompilation` plans a program: the
+ * whole frontend runs, and what comes back is a path-free value an embedder
+ * can content-address and hand to its own build graph.
+ *
+ * The profile names the entry, which is why this takes a profile path where
+ * the executable planner takes a source path. Both are arguments to the
+ * PLANNER; neither reaches the plan.
+ */
+export async function planLibraryCompilation(
+  opts: PlanLibraryCompilationOptions,
+): Promise<PlanLibraryCompilationResult> {
+  const prepared = await prepareLibraryCompilation(opts, () => undefined);
+  if (!prepared.ok) return prepared;
+  return Object.freeze({
+    ok: true,
+    plan: defineLibraryCompilationPlan({
+      emission: prepared.profile.emission,
+      target: {
+        platform: prepared.buildPlatform,
+        pointerBits: buildTargetPointerBits(prepared.buildPlatform),
+      },
+      ir: serializeModule(prepared.module),
+      entrySource: prepared.entryText,
+      nativeBuild: libraryNativeBuildPlan(prepared, opts.sanitize ?? false),
+      sidecar: prepared.sidecarJson,
+    }),
+    sourceTexts: prepared.sourceTexts,
+  });
+}
+
+/** Every archive setting a prepared library implies, with no path in it.
+ *
+ * The builder and the planner both take it from here, so a plan cannot
+ * describe an archive the builder would assemble differently — the same
+ * reason preparation itself is shared.
+ *
+ * Which symbols stay global under localization is the profile's declared
+ * external surface plus the module's own native exports. Getting that set
+ * wrong is not a cosmetic error: a library that localizes the entry its host
+ * calls links cleanly and then cannot be called at all. */
+function libraryNativeBuildPlan(
+  prepared: PreparedLibraryCompilation,
+  sanitize: boolean,
+): LibraryNativeBuildPlan {
+  const { module: mod, profile } = prepared;
+  const localizeSymbols = profile.localizeRuntime
+    ? [
+        profile.initSymbol,
+        profile.sinkRegisterSymbol,
+        ...(profile.collectSymbol !== null ? [profile.collectSymbol] : []),
+        ...(profile.resultResetSymbol !== null ? [profile.resultResetSymbol] : []),
+        ...(profile.callbackRegisterSymbol !== null ? [profile.callbackRegisterSymbol] : []),
+        ...(profile.sidecar !== null
+          ? [profile.sidecar.buildIdSymbol, profile.sidecar.abiVersionSymbol]
+          : []),
+        ...profile.exports.map((e) => e.symbol),
+        ...prepared.librarySection.nativeExports.map((entry) => entry.symbol),
+      ]
+    : undefined;
+  return Object.freeze({
+    cacheIdentity: "scriptc-generated-library-v1",
+    sanitize,
+    optimization: profile.optimization,
+    ...(localizeSymbols !== undefined ? { localizeSymbols } : {}),
+    ...(profile.instancePerThread ? { threadInstances: true } : {}),
+    regex: moduleUsesRegex(mod),
+    assert: moduleUsesAssert(mod),
+    inspect: moduleUsesInspect(mod),
+    symbol: moduleUsesSymbol(mod),
+    searchParams: moduleUsesSearchParams(mod),
+    emitter: moduleUsesEmitter(mod),
+    zlib: moduleUsesZlib(mod),
+    copying: moduleUsesCopying(mod),
+    textDecoderLegacy: moduleUsesLegacyTextDecoder(mod),
+    nativeHandle: (mod.nativeTypes ?? []).some((definition) => definition.kind === "handle"),
+    retainedCallbacks: moduleUsesRetainedCallbacks(mod),
+  });
+}
+
+export async function compileLibrary(opts: CompileLibraryOptions): Promise<CompileLibraryResult> {
+  const timingOn = process.env["SCRIPTC_TIMING"] === "1";
+  const timingStart = performance.now();
+  let timingLast = timingStart;
+  const timing = (phase: string, detail: Record<string, unknown> = {}): void => {
+    if (!timingOn) return;
+    const now = performance.now();
+    process.stderr.write(
+      `scriptc timing ${JSON.stringify({
+        phase,
+        phase_ms: Math.round((now - timingLast) * 10) / 10,
+        total_ms: Math.round((now - timingStart) * 10) / 10,
+        rss_mb: Math.round(process.memoryUsage().rss / 1024 / 1024),
+        ...detail,
+      })}\n`,
+    );
+    timingLast = now;
+  };
+  const prepared = await prepareLibraryCompilation(opts, timing);
+  if (!prepared.ok) return prepared;
+  const { module: mod, entryText, profile, sidecarJson, entryPath } = prepared;
+  const fail = (diagnostics: ScrDiagnostic[]): CompileLibraryResult => ({
+    ok: false,
+    diagnostics: decorateLibraryRefusals(diagnostics, profile),
+    sourceTexts: prepared.sourceTexts,
+  });
+
 
   await mkdir(opts.outDir, { recursive: true });
   const stem = basename(entryPath).replace(/\.(ts|js|mjs|cjs)$/, "");
@@ -2384,42 +2548,10 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
   }
 
   const archivePath = opts.outPath ?? join(opts.outDir, `${stem}.lib.a`);
-  // Multi-instance library mode: the profile-declared external surface —
-  // the mode-provided entries, the identity getters, and the export map —
-  // is exactly the set the localization step keeps global.
-  const localizeSymbols = profile.localizeRuntime
-    ? [
-        profile.initSymbol,
-        profile.sinkRegisterSymbol,
-        ...(profile.collectSymbol !== null ? [profile.collectSymbol] : []),
-        ...(profile.resultResetSymbol !== null ? [profile.resultResetSymbol] : []),
-        ...(profile.callbackRegisterSymbol !== null ? [profile.callbackRegisterSymbol] : []),
-        ...(profile.sidecar !== null
-          ? [profile.sidecar.buildIdSymbol, profile.sidecar.abiVersionSymbol]
-          : []),
-        ...profile.exports.map((e) => e.symbol),
-        ...mod.lib.nativeExports.map((entry) => entry.symbol),
-      ]
-    : undefined;
   await compileLibArchive({
+    ...libraryNativeBuildPlan(prepared, opts.sanitize ?? false),
     cPath,
     outPath: archivePath,
-    cacheIdentity: "scriptc-generated-library-v1",
-    sanitize: opts.sanitize ?? false,
-    optimization: profile.optimization,
-    ...(localizeSymbols !== undefined ? { localizeSymbols } : {}),
-    ...(profile.instancePerThread ? { threadInstances: true } : {}),
-    regex: moduleUsesRegex(mod),
-    assert: moduleUsesAssert(mod),
-    inspect: moduleUsesInspect(mod),
-    symbol: moduleUsesSymbol(mod),
-    searchParams: moduleUsesSearchParams(mod),
-    emitter: moduleUsesEmitter(mod),
-    zlib: moduleUsesZlib(mod),
-    copying: moduleUsesCopying(mod),
-    textDecoderLegacy: moduleUsesLegacyTextDecoder(mod),
-    nativeHandle: (mod.nativeTypes ?? []).some((definition) => definition.kind === "handle"),
-    retainedCallbacks: moduleUsesRetainedCallbacks(mod),
   });
   timing("native-archive");
 
