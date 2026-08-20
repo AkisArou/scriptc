@@ -9,7 +9,7 @@
  * copy that read the right bytes in the wrong place is a different wrong
  * answer from one that read the wrong bytes.
  */
-import { bytesReverse, type i32 } from "@scriptc/native-abi-fixture";
+import { bytesAbsent, bytesReverse, type i32 } from "@scriptc/native-abi-fixture";
 import { exit } from "scriptc-native-test";
 
 function check(): number {
@@ -18,8 +18,15 @@ function check(): number {
     if (!condition) failures = failures + 1;
   }
 
+  /* A native call used DIRECTLY as a member-access receiver, which is
+   * ordinary application code and used to fence: the external-host refusal
+   * followed the callee to the declaration it came from and concluded the
+   * value had no runtime implementation, when the frontend input had just
+   * supplied one. */
+  ok(bytesReverse(new Uint8Array([1, 2, 3, 250])).length === 4);
+  ok(bytesReverse(new Uint8Array([5, 6]))[0] === 6);
+
   const out = bytesReverse(new Uint8Array([1, 2, 3, 250]));
-  ok(out.length === 4);
   ok(out[0] === 250);
   ok(out[3] === 1);
 
@@ -47,6 +54,22 @@ function check(): number {
   ok(held.length === 3);
   ok(held[0] === 33);
   ok(held[2] === 11);
+
+  /* A callee answering NULL where the contract says a span. It is a contract
+   * violation, so it is an error the program can catch — not a trap, and not
+   * a silently empty span, which would make "absent" indistinguishable from
+   * "no bytes". */
+  let absentRejected = false;
+  try {
+    bytesAbsent();
+  } catch {
+    absentRejected = true;
+  }
+  ok(absentRejected);
+
+  /* And the program keeps running afterwards, which is what makes it an
+   * error rather than an abort. */
+  ok(bytesReverse(new Uint8Array([4, 5])).length === 2);
 
   return failures;
 }

@@ -189,6 +189,18 @@ uint8_t *nts_bytes_reverse(const uint8_t *data, size_t length, size_t *out_lengt
   return copy;
 }
 
+/* A callee that violates its own contract: the binding says the span is
+ * there and this answers NULL. The length slot is left untouched, so a
+ * lowering that read it before checking the pointer would build a span over
+ * nothing. Both wrong behaviours it replaces are worse than an error — the
+ * runtime traps on a NULL span with a nonzero length, and a NULL with zero
+ * length would silently become an empty span, which is the one confusion this
+ * family exists to prevent. */
+uint8_t *nts_bytes_absent(size_t *out_length) {
+  (void)out_length;
+  return NULL;
+}
+
 /* The disposal the binding names for the string above. A plain free, which is
  * the shape almost every SDK uses for an owned string — and still a SYMBOL
  * rather than a policy, because an SDK with a pool allocator names a

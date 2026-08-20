@@ -1038,6 +1038,32 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: U64, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
+      /* A callee that answers NULL where the contract says a span. Its
+       * result contract is identical to the one below; only the C behaves
+       * badly, which is the point. */
+      id: "scriptc.fixture.c-v1@0.0.0#bytes_absent",
+      declaration: { module: nativePackage, name: "bytesAbsent" },
+      entry: { symbol: "nts_bytes_absent" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      arguments: [],
+      parameters: [
+        {
+          name: "out_length",
+          type: { kind: "nativeBytesLengthOut", addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "value" },
+          projection: { kind: "bytesLengthOut" },
+        },
+      ],
+      result: {
+        type: { kind: "nativePointer", pointee: "u8", const: false, addressSpace: 0 },
+        passMode: "pointer",
+        ownership: { kind: "value" },
+        projection: { kind: "bytes", elem: "u8", release: { kind: "none" } },
+      },
+    },
+    {
       /* A byte span in and a byte span out. The input's length is a sibling
        * parameter the CALLER fills; the output's arrives in the compiler's
        * own slot, which nothing in the program supplies. Same word, two

@@ -7958,6 +7958,22 @@ class LlEmitter {
            * compiler passed, not from the pointer. */
           const raw = B.tmp();
           B.line(`${raw} = ${call}`);
+          /* The contract says the span is there; a callee answering NULL has
+           * violated it, and this makes that catchable rather than a trap in
+           * the runtime or a silent empty span. */
+          {
+            const absent = B.tmp();
+            const missing = B.newLabel("native.bytes.null");
+            const present = B.newLabel("native.bytes.ok");
+            B.line(`${absent} = icmp eq ptr ${raw}, null`);
+            B.condBr(absent, missing, present);
+            B.startBlock(missing);
+            this.declare("declare void @scr_native_throw_null(ptr)");
+            B.line(`call void @scr_native_throw_null(ptr ${operation})`);
+            B.br(present);
+            B.startBlock(present);
+            this.emitPendingCheck();
+          }
           const length = B.tmp();
           B.line(`${length} = load i64, ptr ${bytesLengthSlot}`);
           this.declare("declare ptr @scr_bytes_from_data(ptr, i64)");

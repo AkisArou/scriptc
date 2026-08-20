@@ -2723,6 +2723,15 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
            * the compiler passed, not from the pointer. */
           const raw = `sc_t${E.tempCounter++}`;
           E.line(`const uint8_t *${raw} = ${call};${E.srcComment(e.loc)}`);
+          /* The contract says the span is there. A callee that answers NULL
+           * has violated it, and this is where that becomes a catchable
+           * error rather than either of the two things it would otherwise
+           * be: a trap, because the runtime aborts on a NULL span with a
+           * nonzero length, or a silent empty span, which would conflate
+           * absent with empty — the distinction this whole family is careful
+           * about. */
+          E.line(`if (${raw} == NULL) scr_native_throw_null(${operation});`);
+          E.emitPendingCheck();
           const managed = E.newTemp(
             e.type,
             `scr_bytes_from_data(${raw}, ${bytesLengthSlot})`,

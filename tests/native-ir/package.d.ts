@@ -228,6 +228,9 @@ export declare function cstringArrayMeasureNamed(
   items: readonly string[],
   name: string,
 ): i32;
+/** Answers NULL where the contract says a span. Its failure is the contract
+ * violation becoming a catchable error. */
+export declare function bytesAbsent(): Uint8Array;
 /** A byte span the caller owns, reversed, whose length arrives beside the
  * pointer. Freed through the symbol the binding names once copied. */
 export declare function bytesReverse(data: Uint8Array): Uint8Array;
