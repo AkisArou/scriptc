@@ -108,6 +108,43 @@ describe("library compilation plan", () => {
     expect(build.plans[0]!.inputs).toContain("program.c");
   }, 120_000);
 
+  it("includes runtime services the embedder requires but the program never reaches", async () => {
+    const { profilePath } = stageProfile("scalars", "c");
+
+    /* The `scalars` fixture retains no callback, so nothing in the module
+     * selects the retained-callback runtime. A HOST runtime that calls
+     * scr_retained_callbacks_* or scr_loop_set_attached still needs it, and
+     * only the embedder knows that.
+     *
+     * Getting this wrong is invisible until load. An executable fails at LINK
+     * with an undefined symbol; a shared object defers it, so a library that
+     * built and archived cleanly dies inside the host with `symbol lookup
+     * error` — one layer further from the cause. */
+    const withoutRequires = await planLibraryCompilation({ profilePath });
+    expect(withoutRequires.ok).toBe(true);
+    if (!withoutRequires.ok) return;
+    expect(withoutRequires.plan.nativeBuild.retainedCallbacks).toBe(false);
+
+    const withRequires = await planLibraryCompilation({
+      profilePath,
+      nativeRuntimeRequires: ["retained-callbacks"],
+    });
+    expect(withRequires.ok).toBe(true);
+    if (!withRequires.ok) return;
+    expect(withRequires.plan.nativeBuild.retainedCallbacks).toBe(true);
+
+    /* And the requirement reaches the objects the archive actually holds,
+     * rather than only the plan that describes them. */
+    const build = await planLibraryExternalCBuild(withRequires.plan, {
+      program: "program.c",
+      runtime: "scriptc-runtime",
+      output: "library.a",
+      objectIdPrefix: "obj/",
+    });
+    const objects = build.objects.map(({ fileName }) => fileName);
+    expect(objects.some((name) => name.includes("callback"))).toBe(true);
+  }, 120_000);
+
   it("produces an archive that can become a shared object", async () => {
     const { profilePath, outDir } = stageProfile("scalars", "c");
     const built = await compileLibrary({ profilePath, outDir });

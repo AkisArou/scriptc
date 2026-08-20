@@ -1500,6 +1500,21 @@ export interface LibraryFrontendOptions {
 export interface CompileLibraryOptions extends LibraryFrontendOptions {
   /** Where the archive and the kept program TU land. */
   outDir: string;
+  /**
+   * Runtime services the EMBEDDER requires, whatever the program reaches.
+   *
+   * The same channel the executable path takes, and needed more sharply
+   * here. A host runtime that calls `scr_retained_callbacks_*` or
+   * `scr_loop_set_attached` needs those services even when the compiled
+   * TypeScript retains no callback of its own — nothing in the module says
+   * so, so nothing would select them.
+   *
+   * An executable would fail at LINK with an undefined symbol. A shared
+   * object defers that to load, so the same missing selection surfaces as a
+   * `symbol lookup error` inside the host process — one layer further from
+   * its cause, in a program that built cleanly.
+   */
+  nativeRuntimeRequires?: readonly ScrNativeRuntimeService[];
   /** Archive path. Default: <outDir>/<stem>.lib.a. */
   outPath?: string;
   emitIr?: boolean;
@@ -2406,6 +2421,8 @@ async function prepareLibraryCompilation(
 
 export interface PlanLibraryCompilationOptions extends LibraryFrontendOptions {
   sanitize?: boolean;
+  /** Runtime services the embedder requires; see `CompileLibraryOptions`. */
+  nativeRuntimeRequires?: readonly ScrNativeRuntimeService[];
 }
 
 export type PlanLibraryCompilationResult =
@@ -2436,7 +2453,11 @@ export async function planLibraryCompilation(
       },
       ir: serializeModule(prepared.module),
       entrySource: prepared.entryText,
-      nativeBuild: libraryNativeBuildPlan(prepared, opts.sanitize ?? false),
+      nativeBuild: libraryNativeBuildPlan(
+        prepared,
+        opts.sanitize ?? false,
+        opts.nativeRuntimeRequires ?? [],
+      ),
       sidecar: prepared.sidecarJson,
     }),
     sourceTexts: prepared.sourceTexts,
@@ -2456,8 +2477,10 @@ export async function planLibraryCompilation(
 function libraryNativeBuildPlan(
   prepared: PreparedLibraryCompilation,
   sanitize: boolean,
+  nativeRuntimeRequires: readonly ScrNativeRuntimeService[] = [],
 ): LibraryNativeBuildPlan {
   const { module: mod, profile } = prepared;
+  const required = new Set(nativeRuntimeRequires);
   const localizeSymbols = profile.localizeRuntime
     ? [
         profile.initSymbol,
@@ -2487,8 +2510,10 @@ function libraryNativeBuildPlan(
     zlib: moduleUsesZlib(mod),
     copying: moduleUsesCopying(mod),
     textDecoderLegacy: moduleUsesLegacyTextDecoder(mod),
-    nativeHandle: (mod.nativeTypes ?? []).some((definition) => definition.kind === "handle"),
-    retainedCallbacks: moduleUsesRetainedCallbacks(mod),
+    nativeHandle: required.has("native-handle") ||
+      (mod.nativeTypes ?? []).some((definition) => definition.kind === "handle"),
+    retainedCallbacks: required.has("retained-callbacks") ||
+      moduleUsesRetainedCallbacks(mod),
   });
 }
 
@@ -2549,7 +2574,11 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
 
   const archivePath = opts.outPath ?? join(opts.outDir, `${stem}.lib.a`);
   await compileLibArchive({
-    ...libraryNativeBuildPlan(prepared, opts.sanitize ?? false),
+    ...libraryNativeBuildPlan(
+      prepared,
+      opts.sanitize ?? false,
+      opts.nativeRuntimeRequires ?? [],
+    ),
     cPath,
     outPath: archivePath,
   });
