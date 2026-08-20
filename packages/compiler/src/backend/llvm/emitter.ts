@@ -91,7 +91,7 @@ import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, islandPr
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
 import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, nativeCallLifecycle, nativeCallbackPayloads, nativeTrampolineForm, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
-import { nativeArgumentForm, nativeCallDisposal, nativeFailureForm, nativeResultForm, type NativeArgumentFormExhausted } from "../native-call-plan.js";
+import { nativeArgumentForm, nativeCallDisposal, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultForm, type NativeArgumentFormExhausted } from "../native-call-plan.js";
 import { computeMayThrow } from "../emission/may-throw.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleNativeHandleTag, mangleNativeStruct, mangleRecordClone, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
@@ -7211,15 +7211,10 @@ class LlEmitter {
             this.releaseValue(arg.name, arg.type);
           }
         };
-        const callbacksMayThrow = binding.arguments.some(
-          (argument) =>
-            argument.type.kind === "func" &&
-            argument.callback?.owner.kind === "call",
-        ) ||
-          /* A retained profile callback defers its throw until a later
-           * native call checks; that call is a checkpoint whichever path
-           * serves it. */
-          this.ffiHasRetainedCallback;
+        const callbacksMayThrow = nativeCallIsThrowCheckpoint(
+          binding,
+          this.ffiHasRetainedCallback,
+        );
         const retainedTokens = new Map<number, string>();
         /* Vectors this call borrowed, by the argument they came from; released
          * after the call whatever it did. */

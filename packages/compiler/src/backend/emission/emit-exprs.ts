@@ -10,7 +10,7 @@ import { dynDestrCheckHelper, dynIterNHelper, dynKeyGetHelper } from "./emit-wal
 import { genResultThunkFor } from "./emit-async.js";
 import { nativeCallbackCancellationArgument } from "../native-callbacks.js";
 import { nativeCallLifecycle } from "../native-callbacks.js";
-import { nativeArgumentForm, nativeCallDisposal, nativeFailureForm, nativeResultForm, type NativeArgumentFormExhausted } from "../native-call-plan.js";
+import { nativeArgumentForm, nativeCallDisposal, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultForm, type NativeArgumentFormExhausted } from "../native-call-plan.js";
 
 function streamTypedRefCommitAdapter(
   E: CEmitter,
@@ -2265,13 +2265,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             E.releaseValue(arg.name, arg.type);
           }
         };
-        const callbacksMayThrow = binding.arguments.some(
-          (argument) => argument.type.kind === "func",
-        ) ||
-          /* A retained profile callback defers its throw until a later
-           * native call checks; that call is a checkpoint whichever path
-           * serves it. */
-          E.ffiHasRetainedCallback;
+        const callbacksMayThrow = nativeCallIsThrowCheckpoint(
+          binding,
+          E.ffiHasRetainedCallback,
+        );
         const retainedTokens = new Map<number, string>();
         /* Vectors this call borrowed, by the argument they came from. The
          * release runs after the call whatever it did, so it cannot be a

@@ -767,3 +767,35 @@ export function nativeCallDisposal(
   }
   return { argument: parameter.projection.argument, typeId: parameter.type.typeId };
 }
+
+/**
+ * Whether a native call is a THROW CHECKPOINT: a point where an exception
+ * raised on the far side of the boundary may already be pending when the call
+ * returns, so the result must not be projected nor the arguments released
+ * before that is checked.
+ *
+ * Any callback argument makes it one. Not because every native API invokes its
+ * callback during the registering call — most retain it and call back later —
+ * but because nothing in the contract says one cannot, and the two mistakes
+ * are not symmetric. An unnecessary check costs a comparison. A missing one
+ * projects a result and releases arguments with an exception already pending,
+ * which is the failure the checkpoint exists to prevent.
+ *
+ * Owner SCOPE is deliberately not consulted, and this is the reason the
+ * decision lives here at all. Scope answers when a registration ends, which is
+ * a different question from whether this call can re-enter managed code.
+ * Reading it narrowed the predicate in the LLVM backend and not the C one, so
+ * for every binding carrying an owner-scoped retained callback — a signal
+ * connected to a handle, the most ordinary shape there is — the two backends
+ * disagreed about where the unwind belongs. Both spelled the predicate
+ * themselves, three lines above a comment promising they shared it.
+ */
+export function nativeCallIsThrowCheckpoint(
+  binding: IrNativeBinding,
+  moduleHasRetainedRegistration: boolean,
+): boolean {
+  /* A retained profile callback defers its throw until a later native call
+   * checks; that call is a checkpoint whichever path serves it. */
+  return moduleHasRetainedRegistration ||
+    binding.arguments.some((argument) => argument.type.kind === "func");
+}
