@@ -145,6 +145,10 @@ export {
   type ExecutableNativeBuildPlan,
 } from "./executable-plan.js";
 export {
+  getEmbedderProtocol,
+  type EmbedderProtocol,
+} from "./embedder-protocol.js";
+export {
   emitLibraryCompilationPlan,
   planLibraryExternalCBuild,
   type LibraryCompilationPlan,
