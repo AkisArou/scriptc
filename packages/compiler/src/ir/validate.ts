@@ -13,6 +13,7 @@ import type {
   IrNativeCallbackArgumentType,
   IrNativeCallbackSignature,
   IrNativePointerType,
+  IrNativeResultProjection,
   IrNativePhysicalAbiType,
   IrNativePhysicalAbiValue,
   IrNativeScalarType,
@@ -26,6 +27,55 @@ import type {
   SrcLoc,
 } from "./nodes.js";
 import { arrayOf, BIGINT, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, ffiClassType, ffiSourceParamTypes, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, isFfiCallbackParam, isFfiContextParam, isFfiReleaseParam, isJsonSafeType, islandPromisePayloadTag, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, nativeArgumentScriptType, nativeCallbackIsOwnerScoped, nativeFailureReadsResult, nativeIntegerInfo, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, shapeHasAccessorSlots, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
+
+/**
+ * A published union as it arrives from OUTSIDE, with every payload field
+ * loosened to `unknown` and the discriminant left intact.
+ *
+ * The validator's job is to distrust these documents: an embedder hands over
+ * bindings that are typed only by assertion, so `typeof x.nullable !==
+ * "boolean"` has to be reachable code rather than a comparison the compiler
+ * folds away. The old way to buy that was an inline union restating the arms
+ * with `unknown` payloads — and because such a union is comparable to the real
+ * one in BOTH directions, TypeScript accepts a cast that silently omits an
+ * arm. It happened: a `utf8Span` result was added, one of the two result-side
+ * casts was widened, the other was not, and the compiler accepted a binding
+ * and then refused every call to it.
+ *
+ * Deriving the loosened form from the published union keeps the distrust and
+ * removes the restatement, so an arm added to the contract appears here with
+ * no edit and cannot be forgotten.
+ *
+ * The optional fields are collected across the WHOLE union rather than per
+ * arm, which is deliberate and not a loss of precision here. Two arms can
+ * share a discriminant — `boolean` is `exact` with declared values or
+ * `nonZero` without them — and a validator has to be able to ask whether a
+ * document carries a field its own arm should not have. Restricting each arm
+ * to its own fields would make exactly that question unaskable.
+ */
+type UnionKeys<T> = T extends unknown ? keyof T : never;
+type Untrusted<T, Fields = UnionKeys<T>> = T extends { kind: infer K }
+  ? { kind: K } & { [P in Exclude<Fields & string, "kind">]?: unknown }
+  : never;
+
+/**
+ * Whether an untrusted `release` field describes a release at all.
+ *
+ * Four result families ask it — C strings, C string vectors, byte spans and
+ * UTF-8 spans — because they share the QUESTION rather than the projection:
+ * each copies into managed storage and then has to say what the original
+ * pointer needs afterwards. The check was written out four times, character
+ * for character, which is three opportunities for one of them to be corrected
+ * or tightened alone.
+ */
+function validNativeRelease(
+  release: { kind?: unknown; symbol?: unknown } | undefined,
+): boolean {
+  return release?.kind === "none" ||
+    (release?.kind === "symbol" &&
+      typeof release.symbol === "string" &&
+      release.symbol.length > 0);
+}
 
 /** Per-method signature for strIntrinsic: `argTypes` lists every argument
  * position (optional ones included); `minArgs` is how many may be omitted
@@ -2627,6 +2677,27 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             });
           }
           break;
+        default: {
+          /* A projection arm the contract carries and this switch does not.
+           *
+           * Without it the tally below is the only thing that notices, and it
+           * reports "incomplete or ambiguous ABI projection" — which describes
+           * a binding that named two projections for one argument, not one
+           * naming a kind nobody validated. A reader given that message looks
+           * at the binding; the fault is here.
+           *
+           * The `never` binding is what makes this a BUILD failure rather than
+           * a runtime one: adding an arm to the published parameter projection
+           * stops this file compiling until someone decides what validates it.
+           */
+          const unvalidated: never = parameter.projection;
+          errors.push({
+            message: `Native IR binding "${binding.id}" parameter "${parameter.name}" uses ` +
+              `projection "${(unvalidated as { kind: string }).kind}", which this compiler does not validate`,
+            loc: moduleLoc,
+          });
+          break;
+        }
       }
     }
     binding.arguments.forEach((argument, argumentIndex) => {
@@ -2668,17 +2739,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         });
       }
     });
-    const resultProjection = binding.result.projection as
-      | { kind: "direct" }
-      | { kind: "boolean"; conversion?: unknown; falseValue?: unknown; trueValue?: unknown }
-      | { kind: "number" }
-      | { kind: "utf8CString"; nullable?: unknown; release?: unknown }
-      | { kind: "utf8CStringArray"; nullable?: unknown; release?: unknown }
-      | { kind: "bytes"; elem?: unknown; release?: unknown }
-      | { kind: "utf8Span"; nullable?: unknown; release?: unknown }
-      | { kind: "nullableHandle" }
-      | { kind: "errorChannel" }
-      | undefined;
+    const resultProjection: Untrusted<IrNativeResultProjection> | undefined =
+      binding.result.projection;
     if (abiOnlyScalar(binding.result.type) && resultProjection?.kind !== "number") {
       errors.push({
         message: `Native IR binding "${binding.id}" has an f32 result without the number projection`,
@@ -2792,11 +2854,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       const release = resultProjection.release as
         | { kind?: unknown; symbol?: unknown }
         | undefined;
-      const releaseValid =
-        release?.kind === "none" ||
-        (release?.kind === "symbol" &&
-          typeof release.symbol === "string" &&
-          release.symbol.length > 0);
+      const releaseValid = validNativeRelease(release);
       /* Ownership is pinned to the release exactly as a vector result's is,
        * and for the same reason: they state one fact about one pointer. A
        * string nothing frees is borrowed from the receiver whose lifetime
@@ -2842,11 +2900,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       const release = resultProjection.release as
         | { kind?: unknown; symbol?: unknown }
         | undefined;
-      const releaseValid =
-        release?.kind === "none" ||
-        (release?.kind === "symbol" &&
-          typeof release.symbol === "string" &&
-          release.symbol.length > 0);
+      const releaseValid = validNativeRelease(release);
       if (
         binding.result.type.kind !== "nativePointer" ||
         !validNativePointer(binding.result.type) ||
@@ -2878,11 +2932,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       const release = resultProjection.release as
         | { kind?: unknown; symbol?: unknown }
         | undefined;
-      const releaseValid =
-        release?.kind === "none" ||
-        (release?.kind === "symbol" &&
-          typeof release.symbol === "string" &&
-          release.symbol.length > 0);
+      const releaseValid = validNativeRelease(release);
       if (
         binding.result.type.kind !== "nativePointer" ||
         !validNativePointer(binding.result.type) ||
@@ -2912,11 +2962,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       const release = resultProjection.release as
         | { kind?: unknown; symbol?: unknown }
         | undefined;
-      const releaseValid =
-        release?.kind === "none" ||
-        (release?.kind === "symbol" &&
-          typeof release.symbol === "string" &&
-          release.symbol.length > 0);
+      const releaseValid = validNativeRelease(release);
       /* Ownership is pinned to the release and cannot disagree with it. A
        * vector nothing frees is borrowed from its receiver, exactly as a
        * borrowed string is — the copy has to happen while the receiver is
@@ -4994,17 +5040,8 @@ function validateFunction(
              * describe it worse the second time. */
           }
         });
-        const resultProjection = binding.result.projection as
-          | { kind: "direct" }
-          | { kind: "boolean" }
-          | { kind: "number" }
-          | { kind: "utf8CString"; nullable?: unknown }
-          | { kind: "utf8CStringArray"; nullable?: unknown }
-          | { kind: "bytes"; elem?: unknown }
-          | { kind: "utf8Span"; nullable?: unknown }
-          | { kind: "nullableHandle" }
-          | { kind: "errorChannel" }
-          | undefined;
+        const resultProjection: Untrusted<IrNativeResultProjection> | undefined =
+          binding.result.projection;
         if (resultProjection?.kind === "direct") {
           if (
             binding.result.type.kind === "nativePointer" ||
