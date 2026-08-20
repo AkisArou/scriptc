@@ -9,7 +9,7 @@ import { compilerReleaseVersion } from "./sidecar.js";
 import type { IrModule } from "../ir/nodes.js";
 import { IR_VERSION } from "../ir/serialize.js";
 import { frontendInputsSemanticallyMatch, frontendInputsStillMatch, validFrontendInputSnapshot, type FrontendInputExclusions, type FrontendInputSnapshot } from "../frontend/input-tracker.js";
-import { rebaseSourceLocations, semanticallyEqualSource } from "./semantic-source.js";
+import { rebaseSourceLocations, semanticallyEqualSource, sourceLineRebaseIsIdentity } from "./semantic-source.js";
 
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
@@ -93,6 +93,7 @@ export interface EarlyLibraryCachePublish extends EarlyLibraryCacheHit {
 
 export interface SemanticLibraryCacheHit {
   mod: IrModule;
+  translationUnit: string;
   sourceTexts: Map<string, string>;
   previousSources: Map<string, string>;
   frontend: FrontendInputSnapshot;
@@ -367,22 +368,28 @@ export async function readSemanticLibraryCache(
     if (
       stamp.version !== 2 || stamp.key !== cacheKey(options) ||
       !validFrontendInputSnapshot(stamp.frontend) || !validNativeFeatures(stamp.native) ||
+      stamp.files?.translationUnit?.name !== "program.tu" ||
       stamp.files?.semanticIr?.name !== "semantic.ir.json.gz" ||
       stamp.files?.sources?.name !== "sources.json.gz" ||
+      !/^[0-9a-f]{64}$/.test(stamp.files.translationUnit.digest) ||
       !/^[0-9a-f]{64}$/.test(stamp.files.semanticIr.digest) ||
       !/^[0-9a-f]{64}$/.test(stamp.files.sources.digest) ||
       (stamp.files.sidecar !== null) !== (sidecarConfiguredPath !== undefined) ||
       stampIntegrity(unsigned) !== integrity
     ) return null;
     const directory = dirname(path);
-    const [irCompressed, sourcesCompressed, sidecar] = await Promise.all([
+    const [translationUnit, irCompressed, sourcesCompressed, sidecar] = await Promise.all([
+      readCachedFile(join(directory, stamp.files.translationUnit.name), stamp.files.translationUnit.digest),
       readCachedFile(join(directory, stamp.files.semanticIr.name), stamp.files.semanticIr.digest),
       readCachedFile(join(directory, stamp.files.sources.name), stamp.files.sources.digest),
       stamp.files.sidecar === null
         ? Promise.resolve(null)
         : readCachedFile(join(directory, stamp.files.sidecar.name), stamp.files.sidecar.digest),
     ]);
-    if (irCompressed === null || sourcesCompressed === null || (stamp.files.sidecar !== null && sidecar === null)) {
+    if (
+      translationUnit === null || irCompressed === null || sourcesCompressed === null ||
+      (stamp.files.sidecar !== null && sidecar === null)
+    ) {
       return null;
     }
     const [irJson, sourcesJson] = await Promise.all([
@@ -403,18 +410,34 @@ export async function readSemanticLibraryCache(
       ),
     );
     if (semantic === null || semantic.changed.length === 0) return null;
+    // C source annotations are rendered through the entry source's line table,
+    // including imported offsets stamped with the entry path and synthetic
+    // byte-zero locations. Their line-only text cannot be rebased exactly for
+    // multi-source graphs or line-shifting edits. Keep TU reuse to the safe
+    // single-source, line-preserving subset; take the normal frontend path for
+    // the other uncommon trivia edits.
+    if (stamp.native.backend === "c") {
+      const entry = resolve(options.entryPath);
+      const change = semantic.changed.find((candidate) => candidate.path === entry);
+      if (
+        previousSources.size > 1 || semantic.changed.length !== 1 || change === undefined ||
+        !sourceLineRebaseIsIdentity(entry, change.previous, change.current)
+      ) return null;
+    }
     const mod = deserializeV8(irJson) as IrModule;
     if (mod.irVersion !== IR_VERSION) return null;
     rebaseSourceLocations(mod, previousSources, semantic.currentSources);
     const now = new Date();
     await Promise.all([
       path,
+      join(directory, stamp.files.translationUnit.name),
       join(directory, stamp.files.semanticIr.name),
       join(directory, stamp.files.sources.name),
       ...(stamp.files.sidecar === null ? [] : [join(directory, stamp.files.sidecar.name)]),
     ].map((cachePath) => utimes(cachePath, now, now).catch(() => undefined)));
     return {
       mod,
+      translationUnit: translationUnit.toString("utf8"),
       sourceTexts: semantic.currentSources,
       previousSources,
       frontend: semantic.snapshot,

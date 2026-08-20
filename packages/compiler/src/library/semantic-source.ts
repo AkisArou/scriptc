@@ -154,6 +154,93 @@ function offsetMapper(path: string, previous: string, current: string): OffsetMa
   };
 }
 
+function lineStarts(source: string): number[] {
+  const starts = [0];
+  for (let offset = 0; offset < source.length; offset++) {
+    if (source[offset] === "\n") starts.push(offset + 1);
+  }
+  return starts;
+}
+
+function lineAt(starts: readonly number[], offset: number): number {
+  let lo = 0;
+  let hi = starts.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (starts[mid]! <= offset) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo + 1;
+}
+
+/** Build a cheap old-line to current-line mapper for semantically identical
+ * sources. C emission records only a location's line, not its byte offset, so
+ * representative semantic tokens anchor each old line across trivia edits. */
+export function createSourceLineRebaser(
+  path: string,
+  previous: string,
+  current: string,
+): (line: number) => number {
+  const oldTokens = semanticTokens(path, previous);
+  const newTokens = semanticTokens(path, current);
+  if (oldTokens === null || newTokens === null || !tokensEqual(oldTokens, newTokens)) {
+    return (line) => line;
+  }
+  const oldStarts = lineStarts(previous);
+  const newStarts = lineStarts(current);
+  const firstTokenByLine = new Map<number, number>();
+  for (let index = 0; index < oldTokens.length; index++) {
+    const line = lineAt(oldStarts, oldTokens[index]!.start);
+    if (!firstTokenByLine.has(line)) firstTokenByLine.set(line, index);
+  }
+  const mapper = offsetMapper(path, previous, current);
+  return (line): number => {
+    if (!Number.isSafeInteger(line) || line < 1 || line > oldStarts.length) return line;
+    const tokenIndex = firstTokenByLine.get(line);
+    const offset = tokenIndex === undefined
+      ? mapper.start(oldStarts[line - 1]!)
+      : newTokens[tokenIndex]!.start;
+    return lineAt(newStarts, offset);
+  };
+}
+
+/** True when every existing source line keeps its physical line number. This
+ * is the safe subset for reusing a C TU whose annotations retain line numbers
+ * but not enough provenance to distinguish synthetic byte-zero locations. */
+export function sourceLineRebaseIsIdentity(
+  path: string,
+  previous: string,
+  current: string,
+): boolean {
+  const oldTokens = semanticTokens(path, previous);
+  const newTokens = semanticTokens(path, current);
+  if (oldTokens === null || newTokens === null || !tokensEqual(oldTokens, newTokens)) {
+    return false;
+  }
+  const oldStarts = lineStarts(previous);
+  const newStarts = lineStarts(current);
+  // The C emitter counts only LF bytes. TypeScript also treats bare CR and
+  // the Unicode separators as line breaks, so normalizing one of those to LF
+  // preserves semantic tokens while moving later annotations to a different
+  // emitter line. Check every corresponding token, including multiple
+  // TypeScript lines that the emitter previously collapsed into one.
+  for (let index = 0; index < oldTokens.length; index++) {
+    if (
+      lineAt(oldStarts, oldTokens[index]!.start) !==
+      lineAt(newStarts, newTokens[index]!.start)
+    ) return false;
+  }
+  const rebase = createSourceLineRebaser(path, previous, current);
+  let line = 1;
+  if (rebase(line) !== line) return false;
+  for (let offset = 0; offset < previous.length; offset++) {
+    if (previous[offset] !== "\n") continue;
+    line++;
+    if (rebase(line) !== line) return false;
+  }
+  return true;
+}
+
 /** Rebase every SrcLoc-shaped object in a deserialized cache payload. */
 export function rebaseSourceLocations<T>(
   value: T,

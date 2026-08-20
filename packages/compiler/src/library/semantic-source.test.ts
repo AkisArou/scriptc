@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { rebaseSourceLocations, semanticallyEqualSource, semanticSourceDigest } from "./semantic-source.js";
+import { createSourceLineRebaser, rebaseSourceLocations, semanticallyEqualSource, semanticSourceDigest, sourceLineRebaseIsIdentity } from "./semantic-source.js";
 
 test("ordinary TypeScript comments and formatting preserve semantic identity", () => {
   const before = "// old note\nexport function value(): number { return 1; }\n";
@@ -76,6 +76,30 @@ test("source locations rebase across changed comment trivia", () => {
   rebaseSourceLocations(payload, new Map([["/entry.ts", before]]), new Map([["/entry.ts", after]]));
   expect(payload.loc.start).toBe(after.indexOf("return"));
   expect(payload.loc.end).toBe(after.indexOf("return") + "return 1".length);
+});
+
+test("source lines rebase across changed comment trivia", () => {
+  const before = "// old\nexport function value() {\n  return 1;\n}\n";
+  const after = "/* much longer\n * note\n */\n\nexport function value() {\n  return 1;\n}\n";
+  const rebase = createSourceLineRebaser("/entry.ts", before, after);
+  expect(rebase(2)).toBe(5);
+  expect(rebase(3)).toBe(6);
+  expect(rebase(4)).toBe(7);
+  expect(sourceLineRebaseIsIdentity("/entry.ts", before, after)).toBe(false);
+  expect(sourceLineRebaseIsIdentity(
+    "/entry.ts",
+    "// old\nexport function value() { return 1; }\n",
+    "/* replacement */\nexport function value() { return 1; }\n",
+  )).toBe(true);
+});
+
+test("C source lines reject normalization of non-LF separators", () => {
+  for (const separator of ["\r", "\u2028", "\u2029"]) {
+    const before = `export const first = 1;${separator}export const second = 2;\n`;
+    const after = before.replace(separator, "\n");
+    expect(semanticallyEqualSource("/entry.ts", before, after)).toBe(true);
+    expect(sourceLineRebaseIsIdentity("/entry.ts", before, after)).toBe(false);
+  }
 });
 
 test("source locations at adjacent token boundaries rebase past inserted comments", () => {
