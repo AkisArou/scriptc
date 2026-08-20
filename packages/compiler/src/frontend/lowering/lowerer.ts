@@ -97,7 +97,7 @@ import { FileParts, splitFiles, collectProgram, collectNpmImports, collectJsonIm
 import { ClassInfo, ClassIteratorInfo, GenericClassInfo, registerBuiltinErrorClasses, registerBuiltinEmitterClass, registerBuiltinStreamClasses, builtinErrorInfoOf, builtinEmitterInfoOf, builtinStreamInfoOf, analyzeClassDecoration, classIteratorDrainCall, classIteratorNextCall, classIteratorOf, classIteratorOpenCall, classIteratorRestDrainCall, classMemberNameOf, classValueRef, collectClassShape, exactClassOfReceiver, collectClassShapeInner, ctorAbiEquals, findMethodOn, findStaticOn, findGenericMethodOn, findGenericStaticOn, genericClassInstanceType, isSubclassOf, inHierarchy, overrideBelow, staticShadowBelow, upcastTo, lowerClassMembers, lowerClassCtor, lowerClassExpression, lowerClassExpressionInfo, lowerClassMethodMember, lowerClassValueProperty, lowerStaticMethod, throwingSetterFn, fieldInitStmts, lowerStaticFieldInits, lowerStaticFieldRead, lowerDerivedCtorBody, superCallStmt, lowerSuperMethodCall, superThisRef, lowerSuperAccessorRead, lowerSuperAccessorWrite, inheritsBuiltinErrorCtor, inheritsBuiltinEmitterCtor, errorMessageArg, lowerNew, accessorCall } from "./lower-classes.js";
 import { MixinFnShape, mixinCallClassInfoOf, mixinIntersectionInstanceType } from "./lower-mixins.js";
 import { ParamShape, FnSig, GenericFnInfo, GenericInstance, bindingNeverReassigned, bodyReadsArguments, isThisParameter, paramShape, paramShapes, checkDefaultParamBodyType, completeArgs, wrappedUndefined, undefinedArgFor, requireExactArityValue, bodyReturnType, declaredReturnType, collectSignature, collectSignatureInner, collectGenericSignature, genericFnOf, lowerGenericCall, lowerGenericFnValue, inferTypeParamBindings, lowerGenericInstance, lowerCall, lowerFfiCall, lowerTimersMemberCall, lowerPromiseMethodCall, lowerFilterNarrowCall, isTopLevelFnSymbol, lowerNestedFunctionDecl, lambdaSignature, lowerLambda, lowerFunction, validateFfiImports } from "./lower-calls.js";
-import { lowerNativeCall, lowerNativeHandleAssertion, lowerNativeScalarAssertion, lowerNativeStructAssertion, materializeNativeBinding, materializeNativeType, nativeTypeOf, resolveNativeFrontend, type NativeInputBinding, type ResolvedNativeFrontend } from "./lower-native.js";
+import { hasNativeLowering, lowerNativeCall, lowerNativeHandleAssertion, lowerNativeScalarAssertion, lowerNativeStructAssertion, materializeNativeBinding, materializeNativeType, nativeTypeOf, resolveNativeFrontend, type NativeInputBinding, type ResolvedNativeFrontend } from "./lower-native.js";
 import { lowerArrayMethodCall, lowerBufferStaticCall, lowerBytesMethodCall, lowerBytesNew, lowerMapMethodCall, lowerMapForEachCall, buildMapForEachFn, lowerRecordOvfCaptureHelper, lowerEnvToPairsHelper, lowerSetMethodCall, lowerSetForEachCall, buildSetForEachFn, lowerRegexMethodCall, lowerStringMethodCall } from "./lower-containers.js";
 import { lowerStreamModuleCall } from "./lower-stream.js";
 import { lowerEmitOverrideSpec, type EmitSpecCtx, type EmitSpecRequest } from "./lower-emitter.js";
@@ -1545,6 +1545,18 @@ export class Lowerer {
       ts.isNonNullExpression(value)
     ) {
       value = value.expression;
+    }
+    /* A call the frontend input gives a native lowering is not external in the
+     * sense this fence means. The fence refuses values that have NO runtime
+     * implementation; a native call has one, and its own diagnostics say so
+     * precisely when it is malformed. Asked before the recursion below,
+     * which would otherwise follow the callee to the declaration it came from
+     * and conclude the opposite. */
+    if (
+      (ts.isCallExpression(value) || ts.isNewExpression(value)) &&
+      hasNativeLowering(this, value)
+    ) {
+      return null;
     }
     if (ts.isCallExpression(value)) {
       if (value.expression.kind === ts.SyntaxKind.ImportKeyword) {

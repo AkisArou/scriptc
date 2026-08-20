@@ -518,6 +518,30 @@ function nativeExpressionSymbol(L: Lowerer, expression: ts.Expression): ts.Symbo
   return L.checker.getAliasedSymbol(symbol);
 }
 
+/**
+ * Whether an expression has a native lowering configured for it.
+ *
+ * Asked by the external-host fence, which exists to stop a value rooted in a
+ * `--external-types` declaration from lowering as something it is not. A
+ * native call is the case where the premise fails: the declaration DOES have
+ * a runtime implementation, supplied by the frontend input, so fencing it
+ * would refuse a call the compiler knows how to make.
+ *
+ * It answers for the callee alone. Whether the call is well-formed is
+ * `lowerNativeCall`'s business and is diagnosed there, precisely; this only
+ * decides whether the fence is the right refusal.
+ */
+export function hasNativeLowering(L: Lowerer, expression: ts.Expression): boolean {
+  const callee = ts.isCallExpression(expression) || ts.isNewExpression(expression)
+    ? expression.expression
+    : expression;
+  const symbol = nativeExpressionSymbol(L, callee);
+  if (symbol === null) return false;
+  return L.nativeOperationsBySymbol.has(symbol) ||
+    L.nativeBindingsBySymbol.has(symbol) ||
+    L.nativeConstantsBySymbol.has(symbol);
+}
+
 export function lowerNativeConstant(
   L: Lowerer,
   expression: ts.Identifier | ts.PropertyAccessExpression,
