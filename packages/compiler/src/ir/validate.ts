@@ -5001,6 +5001,7 @@ function validateFunction(
           | { kind: "utf8CString"; nullable?: unknown }
           | { kind: "utf8CStringArray"; nullable?: unknown }
           | { kind: "bytes"; elem?: unknown }
+          | { kind: "utf8Span"; nullable?: unknown }
           | { kind: "nullableHandle" }
           | { kind: "errorChannel" }
           | undefined;
@@ -5060,6 +5061,28 @@ function validateFunction(
           !(e.type.kind === "array" && e.type.elem.kind === "string")
         ) {
           err(`Native IR call ${e.binding} must project to string[]`, e.loc);
+        } else if (
+          resultProjection?.kind === "utf8Span" &&
+          resultProjection.nullable === true
+        ) {
+          /* Same two questions the NUL-terminated string asks at a call site,
+           * because the projections differ in how the extent arrives and in
+           * nothing the SOURCE can see. */
+          const unionId = e.type.kind === "union" ? e.type.unionId : null;
+          const arms = unionId === null ? undefined : unions.get(unionId)?.arms;
+          if (
+            arms?.length !== 2 ||
+            !arms.some((arm) => arm.kind === "string") ||
+            !arms.some((arm) => arm.kind === "nullT")
+          ) {
+            err(`Native IR call ${e.binding} must project to string | null`, e.loc);
+          }
+        } else if (
+          resultProjection?.kind === "utf8Span" &&
+          resultProjection.nullable === false &&
+          e.type.kind !== "string"
+        ) {
+          err(`Native IR call ${e.binding} must project to string`, e.loc);
         } else if (resultProjection?.kind === "nullableHandle") {
           /* Absence is a value, so the call answers with the handle or null. */
           const unionId = e.type.kind === "union" ? e.type.unionId : null;
@@ -5095,6 +5118,7 @@ function validateFunction(
         } else if (
           resultProjection?.kind !== "utf8CString" &&
           resultProjection?.kind !== "utf8CStringArray" &&
+          resultProjection?.kind !== "utf8Span" &&
           resultProjection?.kind !== "bytes"
         ) {
           err(`Native IR call ${e.binding} has no valid result projection`, e.loc);

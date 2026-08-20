@@ -2597,6 +2597,107 @@ function retainedSupportObject(): string {
   );
 }
 
+/** A module whose one statement CALLS a binding returning UTF-8 text carried
+ * as a pointer and a length. `nullable` selects between a plain string result
+ * and a string|null union. */
+function utf8SpanCallModule(nullable: boolean): IrModule {
+  const stringOrNull: IrType = { kind: "union", unionId: "u-span-text" };
+  const resultType: IrType = nullable ? stringOrNull : { kind: "string" };
+  const call: IrExpr = {
+    kind: "nativeCall",
+    binding: "fixture.span_text",
+    args: [],
+    type: resultType,
+    loc,
+  };
+  return {
+    irVersion: IR_VERSION,
+    sourceFile: loc.file,
+    entry: "__main",
+    nativeTarget: { pointerBits: 64, abi: "sysv-amd64" },
+    unions: nullable
+      ? [{ id: "u-span-text", arms: [{ kind: "nullT" }, { kind: "string" }] }]
+      : [],
+    nativeBindings: [
+      {
+        id: "fixture.span_text",
+        declaration: { module: "@scriptc/native-abi-fixture", name: "spanText" },
+        sourceAccess: "call",
+        entry: { symbol: "nts_span_text" },
+        error: NO_NATIVE_ERROR,
+        arguments: [],
+        parameters: [
+          {
+            name: "out_length",
+            type: { kind: "nativeBytesLengthOut", addressSpace: 0 },
+            passMode: "pointer",
+            ownership: { kind: "value" as const },
+            projection: { kind: "bytesLengthOut" },
+          },
+        ],
+        result: {
+          type: {
+            kind: "nativePointer",
+            pointee: "u8",
+            const: false,
+            addressSpace: 0,
+            ...(nullable ? { nullable: true } : {}),
+          },
+          passMode: "pointer",
+          ownership: { kind: "value" as const },
+          projection: {
+            kind: "utf8Span",
+            nullable,
+            release: { kind: "symbol", symbol: "nts_cstring_free" },
+          },
+        },
+      },
+    ],
+    functions: [
+      {
+        name: "__main",
+        params: [],
+        returnType: NATIVE_VOID,
+        locals: [{ id: "text", name: "text", type: resultType, mutable: true }],
+        body: [
+          { kind: "assign", localId: "text", value: call, loc },
+        ],
+        loc,
+      },
+    ],
+  } as IrModule;
+}
+
+test("a CALL to a UTF-8 span binding validates in both nullabilities", () => {
+  /* The binding-level arm and both backend decodes shipped without this one,
+   * and nothing here could see the gap: a manifest translation produces a
+   * BINDING, while the call-site rule is reached only by a program that calls
+   * it. The first such program belonged to another repository, which is why
+   * the miss surfaced as a downstream lane failing rather than a test here.
+   *
+   * The same instrument lesson as the archive that linked only into
+   * executables: a check that no local consumer exercises is a check no local
+   * suite can falsify. */
+  expect(validateModule(utf8SpanCallModule(false)).map((e) => e.message)).toEqual([]);
+  expect(validateModule(utf8SpanCallModule(true)).map((e) => e.message)).toEqual([]);
+
+  /* And the rule is real in both directions: a nullable projection whose call
+   * site takes a bare string is refused, since absence would have nowhere to
+   * go. */
+  const mismatched = utf8SpanCallModule(true);
+  const statement = mismatched.functions[0]!.body[0]!;
+  if (statement.kind !== "assign" || statement.value.kind !== "nativeCall") {
+    throw new Error("fixture shape changed");
+  }
+  (statement.value as { type: IrType }).type = { kind: "string" };
+  (mismatched.functions[0]!.locals[0] as { type: IrType }).type = { kind: "string" };
+  expect(
+    validateModule(mismatched).some((e) =>
+      e.message.includes("Native IR call fixture.span_text must project to string | null")
+    ),
+  ).toBe(true);
+});
+
 test("Native IR validates and serializes an exact i32 call without a number carrier", () => {
   const mod = exactI32Module("-2147483648");
   expect(validateModule(mod)).toEqual([]);
