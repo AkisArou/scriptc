@@ -1684,6 +1684,23 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     "-ffp-contract=off", // per-operation f64 must match JS — see compileC's buildArgs
     "-fno-strict-aliasing", // the emitted object model type-puns — see compileC's buildArgs
     "-Wno-deprecated-declarations",
+    /* Every object in the archive is position-independent, unconditionally.
+     * A library archive exists to be EMBEDDED, and on x86_64 or aarch64 a
+     * non-PIC object cannot enter a shared library at all — the consumer
+     * meets it as `relocation R_X86_64_PC32 ... can not be used when making a
+     * shared object`, at its own link, three layers from this decision.
+     *
+     * It is not an option because no caller would set it to false, and the
+     * cost is a register on the platforms that charge anything. It rides
+     * cflags so every cache tier keys it automatically.
+     *
+     * This was stated in the plan's contract before it was true here. The
+     * archive linked into test EXECUTABLES throughout the conformance suite,
+     * where non-PIC objects link happily, so nothing in this repository could
+     * notice; the first shared-object consumer found it immediately. A
+     * property a product CLAIMS and its suites cannot observe is a property
+     * it does not have. */
+    "-fPIC",
     "-DSCR_LIB",
     ...(opts.threadInstances ? ["-DSCR_THREAD_INSTANCES"] : []),
     ...(opts.textDecoderLegacy ? ["-DSCR_TEXT_DECODER_LEGACY"] : []),

@@ -108,6 +108,36 @@ describe("library compilation plan", () => {
     expect(build.plans[0]!.inputs).toContain("program.c");
   }, 120_000);
 
+  it("produces an archive that can become a shared object", async () => {
+    const { profilePath, outDir } = stageProfile("scalars", "c");
+    const built = await compileLibrary({ profilePath, outDir });
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+
+    /* The property the plan CLAIMS, checked by the only consumer that can
+     * see it. Every other suite links an archive into an EXECUTABLE, where a
+     * non-PIC object links happily — which is exactly why the archive shipped
+     * without -fPIC while its contract said otherwise. A shared-object link
+     * is the first thing that notices, and it notices immediately:
+     * `relocation R_X86_64_PC32 ... can not be used when making a shared
+     * object`.
+     *
+     * --whole-archive because the point is that EVERY member is embeddable,
+     * not only the ones a link happens to reference. */
+    const shared = join(outDir, "library.so");
+    expect(() =>
+      execFileSync("clang", [
+        "-shared",
+        "-o",
+        shared,
+        "-Wl,--whole-archive",
+        built.archivePath,
+        "-Wl,--no-whole-archive",
+        "-lm",
+      ], { stdio: "pipe" })
+    ).not.toThrow();
+  }, 180_000);
+
   it("refuses to plan an archive whose producers it cannot describe", async () => {
     const { profilePath } = stageProfile("multi", "c", "profile_a.json");
     const planned = await planLibraryCompilation({ profilePath });
