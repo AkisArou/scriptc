@@ -173,6 +173,22 @@ char *nts_cstring_made(int32_t count) {
   return text;
 }
 
+/* A byte span the CALLER frees, whose length comes back beside the pointer
+ * rather than in it. Reversing the input makes the answer depend on order as
+ * well as on content, so a copy that read the right bytes in the wrong place
+ * is a different wrong answer from one that read the wrong bytes. */
+uint8_t *nts_bytes_reverse(const uint8_t *data, size_t length, size_t *out_length) {
+  *out_length = length;
+  if (length == 0) {
+    /* An empty span is still a span: a distinct allocation the caller frees,
+     * not NULL, so "no bytes" and "no answer" stay different. */
+    return malloc(1);
+  }
+  uint8_t *copy = malloc(length);
+  for (size_t i = 0; i < length; i++) copy[i] = data[length - 1 - i];
+  return copy;
+}
+
 /* The disposal the binding names for the string above. A plain free, which is
  * the shape almost every SDK uses for an owned string — and still a SYMBOL
  * rather than a policy, because an SDK with a pool allocator names a

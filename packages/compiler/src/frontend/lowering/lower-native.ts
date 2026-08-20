@@ -223,6 +223,13 @@ function matchesNativeResultSource(
       vectorArms.some(isStringArray) &&
       vectorArms.some((arm) => arm.kind === "nullT");
   }
+  /* A copied byte span reads as a plain `Uint8Array`. There is no nullable
+   * arm: the span is built from the pointer and the length the call produced,
+   * and a program that needs absence needs a nullable-bytes contract with its
+   * own motivating program. */
+  if (binding.result.projection.kind === "bytes") {
+    return mapped.kind === "bytes" && mapped.elem === "u8";
+  }
   if (!binding.result.projection.nullable) return mapped.kind === "string";
   if (mapped.kind !== "union") return false;
   const arms = L.unions.get(mapped.unionId)?.arms;

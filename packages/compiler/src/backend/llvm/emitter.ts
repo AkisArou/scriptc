@@ -1440,7 +1440,8 @@ class LlEmitter {
       t.kind === "nativePointer" ||
       t.kind === "nativeCallback" ||
       t.kind === "nativeContext" ||
-      t.kind === "nativeErrorOut"
+      t.kind === "nativeErrorOut" ||
+      t.kind === "nativeBytesLengthOut"
     ) return "ptr";
     if (t.kind === "nativeStruct") {
       const definition = this.nativeTypesById.get(t.typeId);
@@ -7313,6 +7314,13 @@ class LlEmitter {
           errorSlot = B.slot();
           B.entryAllocas.push(`${errorSlot} = alloca ptr`);
         }
+        /* The compiler's other own slot, for the same reason: the byte span's
+         * projection reads it after the call. */
+        let bytesLengthSlot: string | null = null;
+        if (binding.parameters.some((p) => p.projection.kind === "bytesLengthOut")) {
+          bytesLengthSlot = B.slot();
+          B.entryAllocas.push(`${bytesLengthSlot} = alloca i64`);
+        }
         /* A conversion that throws must not strand a vector an earlier
          * conversion borrowed. The release below the call is not reached on
          * this path, and the unwind only knows about managed temporaries — a
@@ -7374,6 +7382,10 @@ class LlEmitter {
             case "errorSlot":
               B.line(`store ptr null, ptr ${errorSlot}`);
               callArgs.push(`ptr ${errorSlot}`);
+              return;
+            case "bytesLengthSlot":
+              B.line(`store i64 0, ptr ${bytesLengthSlot}`);
+              callArgs.push(`ptr ${bytesLengthSlot}`);
               return;
             case "boolean": {
               const value = B.tmp();
@@ -7939,6 +7951,34 @@ class LlEmitter {
           this.emitPendingCheck();
           releaseArguments();
           return { name: "", type: e.type };
+        }
+        if (resultForm.kind === "bytesResult") {
+          /* Copied first, then freed: the managed span owns its own bytes by
+           * the time the release runs. The length comes from the slot the
+           * compiler passed, not from the pointer. */
+          const raw = B.tmp();
+          B.line(`${raw} = ${call}`);
+          const length = B.tmp();
+          B.line(`${length} = load i64, ptr ${bytesLengthSlot}`);
+          this.declare("declare ptr @scr_bytes_from_data(ptr, i64)");
+          const managed = B.tmp();
+          B.line(`${managed} = call ptr @scr_bytes_from_data(ptr ${raw}, i64 ${length})`);
+          if (resultForm.release !== null) {
+            this.declare(`declare void @${resultForm.release}(ptr)`);
+            const present = B.newLabel("native.bytes.free");
+            const freed = B.newLabel("native.bytes.freed");
+            const wasNull = B.tmp();
+            B.line(`${wasNull} = icmp eq ptr ${raw}, null`);
+            B.condBr(wasNull, freed, present);
+            B.startBlock(present);
+            B.line(`call void @${resultForm.release}(ptr ${raw})`);
+            B.br(freed);
+            B.startBlock(freed);
+          }
+          const value = this.own({ name: managed, type: e.type });
+          if (callbacksMayThrow) this.emitPendingCheck();
+          releaseArguments();
+          return value;
         }
         if (
           resultForm.kind === "utf8CStringArray" ||

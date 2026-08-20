@@ -144,6 +144,24 @@ export interface IrNativeErrorOutType {
   addressSpace: 0;
 }
 
+/** Where a returned byte span's length arrives.
+ *
+ * Compiler-supplied exactly as the error slot beside it is: the compiler
+ * allocates a `size_t`, passes its address, and reads it once the call
+ * returns. Nothing in the program supplies it, so it is not a visible
+ * parameter and no manifest names it — the same reason the trailing error
+ * slot is the compiler's own.
+ *
+ * A length that arrives this way is a different mechanism from a length that
+ * arrives as a sibling argument the CALLER fills, which is what a byte-span
+ * INPUT uses. Spelling them apart is the point: one field meaning "the caller
+ * filled this" in one position and "the callee wrote this" in another is a
+ * fact wearing one name twice. */
+export interface IrNativeBytesLengthOutType {
+  kind: "nativeBytesLengthOut";
+  addressSpace: 0;
+}
+
 /** Opaque ScriptC closure context passed beside a native callback pointer. */
 export interface IrNativeContextType {
   kind: "nativeContext";
@@ -322,7 +340,8 @@ export type IrNativeAbiType =
   | IrNativePointerType
   | IrNativeCallbackType
   | IrNativeContextType
-  | IrNativeErrorOutType;
+  | IrNativeErrorOutType
+  | IrNativeBytesLengthOutType;
 
 export type IrNativeArgumentType =
   | IrNativeValueType
@@ -391,6 +410,10 @@ export type IrNativeParameterProjection =
   /** The compiler's own error slot. It projects no source argument: nothing
    * in the program supplies it, and nothing reads it but the error contract. */
   | { kind: "errorOut" }
+  /** The compiler's own length slot for a returned byte span. Like the error
+   * slot, it projects no argument because nothing in the program supplies
+   * one. */
+  | { kind: "bytesLengthOut" }
   | { kind: "callbackFunction"; argument: number }
   | { kind: "callbackContext"; argument: number }
   /** The trampoline of a registration this call is UNMAKING. It is the same
@@ -444,6 +467,15 @@ export type IrNativeResultProjection =
    * An element cannot be absent, because the absent slot IS the terminator.
    * The VECTOR can be, which is what `nullable` covers. */
   | { kind: "utf8CStringArray"; nullable: boolean; release: IrNativeRelease }
+  /** A byte span the callee produced, copied into a managed `Uint8Array`.
+   *
+   * The string-vector result with a different element, and with the one fact
+   * that genuinely differs: the length arrives BESIDE the pointer, in the
+   * compiler's own out slot, where a string's NUL and a vector's terminator
+   * carried it in-band. Everything else is the answered question — copy into
+   * managed storage, then dispose through a named symbol or nothing, with the
+   * ownership beside it pinned to match. */
+  | { kind: "bytes"; elem: "u8"; release: IrNativeRelease }
   /** An owned handle the callee may report as absent, projected as a union of
    * the handle and null. Absence is a value, not a failure. */
   | { kind: "nullableHandle" }

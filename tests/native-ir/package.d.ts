@@ -228,6 +228,9 @@ export declare function cstringArrayMeasureNamed(
   items: readonly string[],
   name: string,
 ): i32;
+/** A byte span the caller owns, reversed, whose length arrives beside the
+ * pointer. Freed through the symbol the binding names once copied. */
+export declare function bytesReverse(data: Uint8Array): Uint8Array;
 /** A string the caller owns, freed through the symbol the binding names once
  * its bytes have been copied. A negative count answers null. */
 export declare function cstringMade(count: i32): string | null;

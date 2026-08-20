@@ -2355,6 +2355,13 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         const errorSlot = binding.parameters.some((p) => p.projection.kind === "errorOut")
           ? `sc_t${E.tempCounter++}`
           : null;
+        /* The compiler's other own slot, named for the same reason: the byte
+         * span's projection reads it after the call. */
+        const bytesLengthSlot = binding.parameters.some(
+            (p) => p.projection.kind === "bytesLengthOut",
+          )
+          ? `sc_t${E.tempCounter++}`
+          : null;
         /* What each argument becomes, decided once. The emitter below has one
          * arm per primitive and no view on which applies. */
         const argumentContext = {
@@ -2399,6 +2406,9 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             case "errorSlot":
               E.line(`void *${errorSlot} = NULL;`);
               return `&${errorSlot}`;
+            case "bytesLengthSlot":
+              E.line(`size_t ${bytesLengthSlot} = 0;`);
+              return `&${bytesLengthSlot}`;
             case "boolean": {
               const trueValue = cNativeScalarLiteral(
                 form.scalar,
@@ -2705,6 +2715,24 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           E.emitPendingCheck();
           releaseArguments();
           return { name: "", type: e.type };
+        }
+        if (resultForm.kind === "bytesResult") {
+          /* Copied first, then freed: the managed span owns its own bytes by
+           * the time the release runs, so nothing that survives points into
+           * storage the release reclaims. The length is read from the slot
+           * the compiler passed, not from the pointer. */
+          const raw = `sc_t${E.tempCounter++}`;
+          E.line(`const uint8_t *${raw} = ${call};${E.srcComment(e.loc)}`);
+          const managed = E.newTemp(
+            e.type,
+            `scr_bytes_from_data(${raw}, ${bytesLengthSlot})`,
+          );
+          if (resultForm.release !== null) {
+            E.line(`if (${raw} != NULL) ${resultForm.release}((void *)${raw});`);
+          }
+          if (callbacksMayThrow) E.emitPendingCheck();
+          releaseArguments();
+          return managed;
         }
         if (
           resultForm.kind === "utf8CStringArray" ||

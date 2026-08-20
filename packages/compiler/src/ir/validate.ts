@@ -2045,13 +2045,14 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       const pointerParameter = parameter.type.kind === "nativePointer";
       const callbackParameter = parameter.type.kind === "nativeCallback";
       const contextParameter = parameter.type.kind === "nativeContext";
-      /* The error slot is an address the callee stores through, so it crosses
-       * as a pointer like every other slot that is not a value. */
+      /* Both compiler-owned slots are addresses the callee stores through, so
+       * they cross as pointers like every other slot that is not a value. */
       const errorOutParameter = parameter.type.kind === "nativeErrorOut";
+      const lengthOutParameter = parameter.type.kind === "nativeBytesLengthOut";
       if (
         parameter.passMode !==
           (handleParameter || pointerParameter || callbackParameter ||
-              contextParameter || errorOutParameter
+              contextParameter || errorOutParameter || lengthOutParameter
             ? "pointer"
             : "value")
       ) {
@@ -2086,7 +2087,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           ? validNativeCallback(parameter.type)
           : parameter.type.kind === "nativeContext"
             ? validNativeContext(parameter.type)
-            : parameter.type.kind === "nativeErrorOut"
+            : parameter.type.kind === "nativeErrorOut" ||
+                parameter.type.kind === "nativeBytesLengthOut"
               ? Object.keys(parameter.type).sort().join(",") === "addressSpace,kind" &&
                 parameter.type.addressSpace === 0
               : validNativeValue(parameter.type);
@@ -2109,6 +2111,23 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         ) {
           errors.push({
             message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an invalid error-out projection`,
+            loc: moduleLoc,
+          });
+        }
+        continue;
+      }
+      /* The length slot leaves for the same reason the error slot does: the
+       * compiler supplies it, the callee writes it, and no source value is
+       * involved at either end. */
+      if (parameter.projection.kind === "bytesLengthOut") {
+        if (
+          Object.keys(parameter.projection).length !== 1 ||
+          parameter.type.kind !== "nativeBytesLengthOut" ||
+          parameter.passMode !== "pointer" ||
+          parameter.ownership.kind !== "value"
+        ) {
+          errors.push({
+            message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an invalid byte-length-out projection`,
             loc: moduleLoc,
           });
         }
@@ -2151,10 +2170,11 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             sourceArgument.type.kind === "nullableStringArray" ||
             sourceArgument.type.kind === "bytes" ||
             sourceArgument.type.kind === "func" ||
-            /* The error slot never reaches a direct projection — it left the
-             * loop above — so a `nativeErrorOut` here is a malformed binding
-             * rather than a type to compare. */
+            /* Neither compiler-owned slot reaches a direct projection — both
+             * left the loop above — so one appearing here is a malformed
+             * binding rather than a type to compare. */
             parameter.type.kind === "nativeErrorOut" ||
+            parameter.type.kind === "nativeBytesLengthOut" ||
             !typeEquals(parameter.type, sourceArgument.type))
           ) {
             errors.push({
@@ -2641,6 +2661,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       | { kind: "number" }
       | { kind: "utf8CString"; nullable?: unknown; release?: unknown }
       | { kind: "utf8CStringArray"; nullable?: unknown; release?: unknown }
+      | { kind: "bytes"; elem?: unknown; release?: unknown }
       | { kind: "nullableHandle" }
       | { kind: "errorChannel" }
       | undefined;
@@ -2793,6 +2814,41 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       ) {
         errors.push({
           message: `Native IR binding "${binding.id}" has an invalid UTF-8 C-string result projection`,
+          loc: moduleLoc,
+        });
+      }
+    } else if (resultProjection?.kind === "bytes") {
+      /* The slot is a pointer to bytes, and the LENGTH is not in it — it
+       * arrives in the compiler's own out slot, exactly one of which this
+       * binding must carry. A result claiming a span with nowhere to read its
+       * extent describes a pointer nobody can size. */
+      const lengthSlots = binding.parameters.filter(
+        (parameter) => parameter.projection.kind === "bytesLengthOut",
+      ).length;
+      const release = resultProjection.release as
+        | { kind?: unknown; symbol?: unknown }
+        | undefined;
+      const releaseValid =
+        release?.kind === "none" ||
+        (release?.kind === "symbol" &&
+          typeof release.symbol === "string" &&
+          release.symbol.length > 0);
+      if (
+        binding.result.type.kind !== "nativePointer" ||
+        !validNativePointer(binding.result.type) ||
+        binding.result.type.pointee === "ptr" ||
+        binding.result.passMode !== "pointer" ||
+        resultProjection.elem !== "u8" ||
+        lengthSlots !== 1 ||
+        !releaseValid ||
+        /* Consumed by the projection like every other copied span: the bytes
+         * are in managed storage before the release runs, so nothing the
+         * program holds outlives the call because of it. */
+        binding.result.ownership.kind !== "value" ||
+        nativeFailureReadsResult(binding.error.detect)
+      ) {
+        errors.push({
+          message: `Native IR binding "${binding.id}" has an invalid byte-span result projection`,
           loc: moduleLoc,
         });
       }
@@ -4895,6 +4951,7 @@ function validateFunction(
           | { kind: "number" }
           | { kind: "utf8CString"; nullable?: unknown }
           | { kind: "utf8CStringArray"; nullable?: unknown }
+          | { kind: "bytes"; elem?: unknown }
           | { kind: "nullableHandle" }
           | { kind: "errorChannel" }
           | undefined;
@@ -4977,8 +5034,14 @@ function validateFunction(
             );
           }
         } else if (
+          resultProjection?.kind === "bytes" &&
+          !(e.type.kind === "bytes" && e.type.elem === "u8")
+        ) {
+          err(`Native IR call ${e.binding} must project to Uint8Array`, e.loc);
+        } else if (
           resultProjection?.kind !== "utf8CString" &&
-          resultProjection?.kind !== "utf8CStringArray"
+          resultProjection?.kind !== "utf8CStringArray" &&
+          resultProjection?.kind !== "bytes"
         ) {
           err(`Native IR call ${e.binding} has no valid result projection`, e.loc);
         }

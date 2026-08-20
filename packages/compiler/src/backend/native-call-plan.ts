@@ -74,6 +74,14 @@ export type NativeResultForm =
    * nothing — one field, because whether the elements are the caller's too is
    * expressed by WHICH symbol frees the vector and not by this compiler. */
   | { readonly kind: "utf8CStringArray"; readonly release: string | null }
+  /** A byte span the callee produced, copied into a managed `Uint8Array`.
+   * The length arrives in the compiler's own slot, whose parameter index is
+   * carried here so the projection can read it back. */
+  | {
+      readonly kind: "bytesResult";
+      readonly release: string | null;
+      readonly lengthParameter: number;
+    }
   /** The same, where the callee may answer with NULL and absence is a value. */
   | {
       readonly kind: "utf8CStringArrayOrNull";
@@ -189,6 +197,21 @@ export function nativeResultForm(
       fail("nullable C-string result lacks string/null arms");
     }
     return { kind: "utf8CStringOrNull", release, unionId, stringTag, nullTag };
+  }
+
+  if (projection.kind === "bytes") {
+    const release = projection.release.kind === "symbol" ? projection.release.symbol : null;
+    if (!(sourceType.kind === "bytes" && sourceType.elem === "u8")) {
+      fail("byte-span result is not a Uint8Array");
+    }
+    /* The one slot the compiler owns for this call besides the error slot.
+     * Its index is what the projection reads back, so it is resolved here
+     * rather than searched for at emission. */
+    const lengthParameter = binding.parameters.findIndex(
+      (parameter) => parameter.projection.kind === "bytesLengthOut",
+    );
+    if (lengthParameter < 0) fail("byte-span result without a length slot");
+    return { kind: "bytesResult", release, lengthParameter };
   }
 
   if (projection.kind === "utf8CStringArray") {
@@ -315,6 +338,9 @@ function resolveHandle(
 export type NativeArgumentForm =
   /** The compiler's own error slot: nothing in the program supplies it. */
   | { readonly kind: "errorSlot" }
+  /** The compiler's own length slot for a returned byte span, for the same
+   * reason and read the same way. */
+  | { readonly kind: "bytesLengthSlot" }
   /** A source boolean selecting between the two declared representations. */
   | {
       readonly kind: "boolean";
@@ -447,6 +473,9 @@ export function nativeArgumentForm(
     fail(`missing parameter ${parameterIndex}`);
   const projection = parameter.projection;
   if (projection.kind === "errorOut") return { kind: "errorSlot" };
+  /* The compiler's other own slot. Like the error slot it projects no
+   * argument, so it is answered before anything reads one. */
+  if (projection.kind === "bytesLengthOut") return { kind: "bytesLengthSlot" };
   if (projection.kind === "callbackRelease") {
     return { kind: "callbackRelease", registration: projection.registration };
   }

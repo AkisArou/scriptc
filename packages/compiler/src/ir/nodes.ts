@@ -15,6 +15,7 @@ import type {
   IrNativeCallbackType,
   IrNativeContextType,
   IrNativeErrorContract,
+  IrNativeBytesLengthOutType,
   IrNativeErrorOutType,
   IrNativeExport,
   IrNativeFailureDetection,
@@ -1042,6 +1043,7 @@ export type {
   IrNativeCallbackType,
   IrNativeContextType,
   IrNativeErrorContract,
+  IrNativeBytesLengthOutType,
   IrNativeErrorOutType,
   IrNativeExport,
   IrNativeFailureDetection,
@@ -1065,7 +1067,7 @@ export type {
 };
 
 /** Current wire-format version for every producer and consumer of Native IR. */
-export const IR_VERSION = 39 as const;
+export const IR_VERSION = 40 as const;
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */

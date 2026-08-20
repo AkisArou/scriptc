@@ -840,6 +840,9 @@ export class CEmitter {
                * the error pointer rather than the error pointer itself. */
               : type.kind === "nativeErrorOut"
                 ? "void **"
+              /* The callee stores THROUGH it too, for the same reason. */
+              : type.kind === "nativeBytesLengthOut"
+                ? "size_t *"
             : cType(type).trim();
       const params = binding.parameters.map((parameter) => nativeAbiType(parameter.type));
       out.push(
@@ -856,15 +859,15 @@ export class CEmitter {
             : []),
         );
       }
-      // A copied string's or vector's release is a foreign symbol on the same
-      // footing, and its shape is fixed the same way: it takes the pointer
-      // and answers nothing.
+      // Every copied result that names a release names a foreign symbol on the
+      // same footing, and its shape is fixed the same way: it takes the
+      // pointer and answers nothing. Listed by which projections CARRY a
+      // release rather than by name, so a fourth cannot be forgotten here.
       const resultProjection = binding.result.projection;
-      if (
-        (resultProjection.kind === "utf8CStringArray" ||
-          resultProjection.kind === "utf8CString") &&
-        resultProjection.release.kind === "symbol"
-      ) {
+      const releaseCarrying = resultProjection.kind === "utf8CString" ||
+        resultProjection.kind === "utf8CStringArray" ||
+        resultProjection.kind === "bytes";
+      if (releaseCarrying && resultProjection.release.kind === "symbol") {
         out.push(`extern void ${resultProjection.release.symbol}(void *);`);
       }
     }

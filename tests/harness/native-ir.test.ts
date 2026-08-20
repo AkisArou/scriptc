@@ -1038,6 +1038,51 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: U64, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
+      /* A byte span in and a byte span out. The input's length is a sibling
+       * parameter the CALLER fills; the output's arrives in the compiler's
+       * own slot, which nothing in the program supplies. Same word, two
+       * mechanisms — which is why they are two projections. */
+      id: "scriptc.fixture.c-v1@0.0.0#bytes_reverse",
+      declaration: { module: nativePackage, name: "bytesReverse" },
+      entry: { symbol: "nts_bytes_reverse" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      arguments: [{ name: "data", type: { kind: "bytes", elem: "u8" } }],
+      parameters: [
+        {
+          name: "data",
+          type: { kind: "nativePointer", pointee: "u8", const: true, addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "borrowed", scope: "call" },
+          projection: { kind: "bytesData", argument: 0 },
+        },
+        {
+          name: "length",
+          type: USIZE,
+          passMode: "value",
+          ownership: { kind: "value" },
+          projection: { kind: "bytesByteLength", argument: 0 },
+        },
+        {
+          name: "out_length",
+          type: { kind: "nativeBytesLengthOut", addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "value" },
+          projection: { kind: "bytesLengthOut" },
+        },
+      ],
+      result: {
+        type: { kind: "nativePointer", pointee: "u8", const: false, addressSpace: 0 },
+        passMode: "pointer",
+        ownership: { kind: "value" },
+        projection: {
+          kind: "bytes",
+          elem: "u8",
+          release: { kind: "symbol", symbol: "nts_cstring_free" },
+        },
+      },
+    },
+    {
       id: "scriptc.fixture.c-v1@0.0.0#call_scoped",
       declaration: { module: nativePackage, name: "callScoped" },
       entry: { symbol: "nts_call_scoped" },
@@ -3873,6 +3918,26 @@ describe.each(["c", "llvm"] as const)("Native IR checked-number boundary, %s bac
     expect(generated).toMatch(
       backend === "c" ? /tag == \d+ \? scr_native_cstring_array_borrow/u : /native\.cstrv\.present/u,
     );
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+
+  localFixtureTest("copies a returned byte span whose length arrives beside it", async () => {
+    const outDir = join(scratch, `bytes-result-${backend}`);
+    const result = await compile(join(repoRoot, "tests/native-ir/bytes-result.ts"), {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend,
+      sanitize,
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+      nativeLinkInputs: [fixtureObject(), supportObject()],
+    });
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
     const run = spawnSync(result.binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
       status: 42,
