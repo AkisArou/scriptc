@@ -2505,12 +2505,53 @@ export function isParseArgsDynCheckerType(L: Lowerer, type: ts.Type): boolean {
       }
     }
     const emitOrder = restShape.declaredOrder ?? restShape.fields.map((f) => f.name);
-    if (emitOrder.length !== remaining.length || emitOrder.some((n, i) => n !== remaining[i]!.name)) {
-      L.unsupported(
-        "SC1031",
-        blame,
-        "rest bindings over class instances whose packed key order cannot match Node's (Object.keys/JSON.stringify would enumerate the copied fields in a different order)",
-      );
+    const orderMatches = (order: readonly string[]): boolean =>
+      order.length === remaining.length && order.every((n, i) => n === remaining[i]!.name);
+    const deferOrderCheck =
+      L.instantiationContext !== null &&
+      L.onEdge !== null &&
+      !isJsSourceFile(blame.getSourceFile());
+    if (!deferOrderCheck) {
+      if (!orderMatches(emitOrder)) {
+        L.unsupported(
+          "SC1031",
+          blame,
+          "rest bindings over class instances whose packed key order cannot match Node's (Object.keys/JSON.stringify would enumerate the copied fields in a different order)",
+        );
+      }
+    } else {
+      // Retained reachability can learn about an earlier source-order body
+      // only while a generic instance lowers. Always defer this metadata-only
+      // check until that worklist closes: the initial order can settle from
+      // wrong to right OR from right to wrong. Unlike emitted helper bodies,
+      // there is no IR to rebuild here — only the settled support decision
+      // matters.
+      const context = L.instantiationContext;
+      const countFailure = !L.suppressStats;
+      const sf = blame.getSourceFile();
+      L.shapeOrderMetadataFinalizers.push(() => {
+        const current = L.shapes.get(restT.shapeId) ?? restShape;
+        const currentOrder = current.declaredOrder ?? current.fields.map((f) => f.name);
+        if (orderMatches(currentOrder)) return;
+        L.requiresHistoricalOrderRelower = true;
+        const previous = L.instantiationContext;
+        L.instantiationContext = context;
+        try {
+          if (countFailure) {
+            L.stats.statementsFailed++;
+            L.bumpFileStat(sf.fileName, "failed");
+          }
+          L.pushDiag({
+            code: "SC1031",
+            message:
+              "rest bindings over class instances whose packed key order cannot match Node's " +
+              "(Object.keys/JSON.stringify would enumerate the copied fields in a different order) are not supported yet",
+            loc: locOf(blame),
+          });
+        } finally {
+          L.instantiationContext = previous;
+        }
+      });
     }
     const fields = remaining.map((f) => {
       const fieldType = info.fields.get(f.name) ?? f.type;
@@ -5380,12 +5421,22 @@ function isEsModuleStamp(expr: ts.Expression): boolean {
           }
         }
         const remaining = shape.fields.filter((f) => !consumed.has(f.name));
+        const restOrder = shape.declaredOrder?.filter((n) => !consumed.has(n));
         const restShapeId = L.shapes.intern(
           remaining.map((f) => ({ name: f.name, type: f.type })),
           false,
           undefined,
-          shape.declaredOrder?.filter((n) => !consumed.has(n)),
+          restOrder,
         );
+        if (restOrder !== undefined) {
+          L.shapeOrderMetadataFinalizers.push(
+            L.shapes.declaredOrderFinalizer(
+              restShapeId,
+              restOrder,
+              () => L.shapes.get(srcType.shapeId)?.declaredOrder?.filter((n) => !consumed.has(n)),
+            ),
+          );
+        }
         const packed: IrExpr = {
           kind: "recordLit",
           fields: remaining.map((f) => ({
