@@ -6,6 +6,7 @@ import { emitLlvmModule, LlvmUnsupportedError } from "./backend/llvm/emitter.js"
 import { checkerPanicDiag, ffiNativeBuildDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libIntBoundaryDiag, libNpmIneligibleDiag, libSidecarDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, LIB_INBOUND_BYTES_TRAP_CODE, LIB_RUNTIME_TRAP_CODES, nativeBindingDiag, nativeBuildDiag, nativeCrossingDiag, nativeSignatureDiag, nativeTargetDiag, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
 import { checkLibraryIntegerSlots, classSeed, hasIntSlots, numberBoundaryFacts, numberCarrierKind, type FnIntSlots, type IntSlotConfig } from "./ir/number-facts.js";
 import { loadLibraryProfile, profileRemediation, profileTeaching, type LibraryProfile } from "./library/profile.js";
+import type { EarlyLibraryNativeFeatures } from "./library/early-cache.js";
 import { decorateLibraryRefusals, evaluateLibraryFences } from "./library/fence-eval.js";
 import { assembleTrapTeaching } from "./library/trap-teaching.js";
 import {
@@ -2496,33 +2497,22 @@ export async function planLibraryCompilation(
  * external surface plus the module's own native exports. Getting that set
  * wrong is not a cosmetic error: a library that localizes the entry its host
  * calls links cleanly and then cannot be called at all. */
-function libraryNativeBuildPlan(
-  prepared: PreparedLibraryCompilation,
-  sanitize: boolean,
-  nativeRuntimeRequires: readonly ScrNativeRuntimeService[] = [],
-): LibraryNativeBuildPlan {
-  const { module: mod, profile } = prepared;
-  const required = new Set(nativeRuntimeRequires);
-  const localizeSymbols = profile.localizeRuntime
-    ? [
-        profile.initSymbol,
-        profile.sinkRegisterSymbol,
-        ...(profile.collectSymbol !== null ? [profile.collectSymbol] : []),
-        ...(profile.resultResetSymbol !== null ? [profile.resultResetSymbol] : []),
-        ...(profile.callbackRegisterSymbol !== null ? [profile.callbackRegisterSymbol] : []),
-        ...(profile.sidecar !== null
-          ? [profile.sidecar.buildIdSymbol, profile.sidecar.abiVersionSymbol]
-          : []),
-        ...profile.exports.map((e) => e.symbol),
-        ...prepared.librarySection.nativeExports.map((entry) => entry.symbol),
-      ]
-    : undefined;
-  return Object.freeze({
-    cacheIdentity: "scriptc-generated-library-v1",
-    sanitize,
-    optimization: profile.optimization,
-    ...(localizeSymbols !== undefined ? { localizeSymbols } : {}),
-    ...(profile.instancePerThread ? { threadInstances: true } : {}),
+/**
+ * Which runtime units a lowered library REACHES.
+ *
+ * Separate from the archive settings below because it answers a different
+ * question about a different input: this is a property of the module alone,
+ * while an archive also depends on the profile and on what the embedder asks
+ * for. Upstream's early cache keys on exactly this set — a library reaching
+ * the regex engine cannot reuse an artifact built without it — so the cache
+ * and the plan share one computation rather than agreeing by review.
+ */
+function libraryNativeFeatures(
+  mod: IrModule,
+  backend: "c" | "llvm",
+): EarlyLibraryNativeFeatures {
+  return {
+    backend,
     regex: moduleUsesRegex(mod),
     assert: moduleUsesAssert(mod),
     inspect: moduleUsesInspect(mod),
@@ -2532,6 +2522,63 @@ function libraryNativeBuildPlan(
     zlib: moduleUsesZlib(mod),
     copying: moduleUsesCopying(mod),
     textDecoderLegacy: moduleUsesLegacyTextDecoder(mod),
+    ...(mod.lib?.identity !== undefined ? { buildId: mod.lib.identity.buildId } : {}),
+  };
+}
+
+/**
+ * The external surface a localized archive keeps global.
+ *
+ * Getting this set wrong is not cosmetic: a library that localizes the entry
+ * its host calls links cleanly and then cannot be called at all.
+ */
+function libraryLocalizeSymbols(
+  profile: LibraryProfile,
+  librarySection: NonNullable<IrModule["lib"]>,
+): string[] | undefined {
+  return profile.localizeRuntime
+    ? [
+        profile.initSymbol,
+        profile.sinkRegisterSymbol,
+        ...(profile.collectSymbol !== null ? [profile.collectSymbol] : []),
+        ...(profile.resultResetSymbol !== null ? [profile.resultResetSymbol] : []),
+        ...(profile.callbackRegisterSymbol !== null ? [profile.callbackRegisterSymbol] : []),
+        ...(profile.sidecar !== null
+          ? [profile.sidecar.buildIdSymbol, profile.sidecar.abiVersionSymbol]
+          : []),
+        ...profile.exports.map((entry) => entry.symbol),
+        /* This fork's addition to the set upstream keeps: a C-callable export
+         * the MODULE declares is as external as one the profile does, and
+         * localizing it would hide the very symbol it exists to publish. */
+        ...librarySection.nativeExports.map((entry) => entry.symbol),
+      ]
+    : undefined;
+}
+
+function libraryNativeBuildPlan(
+  prepared: PreparedLibraryCompilation,
+  sanitize: boolean,
+  nativeRuntimeRequires: readonly ScrNativeRuntimeService[] = [],
+): LibraryNativeBuildPlan {
+  const { module: mod, profile } = prepared;
+  const required = new Set(nativeRuntimeRequires);
+  const localizeSymbols = libraryLocalizeSymbols(profile, prepared.librarySection);
+  const features = libraryNativeFeatures(mod, profile.emission);
+  return Object.freeze({
+    cacheIdentity: "scriptc-generated-library-v1",
+    sanitize,
+    optimization: profile.optimization,
+    ...(localizeSymbols !== undefined ? { localizeSymbols } : {}),
+    ...(profile.instancePerThread ? { threadInstances: true } : {}),
+    regex: features.regex,
+    assert: features.assert,
+    inspect: features.inspect,
+    symbol: features.symbol,
+    searchParams: features.searchParams,
+    emitter: features.emitter,
+    zlib: features.zlib,
+    copying: features.copying,
+    textDecoderLegacy: features.textDecoderLegacy,
     nativeHandle: required.has("native-handle") ||
       (mod.nativeTypes ?? []).some((definition) => definition.kind === "handle"),
     retainedCallbacks: required.has("retained-callbacks") ||
