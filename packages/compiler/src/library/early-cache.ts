@@ -10,6 +10,7 @@ import type { IrModule } from "../ir/nodes.js";
 import { IR_VERSION } from "../ir/serialize.js";
 import { frontendInputsSemanticallyMatch, frontendInputsStillMatch, validFrontendInputSnapshot, type FrontendInputExclusions, type FrontendInputSnapshot } from "../frontend/input-tracker.js";
 import { rebaseSourceLocations, semanticallyEqualSource, sourceLineRebaseIsIdentity } from "./semantic-source.js";
+import type { LibraryNativeBuildPlan } from "../library-plan.js";
 
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
@@ -20,7 +21,10 @@ interface CachedLibraryFile {
 }
 
 interface EarlyLibraryCacheStamp {
-  version: 2;
+  /* 3: the native record carries archive settings instead of the feature
+   * flags they were derived from. A v2 stamp cannot describe the archive a
+   * v3 hit must assemble, so old entries must not validate. */
+  version: 3;
   key: string;
   frontend: FrontendInputSnapshot;
   files: {
@@ -30,34 +34,32 @@ interface EarlyLibraryCacheStamp {
     semanticIr: CachedLibraryFile | null;
     sources: CachedLibraryFile | null;
   };
-  native: {
-    backend: "c" | "llvm";
-    regex: boolean;
-    assert: boolean;
-    inspect: boolean;
-    symbol: boolean;
-    searchParams: boolean;
-    emitter: boolean;
-    zlib: boolean;
-    copying: boolean;
-    textDecoderLegacy: boolean;
-  };
+  native: EarlyLibraryNativeRecord;
   integrity: string;
 }
 
-export interface EarlyLibraryNativeFeatures {
+/**
+ * Everything a cache hit needs to assemble the archive the miss path would
+ * have assembled.
+ *
+ * It carries the archive SETTINGS rather than the feature flags they were
+ * derived from, because on a hit they cannot be derived again: the settings
+ * depend on the lowered module — which runtime units it reaches, which
+ * symbols it exports natively, whether the embedder asked for the attached
+ * loop — and a hit deliberately has no module. Recomputing a subset from the
+ * profile alone holds only while every setting is a function of the profile,
+ * and here none of those three is. Carrying them retires the standing
+ * obligation for two computations to agree.
+ */
+export interface EarlyLibraryNativeRecord {
+  /** Chooses the translation unit's extension, so the cache needs it before
+   * it can name the file it is about to restore. */
   backend: "c" | "llvm";
-  regex: boolean;
-  assert: boolean;
-  inspect: boolean;
-  symbol: boolean;
-  searchParams: boolean;
-  emitter: boolean;
-  zlib: boolean;
-  copying: boolean;
-  textDecoderLegacy: boolean;
   /** Volatile exact-source build identity emitted from the tiny identity TU. */
   buildId?: string;
+  /** The path-free archive settings, verbatim from the build that wrote this
+   * entry. */
+  archive: LibraryNativeBuildPlan;
 }
 
 export interface EarlyLibraryCacheOptions {
@@ -73,6 +75,17 @@ export interface EarlyLibraryCacheOptions {
   /** Host Node runtime whose builtin-module inventory participates in
    * frontend classification. */
   nodeVersion: string;
+  /**
+   * Runtime services the EMBEDDER asked for.
+   *
+   * In the key because it is a compile input like any other: the same sources
+   * and the same profile produce a different archive depending on which
+   * services were requested, since each one pulls its runtime units in. A
+   * cache blind to it hands an embedder that asked for the attached loop the
+   * archive built for one that did not, and the omission surfaces as an
+   * undefined symbol at the embedder's own link — far from its cause.
+   */
+  nativeRuntimeRequires: readonly string[];
   implementation: string;
 }
 
@@ -80,7 +93,7 @@ export interface EarlyLibraryCacheHit {
   cPath: string;
   irPath?: string;
   sidecarPath?: string;
-  native: EarlyLibraryNativeFeatures;
+  native: EarlyLibraryNativeRecord;
 }
 
 export interface EarlyLibraryCachePublish extends EarlyLibraryCacheHit {
@@ -98,26 +111,24 @@ export interface SemanticLibraryCacheHit {
   previousSources: Map<string, string>;
   frontend: FrontendInputSnapshot;
   sidecarJson: string | null;
-  native: EarlyLibraryNativeFeatures;
+  native: EarlyLibraryNativeRecord;
   changedSources: string[];
 }
 
-function validNativeFeatures(value: unknown): value is EarlyLibraryNativeFeatures {
+function validNativeRecord(value: unknown): value is EarlyLibraryNativeRecord {
   if (value === null || typeof value !== "object") return false;
-  const native = value as Partial<EarlyLibraryNativeFeatures>;
-  return (native.backend === "c" || native.backend === "llvm") &&
-    [
-      native.regex,
-      native.assert,
-      native.inspect,
-      native.symbol,
-      native.searchParams,
-      native.emitter,
-      native.zlib,
-      native.copying,
-      native.textDecoderLegacy,
-    ].every((flag) => typeof flag === "boolean") &&
-    (native.buildId === undefined || /^[0-9a-f]{16}$/.test(native.buildId));
+  const native = value as Partial<EarlyLibraryNativeRecord>;
+  if (native.backend !== "c" && native.backend !== "llvm") return false;
+  if (native.buildId !== undefined && !/^[0-9a-f]{16}$/.test(native.buildId)) return false;
+  /* The settings are CARRIED, not interpreted, so this checks only that they
+   * are an object stamped with the identity the library lane writes.
+   * Enumerating their fields would recreate the very obligation this record
+   * exists to retire — a second list to keep in step with the first — and a
+   * corrupted payload is already caught by the stamp's integrity digest,
+   * which covers it. */
+  if (native.archive === null || typeof native.archive !== "object") return false;
+  return (native.archive as { cacheIdentity?: unknown }).cacheIdentity ===
+    "scriptc-generated-library-v1";
 }
 
 function digest(bytes: Uint8Array): string {
@@ -126,7 +137,7 @@ function digest(bytes: Uint8Array): string {
 
 function cacheKey(options: EarlyLibraryCacheOptions): string {
   return createHash("sha256")
-    .update("early-library-v2\0")
+    .update("early-library-v3\0")
     .update(compilerReleaseVersion()).update("\0")
     .update(resolve(options.profilePath)).update("\0")
     .update(options.profileBytes).update("\0")
@@ -138,6 +149,9 @@ function cacheKey(options: EarlyLibraryCacheOptions): string {
     .update(options.target).update("\0")
     .update(options.compiler.join("\x1f")).update("\0")
     .update(options.nodeVersion).update("\0")
+    /* Sorted because a requires list is a SET: two embedders naming the same
+     * services in a different order must land on the same entry. */
+    .update([...options.nativeRuntimeRequires].sort().join("\x1f")).update("\0")
     .update(options.implementation)
     .digest("hex");
 }
@@ -176,7 +190,7 @@ function stampPath(root: string, options: EarlyLibraryCacheOptions): string {
 
 function stampIntegrity(stamp: Omit<EarlyLibraryCacheStamp, "integrity">): string {
   return createHash("sha256")
-    .update("early-library-stamp-v2\0")
+    .update("early-library-stamp-v3\0")
     .update(JSON.stringify(stamp))
     .digest("hex");
 }
@@ -264,10 +278,10 @@ export async function readEarlyLibraryCache(
     const stamp = JSON.parse(await readFile(path, "utf8")) as EarlyLibraryCacheStamp;
     const { integrity, ...unsigned } = stamp;
     if (
-      stamp.version !== 2 ||
+      stamp.version !== 3 ||
       stamp.key !== cacheKey(options) ||
       !validFrontendInputSnapshot(stamp.frontend) ||
-      !validNativeFeatures(stamp.native) ||
+      !validNativeRecord(stamp.native) ||
       stamp.files?.translationUnit?.name !== "program.tu" ||
       !/^[0-9a-f]{64}$/.test(stamp.files.translationUnit.digest) ||
       (stamp.files.ir !== null && (
@@ -366,8 +380,8 @@ export async function readSemanticLibraryCache(
     const stamp = JSON.parse(await readFile(path, "utf8")) as EarlyLibraryCacheStamp;
     const { integrity, ...unsigned } = stamp;
     if (
-      stamp.version !== 2 || stamp.key !== cacheKey(options) ||
-      !validFrontendInputSnapshot(stamp.frontend) || !validNativeFeatures(stamp.native) ||
+      stamp.version !== 3 || stamp.key !== cacheKey(options) ||
+      !validFrontendInputSnapshot(stamp.frontend) || !validNativeRecord(stamp.native) ||
       stamp.files?.translationUnit?.name !== "program.tu" ||
       stamp.files?.semanticIr?.name !== "semantic.ir.json.gz" ||
       stamp.files?.sources?.name !== "sources.json.gz" ||
@@ -491,7 +505,7 @@ export async function publishEarlyLibraryCache(
       frontendOutputExclusions(options, result.native.backend, result.sidecarPath),
     )) return;
     const unsigned: Omit<EarlyLibraryCacheStamp, "integrity"> = {
-      version: 2,
+      version: 3,
       key: cacheKey(options),
       frontend: result.frontend,
       files: { translationUnit, ir, sidecar, semanticIr, sources },

@@ -1,12 +1,28 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
-import { CcCompileError, compileC, compileLibArchive, mobileLibraryTarget, mobileTargetRefusal, resolveCc, targetPlatform, type CcOptions } from "./backend/cc.js";
+import { CcCompileError, buildCacheRoot, compileC, compileLibArchive, mobileLibraryTarget, mobileTargetRefusal, prepareBuildCacheRoot, pruneBuildCache, resolveCc, targetPlatform, type CcOptions } from "./backend/cc.js";
 import { emitModule } from "./backend/emission/emitter.js";
 import { emitLlvmModule, LlvmUnsupportedError } from "./backend/llvm/emitter.js";
 import { checkerPanicDiag, ffiNativeBuildDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libIntBoundaryDiag, libNpmIneligibleDiag, libSidecarDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, LIB_INBOUND_BYTES_TRAP_CODE, LIB_RUNTIME_TRAP_CODES, nativeBindingDiag, nativeBuildDiag, nativeCrossingDiag, nativeSignatureDiag, nativeTargetDiag, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
 import { checkLibraryIntegerSlots, classSeed, hasIntSlots, numberBoundaryFacts, numberCarrierKind, type FnIntSlots, type IntSlotConfig } from "./ir/number-facts.js";
 import { loadLibraryProfile, profileRemediation, profileTeaching, type LibraryProfile } from "./library/profile.js";
-import type { EarlyLibraryNativeFeatures } from "./library/early-cache.js";
+import {
+  libraryFrontendImplementationFingerprint,
+  publishEarlyLibraryCache,
+  readEarlyLibraryCache,
+  readSemanticLibraryCache,
+  type EarlyLibraryCacheOptions,
+  type EarlyLibraryNativeRecord,
+  type SemanticLibraryCacheHit,
+} from "./library/early-cache.js";
+import { FrontendInputTracker } from "./frontend/input-tracker.js";
+import {
+  rebaseLibrarySourceComments,
+  replaceLibraryIdentity,
+  stripLibraryIdentity,
+  stripLibrarySourceComments,
+} from "./backend/library-identity.js";
+import { createSourceLineRebaser } from "./library/semantic-source.js";
 import { decorateLibraryRefusals, evaluateLibraryFences } from "./library/fence-eval.js";
 import { assembleTrapTeaching } from "./library/trap-teaching.js";
 import {
@@ -15,6 +31,7 @@ import {
   canonicalPath,
   compilerReleaseVersion,
   libraryIdentityHashes,
+  updateSidecarIdentity,
   type SidecarIntegerSlotFacts,
   type SidecarIrRecordPattern,
   type SidecarIrTypePattern,
@@ -2104,10 +2121,27 @@ interface PreparedLibraryCompilation {
   readonly buildPlatform: string;
 }
 
-async function prepareLibraryCompilation(
+/**
+ * What a library's profile and the host admit, decided before any source is
+ * read.
+ *
+ * Split out because the library cache needs exactly this much and no more.
+ * Every refusal below is a property of the profile, the target triple, or the
+ * host toolchain, and none of them can change because a source file did —
+ * which is what makes it sound to decide admission once and only then ask the
+ * cache whether the frontend has to run at all. Folding these checks into
+ * lowering would make a cache hit pay for the very work it exists to skip.
+ */
+interface AdmittedLibrary {
+  readonly profile: LibraryProfile;
+  readonly entryPath: string;
+  readonly buildPlatform: string;
+}
+
+async function admitLibraryCompilation(
   opts: LibraryFrontendOptions,
   timing: (phase: string, detail?: Record<string, unknown>) => void,
-): Promise<PreparedLibraryFailure | ({ ok: true } & PreparedLibraryCompilation)> {
+): Promise<PreparedLibraryFailure | ({ ok: true } & AdmittedLibrary)> {
   const loadedProfile = loadLibraryProfile(resolve(opts.profilePath));
   timing("profile-load");
   if (!loadedProfile.ok) {
@@ -2192,6 +2226,15 @@ async function prepareLibraryCompilation(
     }
   }
 
+  return { ok: true, profile, entryPath, buildPlatform };
+}
+
+async function prepareAdmittedLibrary(
+  admitted: AdmittedLibrary,
+  opts: LibraryFrontendOptions,
+  timing: (phase: string, detail?: Record<string, unknown>) => void,
+): Promise<PreparedLibraryFailure | ({ ok: true } & PreparedLibraryCompilation)> {
+  const { profile, entryPath, buildPlatform } = admitted;
   // Bare npm specifiers in a library graph take the STATIC-OR-REFUSE
   // posture: "lib" runs the same auto-detection and eligibility bar as
   // the executable lane's --npm-static (own .d.ts, unminified shipped JS,
@@ -2442,6 +2485,15 @@ async function prepareLibraryCompilation(
   };
 }
 
+async function prepareLibraryCompilation(
+  opts: LibraryFrontendOptions,
+  timing: (phase: string, detail?: Record<string, unknown>) => void,
+): Promise<PreparedLibraryFailure | ({ ok: true } & PreparedLibraryCompilation)> {
+  const admitted = await admitLibraryCompilation(opts, timing);
+  if (!admitted.ok) return admitted;
+  return prepareAdmittedLibrary(admitted, opts, timing);
+}
+
 export interface PlanLibraryCompilationOptions extends LibraryFrontendOptions {
   sanitize?: boolean;
   /** Runtime services the embedder requires; see `CompileLibraryOptions`. */
@@ -2487,45 +2539,6 @@ export async function planLibraryCompilation(
   });
 }
 
-/** Every archive setting a prepared library implies, with no path in it.
- *
- * The builder and the planner both take it from here, so a plan cannot
- * describe an archive the builder would assemble differently — the same
- * reason preparation itself is shared.
- *
- * Which symbols stay global under localization is the profile's declared
- * external surface plus the module's own native exports. Getting that set
- * wrong is not a cosmetic error: a library that localizes the entry its host
- * calls links cleanly and then cannot be called at all. */
-/**
- * Which runtime units a lowered library REACHES.
- *
- * Separate from the archive settings below because it answers a different
- * question about a different input: this is a property of the module alone,
- * while an archive also depends on the profile and on what the embedder asks
- * for. Upstream's early cache keys on exactly this set — a library reaching
- * the regex engine cannot reuse an artifact built without it — so the cache
- * and the plan share one computation rather than agreeing by review.
- */
-function libraryNativeFeatures(
-  mod: IrModule,
-  backend: "c" | "llvm",
-): EarlyLibraryNativeFeatures {
-  return {
-    backend,
-    regex: moduleUsesRegex(mod),
-    assert: moduleUsesAssert(mod),
-    inspect: moduleUsesInspect(mod),
-    symbol: moduleUsesSymbol(mod),
-    searchParams: moduleUsesSearchParams(mod),
-    emitter: moduleUsesEmitter(mod),
-    zlib: moduleUsesZlib(mod),
-    copying: moduleUsesCopying(mod),
-    textDecoderLegacy: moduleUsesLegacyTextDecoder(mod),
-    ...(mod.lib?.identity !== undefined ? { buildId: mod.lib.identity.buildId } : {}),
-  };
-}
-
 /**
  * The external surface a localized archive keeps global.
  *
@@ -2555,6 +2568,19 @@ function libraryLocalizeSymbols(
     : undefined;
 }
 
+/** Every archive setting a prepared library implies, with no path in it.
+ *
+ * The builder, the planner, and the cache all take it from here, so none of
+ * them can describe an archive another would assemble differently — the same
+ * reason preparation itself is shared. That third consumer is why the reached
+ * runtime units are computed inline rather than through a separate feature
+ * bundle: a cache entry carries these settings verbatim, so there is no
+ * second computation left for one to agree with.
+ *
+ * Which symbols stay global under localization is the profile's declared
+ * external surface plus the module's own native exports. Getting that set
+ * wrong is not a cosmetic error: a library that localizes the entry its host
+ * calls links cleanly and then cannot be called at all. */
 function libraryNativeBuildPlan(
   prepared: PreparedLibraryCompilation,
   sanitize: boolean,
@@ -2563,22 +2589,21 @@ function libraryNativeBuildPlan(
   const { module: mod, profile } = prepared;
   const required = new Set(nativeRuntimeRequires);
   const localizeSymbols = libraryLocalizeSymbols(profile, prepared.librarySection);
-  const features = libraryNativeFeatures(mod, profile.emission);
   return Object.freeze({
     cacheIdentity: "scriptc-generated-library-v1",
     sanitize,
     optimization: profile.optimization,
     ...(localizeSymbols !== undefined ? { localizeSymbols } : {}),
     ...(profile.instancePerThread ? { threadInstances: true } : {}),
-    regex: features.regex,
-    assert: features.assert,
-    inspect: features.inspect,
-    symbol: features.symbol,
-    searchParams: features.searchParams,
-    emitter: features.emitter,
-    zlib: features.zlib,
-    copying: features.copying,
-    textDecoderLegacy: features.textDecoderLegacy,
+    regex: moduleUsesRegex(mod),
+    assert: moduleUsesAssert(mod),
+    inspect: moduleUsesInspect(mod),
+    symbol: moduleUsesSymbol(mod),
+    searchParams: moduleUsesSearchParams(mod),
+    emitter: moduleUsesEmitter(mod),
+    zlib: moduleUsesZlib(mod),
+    copying: moduleUsesCopying(mod),
+    textDecoderLegacy: moduleUsesLegacyTextDecoder(mod),
     nativeHandle: required.has("native-handle") ||
       (mod.nativeTypes ?? []).some((definition) => definition.kind === "handle"),
     retainedCallbacks: required.has("retained-callbacks") ||
@@ -2589,7 +2614,182 @@ function libraryNativeBuildPlan(
   });
 }
 
+/**
+ * Assembles the archive from settings that were already decided, splitting
+ * the volatile build identity into its own translation unit.
+ *
+ * The split is what makes caching worth having. An exact-source identity
+ * changes on every edit, and while it is inline the whole unit's object
+ * changes with it — so the object cache would miss on every build for a value
+ * that fits in two functions. Emitting it separately leaves the large unit
+ * byte-identical across edits that did not change the code.
+ *
+ * Both a cache hit and a cold build come through here, which is the point: a
+ * hit that assembled its archive by a second route would be free to assemble
+ * it differently, and the difference would surface as a link error in the
+ * embedder rather than as a failure here.
+ */
+async function buildLibraryArchive(
+  profile: LibraryProfile,
+  record: EarlyLibraryNativeRecord,
+  cPath: string,
+  archivePath: string,
+): Promise<void> {
+  let programSource: string | undefined;
+  let identityCSource: string | undefined;
+  if (profile.sidecar !== null || record.backend === "c") {
+    programSource = await readFile(cPath, "utf8");
+  }
+  if (profile.sidecar !== null) {
+    if (record.buildId === undefined) throw new Error("library identity TU has no build id");
+    const withoutIdentity = stripLibraryIdentity(programSource!, record.backend);
+    if (withoutIdentity === programSource) {
+      throw new Error("generated public library TU has no identity region");
+    }
+    programSource = withoutIdentity;
+    identityCSource = [
+      "#include <stdint.h>",
+      "#include <inttypes.h>",
+      `uint64_t ${profile.sidecar.buildIdSymbol}(void) { return UINT64_C(0x${record.buildId}); }`,
+      `uint32_t ${profile.sidecar.abiVersionSymbol}(void) { return ${profile.sidecar.abiVersion}u; }`,
+      "",
+    ].join("\n");
+  }
+  /* The C unit echoes its TypeScript source as comments for whoever reads the
+   * generated file. They carry no code, so the compiler never sees them — and
+   * stripping them means a comment-only edit leaves the compiled input
+   * unchanged, which is the whole basis of the semantic tier below. */
+  if (record.backend === "c") {
+    programSource = stripLibrarySourceComments(programSource!, profile.entry);
+  }
+  await compileLibArchive({
+    ...record.archive,
+    ...(programSource !== undefined ? { programSource } : {}),
+    ...(identityCSource !== undefined ? { identityCSource } : {}),
+    cPath,
+    outPath: archivePath,
+  });
+}
+
+/**
+ * Restores a build whose sources changed only in ways the language cannot
+ * observe — comments and layout.
+ *
+ * The lowered module is reused verbatim, so nothing is re-lowered; what has
+ * to be redone is everything that quotes a source POSITION. The build
+ * identity is recomputed from the current text (it hashes the real bytes,
+ * comments included, and must keep doing so), and the echoed source comments
+ * are rebased onto the new line numbering, so the generated file still reads
+ * against the file on disk.
+ *
+ * The module is re-validated rather than trusted: it is arriving from a file
+ * on disk, and everything downstream is entitled to assume validation ran.
+ */
+async function emitSemanticLibraryHit(
+  hit: SemanticLibraryCacheHit,
+  profile: LibraryProfile,
+  opts: CompileLibraryOptions,
+  archivePath: string,
+  cacheRoot: string | null,
+  cacheOptions: EarlyLibraryCacheOptions,
+  timing: (phase: string, detail?: Record<string, unknown>) => void,
+): Promise<CompileLibraryResult> {
+  const mod = hit.mod;
+  const record = hit.native;
+  let sidecarJson = hit.sidecarJson;
+  if (profile.sidecar !== null) {
+    if (mod.lib?.identity === undefined || sidecarJson === null) {
+      throw new Error("semantic library cache lost sidecar identity metadata");
+    }
+    const modules = canonicalModuleGraph(dirname(resolve(opts.profilePath)), hit.sourceTexts);
+    const { buildId, sourceHash } = libraryIdentityHashes(
+      compilerReleaseVersion(),
+      profile.profileBytes,
+      modules,
+    );
+    mod.lib.identity.buildId = buildId;
+    record.buildId = buildId;
+    sidecarJson = updateSidecarIdentity(sidecarJson, buildId, sourceHash);
+  }
+  const validation = validateModule(mod);
+  if (validation.length > 0) {
+    return {
+      ok: false,
+      diagnostics: validation.map((violation) => iceDiag(violation.message, violation.loc)),
+      sourceTexts: hit.sourceTexts,
+    };
+  }
+  await mkdir(opts.outDir, { recursive: true });
+  const stem = basename(profile.entry).replace(/\.(ts|js|mjs|cjs)$/, "");
+  const cPath = join(opts.outDir, `${stem}.lib.${record.backend === "llvm" ? "ll" : "c"}`);
+  let translationUnit = hit.translationUnit;
+  if (profile.sidecar !== null) {
+    translationUnit = replaceLibraryIdentity(translationUnit, record.backend, mod.lib!.identity!);
+  }
+  if (record.backend === "c") {
+    const previous = hit.previousSources.get(mod.sourceFile);
+    const current = hit.sourceTexts.get(mod.sourceFile);
+    if (previous === undefined || current === undefined) {
+      throw new Error("semantic library cache lost the entry source text");
+    }
+    translationUnit = rebaseLibrarySourceComments(
+      translationUnit,
+      mod.sourceFile,
+      createSourceLineRebaser(mod.sourceFile, previous, current),
+    );
+  }
+  await writeFile(cPath, translationUnit);
+  timing("semantic-tu-restore", { output_bytes: Buffer.byteLength(translationUnit) });
+  await rm(join(opts.outDir, `${stem}.lib.${record.backend === "llvm" ? "c" : "ll"}`), { force: true });
+  let irPath: string | undefined;
+  if (opts.emitIr) {
+    irPath = join(opts.outDir, `${stem}.lib.ir.json`);
+    await writeFile(irPath, serializeModule(mod));
+  }
+  await buildLibraryArchive(profile, record, cPath, archivePath);
+  timing("native-archive");
+  let sidecarPath: string | undefined;
+  if (sidecarJson !== null) {
+    sidecarPath = profile.sidecar!.path !== null
+      ? resolve(dirname(archivePath), profile.sidecar!.path)
+      : `${archivePath}.contract.json`;
+    await writeFile(sidecarPath, sidecarJson);
+  }
+  await publishEarlyLibraryCache(cacheRoot, cacheOptions, {
+    cPath,
+    native: record,
+    frontend: hit.frontend,
+    semantic: { mod, sources: hit.sourceTexts },
+    ...(irPath !== undefined ? { irPath } : {}),
+    ...(sidecarPath !== undefined ? { sidecarPath } : {}),
+  }).catch(() => undefined);
+  await pruneBuildCache(cacheRoot);
+  timing("semantic-cache-publish");
+  timing("complete");
+  return {
+    ok: true,
+    archivePath,
+    cPath,
+    backend: record.backend,
+    ...(irPath !== undefined ? { irPath } : {}),
+    ...(sidecarPath !== undefined ? { sidecarPath } : {}),
+  };
+}
+
 export async function compileLibrary(opts: CompileLibraryOptions): Promise<CompileLibraryResult> {
+  /* The tracker records reads through an async-context binding, so it has to
+   * wrap the whole compilation rather than the frontend call alone: module
+   * resolution, npm classification and builtin loading each read files, and a
+   * cache blind to any of them would restore an artifact built from inputs
+   * that have since changed. */
+  const frontendInputs = new FrontendInputTracker();
+  return frontendInputs.run(() => compileLibraryTracked(opts, frontendInputs));
+}
+
+async function compileLibraryTracked(
+  opts: CompileLibraryOptions,
+  frontendInputs: FrontendInputTracker,
+): Promise<CompileLibraryResult> {
   const timingOn = process.env["SCRIPTC_TIMING"] === "1";
   const timingStart = performance.now();
   let timingLast = timingStart;
@@ -2607,18 +2807,79 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
     );
     timingLast = now;
   };
-  const prepared = await prepareLibraryCompilation(opts, timing);
-  if (!prepared.ok) return prepared;
-  const { module: mod, entryText, profile, sidecarJson, entryPath } = prepared;
-  const fail = (diagnostics: ScrDiagnostic[]): CompileLibraryResult => ({
-    ok: false,
-    diagnostics: decorateLibraryRefusals(diagnostics, profile),
-    sourceTexts: prepared.sourceTexts,
-  });
 
+  const admitted = await admitLibraryCompilation(opts, timing);
+  if (!admitted.ok) return admitted;
+  const { profile, entryPath } = admitted;
 
   await mkdir(opts.outDir, { recursive: true });
   const stem = basename(entryPath).replace(/\.(ts|js|mjs|cjs)$/, "");
+  const archivePath = opts.outPath ?? join(opts.outDir, `${stem}.lib.a`);
+
+  /* A provenance-pinned build reads its sources from a registry rather than
+   * the filesystem, so the input snapshot a cache entry is keyed on cannot be
+   * taken at all. It declines the cache rather than keying one on facts it
+   * has no way to re-check later. */
+  const cacheRoot = provenanceSources() === null
+    ? await prepareBuildCacheRoot(buildCacheRoot())
+    : null;
+  const cacheOptions: EarlyLibraryCacheOptions = {
+    profilePath: opts.profilePath,
+    profileBytes: profile.profileBytes,
+    entryPath,
+    outDir: opts.outDir,
+    ...(opts.outPath !== undefined ? { outPath: opts.outPath } : {}),
+    emitIr: opts.emitIr ?? false,
+    sanitize: opts.sanitize ?? false,
+    target: `${process.env["SCRIPTC_TARGET"] ?? "native"}:${admitted.buildPlatform}:${process.arch}`,
+    compiler: [process.env["SCRIPTC_CC"] ?? "clang"],
+    nodeVersion: process.version,
+    nativeRuntimeRequires: opts.nativeRuntimeRequires ?? [],
+    implementation: await libraryFrontendImplementationFingerprint(),
+  };
+  const sidecarConfigured = profile.sidecar === null ? undefined : profile.sidecar.path;
+
+  const earlyHit = await readEarlyLibraryCache(cacheRoot, cacheOptions, sidecarConfigured);
+  if (earlyHit !== null) {
+    timing("early-cache-hit");
+    await buildLibraryArchive(profile, earlyHit.native, earlyHit.cPath, archivePath);
+    timing("native-archive");
+    timing("complete");
+    return {
+      ok: true,
+      archivePath,
+      cPath: earlyHit.cPath,
+      backend: earlyHit.native.backend,
+      ...(earlyHit.irPath !== undefined ? { irPath: earlyHit.irPath } : {}),
+      ...(earlyHit.sidecarPath !== undefined ? { sidecarPath: earlyHit.sidecarPath } : {}),
+    };
+  }
+  timing("early-cache-miss");
+
+  const semanticHit = await readSemanticLibraryCache(cacheRoot, cacheOptions, sidecarConfigured);
+  if (semanticHit !== null) {
+    timing("semantic-cache-hit", { changed_sources: semanticHit.changedSources.length });
+    return emitSemanticLibraryHit(
+      semanticHit,
+      profile,
+      opts,
+      archivePath,
+      cacheRoot,
+      cacheOptions,
+      timing,
+    );
+  }
+  timing("semantic-cache-miss");
+
+  const prepared = await prepareAdmittedLibrary(admitted, opts, timing);
+  if (!prepared.ok) return prepared;
+  const { module: mod, entryText, sidecarJson, sourceTexts } = prepared;
+  const fail = (diagnostics: ScrDiagnostic[]): CompileLibraryResult => ({
+    ok: false,
+    diagnostics: decorateLibraryRefusals(diagnostics, profile),
+    sourceTexts,
+  });
+
   let cPath: string;
   if (profile.emission === "llvm") {
     try {
@@ -2644,16 +2905,18 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
     await writeFile(irPath, serializeModule(mod));
   }
 
-  const archivePath = opts.outPath ?? join(opts.outDir, `${stem}.lib.a`);
-  await compileLibArchive({
-    ...libraryNativeBuildPlan(
+  const record: EarlyLibraryNativeRecord = {
+    backend: profile.emission,
+    ...(prepared.librarySection.identity !== undefined
+      ? { buildId: prepared.librarySection.identity.buildId }
+      : {}),
+    archive: libraryNativeBuildPlan(
       prepared,
       opts.sanitize ?? false,
       opts.nativeRuntimeRequires ?? [],
     ),
-    cPath,
-    outPath: archivePath,
-  });
+  };
+  await buildLibraryArchive(profile, record, cPath, archivePath);
   timing("native-archive");
 
   // The sidecar lands beside the compiled object, written by the same
@@ -2667,6 +2930,19 @@ export async function compileLibrary(opts: CompileLibraryOptions): Promise<Compi
         : `${archivePath}.contract.json`;
     await writeFile(sidecarPath, sidecarJson);
   }
+
+  /* Publishing must never fail a build that already succeeded: the cache is
+   * an accelerator, and a full disk is not a compile error. */
+  await publishEarlyLibraryCache(cacheRoot, cacheOptions, {
+    cPath,
+    native: record,
+    frontend: frontendInputs.snapshot(),
+    semantic: { mod, sources: sourceTexts },
+    ...(irPath !== undefined ? { irPath } : {}),
+    ...(sidecarPath !== undefined ? { sidecarPath } : {}),
+  }).catch(() => undefined);
+  await pruneBuildCache(cacheRoot);
+  timing("early-cache-publish");
   timing("complete");
   return {
     ok: true,
