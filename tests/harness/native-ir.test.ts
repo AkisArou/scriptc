@@ -1038,6 +1038,44 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: U64, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
+      /* A span RESULT with a wider element. The physical slot is still a
+       * pointer to bytes — the element size is the managed side's business —
+       * and the length slot counts ELEMENTS, which is the whole difference
+       * this binding exists to prove. */
+      id: "scriptc.fixture.c-v1@0.0.0#i32_span_make",
+      declaration: { module: nativePackage, name: "i32SpanMake" },
+      entry: { symbol: "nts_i32_span_make" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      arguments: [{ name: "count", type: I32 }],
+      parameters: [
+        {
+          name: "count",
+          type: I32,
+          passMode: "value",
+          ownership: { kind: "value" },
+          projection: { kind: "argument", argument: 0 },
+        },
+        {
+          name: "out_length",
+          type: { kind: "nativeBytesLengthOut", addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "value" },
+          projection: { kind: "bytesLengthOut" },
+        },
+      ],
+      result: {
+        type: { kind: "nativePointer", pointee: "u8", const: false, addressSpace: 0 },
+        passMode: "pointer",
+        ownership: { kind: "value" },
+        projection: {
+          kind: "bytes",
+          elem: "i32",
+          release: { kind: "symbol", symbol: "nts_cstring_free" },
+        },
+      },
+    },
+    {
       /* A callee that answers NULL where the contract says a span. Its
        * result contract is identical to the one below; only the C behaves
        * badly, which is the point. */

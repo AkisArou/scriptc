@@ -30,6 +30,14 @@
  * other TypedArray flavors stay frontend-fenced. */
 export type IrBytesElem = "u8" | "u32" | "i32" | "f32";
 
+/** The span element kinds that cross the native boundary.
+ *
+ * Every `IrBytesElem`, because each has a runtime representation and a typed
+ * array to carry it. Named separately so the boundary's set is stated rather
+ * than implied — if the runtime ever grows an element the boundary cannot
+ * marshal, this is where the two diverge. */
+export type IrNativeSpanElem = IrBytesElem;
+
 export interface IrBytesType {
   kind: "bytes";
   elem: IrBytesElem;
@@ -357,6 +365,11 @@ export type IrNativeArgumentType =
    * consulting the handle table; a present handle is validated exactly as a
    * required one is. */
   | { kind: "nullableNativeHandle"; typeId: string }
+  /* A borrowed typed array, u8 only for now — the length projection beside it
+   * is named for bytes and emits elements, which coincide only here, so the
+   * units are stated in the manifest before a wider element arrives. A
+   * RESULT span has no such ambiguity: its length slot is the compiler's and
+   * counts elements by construction. */
   | (IrBytesType & { elem: "u8" })
   /** A managed array of plain strings, which is what a C API taking a
    * NUL-terminated `char **` receives. The element is not nullable: a
@@ -475,7 +488,7 @@ export type IrNativeResultProjection =
    * carried it in-band. Everything else is the answered question — copy into
    * managed storage, then dispose through a named symbol or nothing, with the
    * ownership beside it pinned to match. */
-  | { kind: "bytes"; elem: "u8"; release: IrNativeRelease }
+  | { kind: "bytes"; elem: IrNativeSpanElem; release: IrNativeRelease }
   /** An owned handle the callee may report as absent, projected as a union of
    * the handle and null. Absence is a value, not a failure. */
   | { kind: "nullableHandle" }

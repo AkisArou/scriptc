@@ -1528,6 +1528,10 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     validNativeScalar(type) ||
     (type.kind === "nativeStruct" && nativeTypesById.get(type.typeId)?.kind === "struct") ||
     (type.kind === "nativeHandle" && nativeTypesById.get(type.typeId)?.kind === "handle");
+  /* The span element kinds the boundary marshals. Every kind the runtime has
+   * a typed array for — a `Float64Array` is absent from this set because it
+   * is absent from the language, not because the boundary refuses it. */
+  const nativeSpanElems = new Set(["u8", "u32", "i32", "f32"]);
   const validNativePointer = (
     type: IrNativePointerType,
   ): boolean =>
@@ -1988,6 +1992,12 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         argument.type.kind !== "string" &&
         argument.type.kind !== "nullableString" &&
         argument.type.kind !== "nullableNativeHandle" &&
+        /* Still u8 only, and not for want of a runtime: the length projection
+         * beside a span ARGUMENT is named `bytesByteLength` and has always
+         * emitted an element count, which are the same number only for u8.
+         * Widening the element here would make the name a lie in the one
+         * place a reader would trust it, so the units get spelled in the
+         * manifest before a wider element arrives. */
         !(argument.type.kind === "bytes" && argument.type.elem === "u8") &&
         /* An array of plain strings, which is what a NUL-terminated `char **`
          * receives. One element type, because a terminated vector cannot
@@ -2319,6 +2329,10 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           break;
         case "bytesData":
           projectionCounts.bytesData++;
+          /* The slot is a pointer to BYTES whatever the element kind is: the
+           * data crosses as an address and the element size is the managed
+           * side's business, which is why a wider element needs no wider
+           * pointee. */
           if (
             sourceArgument.type.kind !== "bytes" ||
             sourceArgument.type.elem !== "u8" ||
@@ -2838,7 +2852,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         !validNativePointer(binding.result.type) ||
         binding.result.type.pointee === "ptr" ||
         binding.result.passMode !== "pointer" ||
-        resultProjection.elem !== "u8" ||
+        typeof resultProjection.elem !== "string" ||
+        !nativeSpanElems.has(resultProjection.elem) ||
         lengthSlots !== 1 ||
         !releaseValid ||
         /* Consumed by the projection like every other copied span: the bytes
@@ -5035,9 +5050,14 @@ function validateFunction(
           }
         } else if (
           resultProjection?.kind === "bytes" &&
-          !(e.type.kind === "bytes" && e.type.elem === "u8")
+          !(e.type.kind === "bytes" && e.type.elem === resultProjection.elem)
         ) {
-          err(`Native IR call ${e.binding} must project to Uint8Array`, e.loc);
+          err(
+            `Native IR call ${e.binding} must project to the ${
+              String(resultProjection.elem)
+            } typed array its result names`,
+            e.loc,
+          );
         } else if (
           resultProjection?.kind !== "utf8CString" &&
           resultProjection?.kind !== "utf8CStringArray" &&

@@ -5366,6 +5366,10 @@ ScrBytes *scr_bytes_new(ScrBytesElem elem, double n); /* +1 */
 /* Native callback boundary: exact owned u8 copy. NULL with len == 0 is an
  * empty span. */
 ScrBytes *scr_bytes_from_data(const uint8_t *data, size_t len); /* +1 */
+/* The same for any element kind, where `len` counts ELEMENTS rather than
+ * bytes. The two coincide only for u8, which is what lets the helper above
+ * take a byte count and this one not. */
+ScrBytes *scr_bytes_from_elements(ScrBytesElem elem, const void *data, size_t len); /* +1 */
 
 /* `new Uint8Array(src)` / Buffer.from(u8): a same-elem-kind copy (the
  * compiler fences cross-kind construction). Borrows src. Never throws. */

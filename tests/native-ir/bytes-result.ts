@@ -9,7 +9,7 @@
  * copy that read the right bytes in the wrong place is a different wrong
  * answer from one that read the wrong bytes.
  */
-import { bytesAbsent, bytesReverse, type i32 } from "@scriptc/native-abi-fixture";
+import { bytesAbsent, bytesReverse, i32SpanMake, type i32 } from "@scriptc/native-abi-fixture";
 import { exit } from "scriptc-native-test";
 
 function check(): number {
@@ -70,6 +70,19 @@ function check(): number {
   /* And the program keeps running afterwards, which is what makes it an
    * error rather than an abort. */
   ok(bytesReverse(new Uint8Array([4, 5])).length === 2);
+
+  /* A WIDER element, which is what separates a length counting elements from
+   * one counting bytes: four int32 values are four elements and sixteen
+   * bytes, and a lowering that conflated them would build a span four times
+   * the right length or a quarter of it. */
+  const wide = i32SpanMake(4 as i32);
+  ok(wide.length === 4);
+  /* Four elements, sixteen bytes: a lowering that passed the byte count would
+   * build a span four times too long, and one that read the memory as u8
+   * would answer values a byte cannot hold. */
+  ok(wide[0] === -2000000);
+  ok(wide[3] === -1700000);
+  ok(i32SpanMake(0 as i32).length === 0);
 
   return failures;
 }

@@ -7976,9 +7976,15 @@ class LlEmitter {
           }
           const length = B.tmp();
           B.line(`${length} = load i64, ptr ${bytesLengthSlot}`);
-          this.declare("declare ptr @scr_bytes_from_data(ptr, i64)");
+          /* The length slot counts ELEMENTS, so the element kind travels with
+           * it — the two coincide only for u8. */
+          this.declare("declare ptr @scr_bytes_from_elements(i32, ptr, i64)");
+          const elemTag = BYTES_ELEM_NUM[resultForm.elem];
           const managed = B.tmp();
-          B.line(`${managed} = call ptr @scr_bytes_from_data(ptr ${raw}, i64 ${length})`);
+          B.line(
+            `${managed} = call ptr @scr_bytes_from_elements(i32 ${elemTag}, ` +
+              `ptr ${raw}, i64 ${length})`,
+          );
           if (resultForm.release !== null) {
             this.declare(`declare void @${resultForm.release}(ptr)`);
             const present = B.newLabel("native.bytes.free");

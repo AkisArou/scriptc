@@ -72,6 +72,26 @@ ScrBytes *scr_bytes_from_data(const uint8_t *data, size_t len) {
   return b;
 }
 
+/* A span of any element kind copied out of foreign storage.
+ *
+ * `len` counts ELEMENTS, not bytes — what a typed-array constructor takes and
+ * what the length slot beside a native span result carries. The two coincide
+ * only for u8, which is why the u8-only helper above could conflate them and
+ * this one cannot.
+ *
+ * NULL is a caller error rather than an absence: a span result's contract
+ * says the span is there, and the lowering checks before reaching here. The
+ * trap is the same one `scr_bytes_from_data` raises, kept so a future caller
+ * that skips the check fails loudly instead of reading unmapped memory. */
+ScrBytes *scr_bytes_from_elements(ScrBytesElem elem, const void *data, size_t len) {
+  if (data == NULL && len != 0) {
+    scr_trap("scriptc: native call produced a NULL span with a nonzero length\n");
+  }
+  ScrBytes *b = scr_bytes_alloc(elem, len);
+  if (len != 0) memcpy(b->data, data, len * scr_bytes_elem_size(elem));
+  return b;
+}
+
 ScrBytes *scr_bytes_copy(const ScrBytes *src) {
   ScrBytes *b = scr_bytes_alloc(src->elem, src->len);
   memcpy(b->data, src->data, src->len * scr_bytes_elem_size(src->elem));

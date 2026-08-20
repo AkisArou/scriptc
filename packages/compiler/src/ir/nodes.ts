@@ -32,6 +32,7 @@ import type {
   IrNativeResultAbiType,
   IrNativeResultProjection,
   IrNativeScalar,
+  IrNativeSpanElem,
   IrNativeScalarType,
   IrNativeStructDef,
   IrNativeStructType,
@@ -1060,6 +1061,7 @@ export type {
   IrNativeResultAbiType,
   IrNativeResultProjection,
   IrNativeScalar,
+  IrNativeSpanElem,
   IrNativeScalarType,
   IrNativeStructDef,
   IrNativeStructType,
@@ -1067,7 +1069,7 @@ export type {
 };
 
 /** Current wire-format version for every producer and consumer of Native IR. */
-export const IR_VERSION = 40 as const;
+export const IR_VERSION = 41 as const;
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */

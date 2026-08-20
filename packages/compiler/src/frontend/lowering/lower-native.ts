@@ -228,7 +228,7 @@ function matchesNativeResultSource(
    * and a program that needs absence needs a nullable-bytes contract with its
    * own motivating program. */
   if (binding.result.projection.kind === "bytes") {
-    return mapped.kind === "bytes" && mapped.elem === "u8";
+    return mapped.kind === "bytes" && mapped.elem === binding.result.projection.elem;
   }
   if (!binding.result.projection.nullable) return mapped.kind === "string";
   if (mapped.kind !== "union") return false;

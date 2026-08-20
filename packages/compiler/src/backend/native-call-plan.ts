@@ -27,6 +27,7 @@ import type {
   IrNativeBinding,
   IrNativeHandleDef,
   IrNativeScalarType,
+  IrNativeSpanElem,
   IrType,
   IrUnionDef,
 } from "../ir/nodes.js";
@@ -79,6 +80,7 @@ export type NativeResultForm =
    * carried here so the projection can read it back. */
   | {
       readonly kind: "bytesResult";
+      readonly elem: IrNativeSpanElem;
       readonly release: string | null;
       readonly lengthParameter: number;
     }
@@ -201,8 +203,8 @@ export function nativeResultForm(
 
   if (projection.kind === "bytes") {
     const release = projection.release.kind === "symbol" ? projection.release.symbol : null;
-    if (!(sourceType.kind === "bytes" && sourceType.elem === "u8")) {
-      fail("byte-span result is not a Uint8Array");
+    if (!(sourceType.kind === "bytes" && sourceType.elem === projection.elem)) {
+      fail("span result does not match the typed array its element names");
     }
     /* The one slot the compiler owns for this call besides the error slot.
      * Its index is what the projection reads back, so it is resolved here
@@ -211,7 +213,7 @@ export function nativeResultForm(
       (parameter) => parameter.projection.kind === "bytesLengthOut",
     );
     if (lengthParameter < 0) fail("byte-span result without a length slot");
-    return { kind: "bytesResult", release, lengthParameter };
+    return { kind: "bytesResult", elem: projection.elem, release, lengthParameter };
   }
 
   if (projection.kind === "utf8CStringArray") {

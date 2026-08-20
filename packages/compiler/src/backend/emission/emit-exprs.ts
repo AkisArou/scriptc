@@ -2722,7 +2722,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
            * storage the release reclaims. The length is read from the slot
            * the compiler passed, not from the pointer. */
           const raw = `sc_t${E.tempCounter++}`;
-          E.line(`const uint8_t *${raw} = ${call};${E.srcComment(e.loc)}`);
+          E.line(`const void *${raw} = ${call};${E.srcComment(e.loc)}`);
           /* The contract says the span is there. A callee that answers NULL
            * has violated it, and this is where that becomes a catchable
            * error rather than either of the two things it would otherwise
@@ -2732,9 +2732,15 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
            * about. */
           E.line(`if (${raw} == NULL) scr_native_throw_null(${operation});`);
           E.emitPendingCheck();
+          /* The length slot counts ELEMENTS, which is what a typed array is
+           * made of and what the producing API answers. For u8 that equals a
+           * byte count and this is the same call the u8-only helper made;
+           * for a wider element it is not, which is why the element kind
+           * travels with it. */
           const managed = E.newTemp(
             e.type,
-            `scr_bytes_from_data(${raw}, ${bytesLengthSlot})`,
+            `scr_bytes_from_elements(${bytesElemKindC(resultForm.elem)}, ` +
+              `${raw}, ${bytesLengthSlot})`,
           );
           if (resultForm.release !== null) {
             E.line(`if (${raw} != NULL) ${resultForm.release}((void *)${raw});`);

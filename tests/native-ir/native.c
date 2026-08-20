@@ -189,6 +189,21 @@ uint8_t *nts_bytes_reverse(const uint8_t *data, size_t length, size_t *out_lengt
   return copy;
 }
 
+/* The same shape with a WIDER element, which is what separates a length that
+ * counts elements from one that counts bytes: four int32 values are four
+ * elements and sixteen bytes, so a lowering that conflated them would build a
+ * span four times too long or too short. Reversing keeps order observable. */
+int32_t *nts_i32_span_make(int32_t count, size_t *out_length) {
+  size_t n = count < 0 ? 0 : (size_t)count;
+  *out_length = n;
+  if (n == 0) return malloc(1);
+  int32_t *values = malloc(n * sizeof *values);
+  /* Values a byte could not hold, so a span that read the memory as u8 would
+   * answer something else entirely rather than merely truncating. */
+  for (size_t i = 0; i < n; i++) values[i] = (int32_t)(i * 100000) - 2000000;
+  return values;
+}
+
 /* A callee that violates its own contract: the binding says the span is
  * there and this answers NULL. The length slot is left untouched, so a
  * lowering that read it before checking the pointer would build a span over
