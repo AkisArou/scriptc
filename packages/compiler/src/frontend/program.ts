@@ -621,12 +621,22 @@ function requireTdzRisk7(
       return undefined;
     });
   };
+  // These are the exact roots the TDZ analysis scans eagerly. Their files
+  // are phase-managed already, so warm their deferred identifiers as one
+  // symbol-only batch instead of paying one IPC query per occurrence.
+  checker.prefetchSymbolRoots(
+    stmts.slice(0, k).filter((stmt) => !ts.isFunctionDeclaration(stmt)),
+  );
   for (let i = 0; i < k && hit === null; i++) {
     const s = stmts[i]!;
     if (ts.isFunctionDeclaration(s)) continue;
     scan(s);
   }
   while (hit === null && work.length > 0) {
+    // A scanned reference can make a hoisted declaration's body reachable
+    // to this analysis. Batch every currently discovered root before
+    // retaining the historical LIFO traversal order.
+    checker.prefetchSymbolRoots(work);
     scan(work.pop()!);
   }
   return hit;
@@ -920,6 +930,7 @@ function selfImportTdzFences7(
   const checkNamed = (bindingName: ts.Identifier): void => {
     const sym = checker.getSymbolAtLocation(bindingName);
     if (sym === undefined || !(sym.flags & ts.SymbolFlags.Alias)) return;
+    checker.prefetchSymbolNodesExact(identifierOccurrences7(sf, bindingName.text));
     const end = tdzEndOf(checker.getAliasedSymbol(sym));
     if (end === null) return;
     const visit = (node: ts.Node): void => {
@@ -947,6 +958,7 @@ function selfImportTdzFences7(
     const nsName = clause.namedBindings.name;
     const nsSym = checker.getSymbolAtLocation(nsName);
     if (nsSym === undefined) return;
+    checker.prefetchSymbolNodesExact(identifierOccurrences7(sf, nsName.text));
     const visit = (node: ts.Node): void => {
       if (
         ts.isPropertyAccessExpression(node) &&
@@ -981,6 +993,7 @@ function nsBindingUsesAreBareStatements7(
   const checker = program.getTypeChecker();
   const bindingSym = checker.getSymbolAtLocation(nsName);
   if (bindingSym === undefined) return false;
+  checker.prefetchSymbolNodesExact(identifierOccurrences7(sf, nsName.text));
   let bareOnly = true;
   const visit = (node: ts.Node): void => {
     if (!bareOnly) return;
@@ -1294,6 +1307,18 @@ function chainRoot7(e: ts.Expression): ts.Expression {
   return root;
 }
 
+/** Identifier occurrences a binding-identity preflight scan will query.
+ * Gathered without checker traffic so managed deferred bodies can be
+ * warmed in one exact symbol batch before the semantic walk. */
+function identifierOccurrences7(root: ts.Node, text: string): ts.Identifier[] {
+  const out: ts.Identifier[] = [];
+  ts.walkPreorder(root, (node) => {
+    if (ts.isIdentifier(node) && node.text === text) out.push(node);
+    return undefined;
+  });
+  return out;
+}
+
 /** The first use of a binding this cycle-closing import introduces that
  * sits OUTSIDE a deferred position (a read there can observe the
  * partially-initialized exporter), or null when every use defers.
@@ -1317,6 +1342,7 @@ function backEdgeUseOffence7(
   for (const bindingName of bindingNames) {
     const sym = checker.getSymbolAtLocation(bindingName);
     if (sym === undefined) continue;
+    checker.prefetchSymbolNodesExact(identifierOccurrences7(sf, bindingName.text));
     let offence: { name: string; node: ts.Node } | null = null;
     const visit = (node: ts.Node): void => {
       if (offence !== null || ts.isImportDeclaration(node)) return;
@@ -1794,13 +1820,14 @@ function preflight7(load: LoadResult): {
     for (const d of errorsOf(load.projectWorld())) diags.push(toPassthrough(d));
   }
 
+  // Preflight and lowering share this CheckerFacade. Claim executable
+  // source files after workspace discovery and the tsc gate but before
+  // structural preflight checker queries, so a miss cannot trigger the old
+  // whole-file sweep (and eagerly fetch every dead body's answers). The
+  // structure wave includes declaration headers and top-level code;
+  // reachable bodies are added by lowering's worklists.
   const ambient = ambientDtsPath();
-  // node_modules JS that no --npm-static opt-in claims is NOT program
-  // source even when maxNodeModuleJsDepth pulled it into the checker's
-  // program (see nodeModulesJsSuppressed above): its execution home is the
-  // island, so preflight's statement walks skip it — no import fences, no
-  // module edges, no statement counts from files the lowering never lowers.
-  const userFiles = program
+  const programFiles = program
     .getSourceFiles()
     .filter(
       (sf) =>
@@ -1808,13 +1835,16 @@ function preflight7(load: LoadResult): {
         !sf.isDeclarationFile &&
         !sf.fileName.endsWith(".json") &&
         (!isNodeModulesPath(sf.fileName) || npmStaticPackageOfPath(sf.fileName) !== null) &&
-        // Workspace-linked shipped JS (see islandJsFile): its execution
-        // home is the island exactly like node_modules JS, so no import
-        // fences, no module edges, no statement counts from it. Its .ts
-        // files (a workspace package imported bare AND reached relatively)
-        // stay program source — only the island-bound JS steps out.
         !islandJsFile(sf.fileName),
     );
+  program.getTypeChecker().prefetchSourceFileStructures(programFiles);
+
+  // node_modules JS that no --npm-static opt-in claims is NOT program
+  // source even when maxNodeModuleJsDepth pulled it into the checker's
+  // program (see nodeModulesJsSuppressed above): its execution home is the
+  // island, so preflight's statement walks skip it — no import fences, no
+  // module edges, no statement counts from files the lowering never lowers.
+  const userFiles = programFiles;
 
   // Node stops at the nearest package.json even when it is malformed, and
   // an explicit CommonJS scope (or .cjs/.cts extension) disables ambiguous-
@@ -2312,7 +2342,11 @@ function preflight7(load: LoadResult): {
           if (dep) deps.push({ dep });
         }
       }
-      for (const call of nestedBareRequiresOf7(sf)) {
+      const nestedBareRequires = nestedBareRequiresOf7(sf);
+      program.getTypeChecker().prefetchSymbolNodesExact(
+        nestedBareRequires.flatMap((call) => ts.isIdentifier(call.expression) ? [call.expression] : []),
+      );
+      for (const call of nestedBareRequires) {
         const spec = requireSpecOf7(call)!;
         const loc = { file: sf.fileName, start: call.getStart(sf), end: call.getEnd() };
         if (isNodeEsmFile7(sf)) {
