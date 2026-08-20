@@ -87,3 +87,52 @@ test("deserializer enforces IR version", () => {
   serialized.irVersion = IR_VERSION + 1;
   expect(() => deserializeModule(JSON.stringify(serialized))).toThrow(/version mismatch/);
 });
+
+test("recordClone survives the IR JSON round trip", () => {
+  const loc = { file: "clone.ts", start: 0, end: 1 };
+  const type = { kind: "record", shapeId: "r0" } as const;
+  const mod = structuredClone(fibModule);
+  mod.records = [{
+    id: "r0",
+    fields: [{ name: "name", type: { kind: "string" } }],
+  }];
+  mod.functions[0]!.locals.push({ id: "source.0", name: "source", type, mutable: false });
+  mod.functions[0]!.body.unshift({
+    kind: "exprStmt",
+    expr: {
+      kind: "recordClone",
+      source: { kind: "varRef", localId: "source.0", type, loc },
+      overrides: [{ name: "name", value: { kind: "strLit", value: "next", type: { kind: "string" }, loc } }],
+      type,
+      loc,
+    },
+    loc,
+  });
+  expect(deserializeModule(serializeModule(mod))).toEqual(mod);
+});
+
+test("validator fences malformed recordClone nodes", () => {
+  const loc = { file: "clone.ts", start: 0, end: 1 };
+  const type = { kind: "record", shapeId: "r0" } as const;
+  const mod = structuredClone(fibModule);
+  mod.records = [{ id: "r0", fields: [{ name: "count", type: F64 }] }];
+  mod.functions[0]!.locals.push({ id: "source.0", name: "source", type, mutable: false });
+  mod.functions[0]!.body.unshift({
+    kind: "exprStmt",
+    expr: {
+      kind: "recordClone",
+      source: { kind: "varRef", localId: "source.0", type, loc },
+      overrides: [
+        { name: "missing", value: { kind: "numLit", value: 1, type: F64, loc } },
+        { name: "missing", value: { kind: "numLit", value: 2, type: F64, loc } },
+      ],
+      type,
+      loc,
+    },
+    loc,
+  });
+  expect(validateModule(mod).map((e) => e.message)).toEqual(expect.arrayContaining([
+    expect.stringContaining('has no field "missing"'),
+    expect.stringContaining('overrides field "missing" twice'),
+  ]));
+});

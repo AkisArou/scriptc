@@ -1408,9 +1408,9 @@ export interface IrLibSection {
   identity?: IrLibIdentity;
 }
 
-/** The profile-declared identity getters' facts, landed on the IR so both
- * backends emit the same constants the sidecar records (V12's identity
- * coherence is one-value-two-writes by construction). */
+/** The profile-declared identity getters' facts, landed on the IR so native
+ * archive assembly emits the same constants the sidecar records (V12's
+ * identity coherence is one-value-two-writes by construction). */
 export interface IrLibIdentity {
   buildIdSymbol: string;
   abiVersionSymbol: string;
@@ -5211,6 +5211,14 @@ export type IrExpr =
    * with the statement frame. Any value type is legal here, void included
    * (an awaited Promise<void>). */
   | { kind: "recordLit"; fields: { name: string; value: IrExpr; overflow?: true; drop?: true }[]; type: IrType; loc: SrcLoc }
+  /** Same-shape object spread with explicit overrides: `{ ...source,
+   * field: value }`. `source` is evaluated first and borrowed by one
+   * per-shape clone helper; `overrides` then evaluate in source order and
+   * replace the cloned slots. Refcounted override values MOVE in and the
+   * replaced cloned values release after unlinking. Restricted to plain
+   * declared-field records (no tuple/index/accessor shapes), so every
+   * omitted field is copied exactly once by the helper. */
+  | { kind: "recordClone"; source: IrExpr; overrides: { name: string; value: IrExpr }[]; type: IrType; loc: SrcLoc }
   /** Record field read `r.f` — mirrors `fieldGet`: refcounted fields come
    * out retained (+1). */
   | { kind: "recordGet"; obj: IrExpr; shapeId: string; field: string; type: IrType; loc: SrcLoc }

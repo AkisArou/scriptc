@@ -2,9 +2,9 @@
  * expression lands in a fresh C temp, with RC ownership tracked on the
  * emitter's frames (see the discipline comment in emitter core). */
 import type { CEmitter, Temp } from "./emitter.js";
-import { arrayOf, nativeIntegerInfo, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, IrRecordShape, IrType, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, nativeIntegerOpTraps, nativeScalarWidensToNumber, provenNumberLiteral, RUNTIME_ERROR_CLASSES, STRING, typeEquals, typeKey, isFfiReleaseParam } from "../../ir/nodes.js";
+import { arrayOf, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, IrRecordShape, IrType, isFfiCallbackParam, isFfiContextParam, isFfiReleaseParam, islandPromisePayloadTag, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, nativeIntegerInfo, nativeIntegerOpTraps, nativeScalarWidensToNumber, provenNumberLiteral, RUNTIME_ERROR_CLASSES, STRING, typeEquals, typeKey } from "../../ir/nodes.js";
 import { boxAccess, BYTES_NUM_KIND_C, BYTES_NUM_VAR_C, bytesElemByteSize, bytesElemKindC, cDecl, cFnPtrCast, cNativeScalarLiteral, cNumberLiteral, cStringLiteral, cType, DV_GET_KIND_C, DV_SET_KIND_C, elemAccess, mapKeyAccess, mapKeyKindC, mapValKindC, releaseCallC, retainCallC, vAdapters } from "./emit-types.js";
-import { mangleClassNew, mangleClassRetain, mangleClassStruct, mangleField, mangleFnClosure, mangleFunction, mangleGlobal, mangleLocal, mangleNativeField, mangleNativeHandleTag, mangleRecordNew, mangleRecordStruct, mangleVtStruct } from "../mangle.js";
+import { mangleClassNew, mangleClassRetain, mangleClassStruct, mangleField, mangleFnClosure, mangleFunction, mangleGlobal, mangleLocal, mangleNativeField, mangleNativeHandleTag, mangleRecordClone, mangleRecordNew, mangleRecordStruct, mangleVtStruct } from "../mangle.js";
 import { OVERFLOW_MEMBER } from "./emit-shapes.js";
 import { dynDestrCheckHelper, dynIterNHelper, dynKeyGetHelper } from "./emit-walkers.js";
 import { genResultThunkFor } from "./emit-async.js";
@@ -3213,6 +3213,29 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           }
           if (isRefCounted(v.type)) E.moveTemp(v);
           E.line(`${rec.name}->${mangleField(f.name)} = ${v.name};`);
+        }
+        return rec;
+      }
+      case "recordClone": {
+        if (e.type.kind !== "record") throw new Error("emitter bug: recordClone of non-record type");
+        E.recordCloneShapes.add(e.type.shapeId);
+        // Source first, then each override in source order. The helper
+        // returns a fully retained owned clone; replacement unlinks before
+        // releasing the copied value, matching recordSet's cycle discipline.
+        const source = E.emitExpr(e.source);
+        const rec = E.newTemp(e.type, `${mangleRecordClone(e.type.shapeId)}(${source.name})`);
+        for (const f of e.overrides) {
+          const v = E.emitExpr(f.value);
+          const field = `${rec.name}->${mangleField(f.name)}`;
+          if (isRefCounted(v.type)) {
+            E.moveTemp(v);
+            const old = `sc_t${E.tempCounter++}`;
+            E.line(`${cDecl(v.type, old)} = ${field};`);
+            E.line(`${field} = ${v.name};`);
+            E.releaseValue(old, v.type);
+          } else {
+            E.line(`${field} = ${v.name};`);
+          }
         }
         return rec;
       }

@@ -1559,6 +1559,15 @@ const LIB_RUNTIME_SOURCES = [
 export interface LibArchiveOptions {
   /** The program TU (.c or .ll — clang compiles either with -c). */
   cPath: string;
+  /** Invocation-owned program source to compile under `cPath`'s public
+   * spelling. Library assembly uses this for the identity-free projection of
+   * a complete caller-visible TU; its bytes drive every native cache key. */
+  programSource?: string;
+  /** Tiny generated C source carrying volatile library identity getters.
+   * Its bytes join the complete archive key, but the source itself exists
+   * only in the invocation-private build directory and the large program-
+   * object cache is keyed independently. */
+  identityCSource?: string;
   /** The archive to produce (<name>.lib.a). */
   outPath: string;
   /** Caller-owned identity for the generated TU's complete non-system
@@ -1789,30 +1798,32 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
   let archiverVersion = "";
   let runtimeHash = "";
   let programDependencyHash = "";
-  let cachedProgramBytes: Buffer | null = null;
+  let cachedProgramBytes = opts.programSource === undefined
+    ? null
+    : Buffer.from(opts.programSource, "utf8");
+  const identityBytes = opts.identityCSource === undefined
+    ? null
+    : Buffer.from(opts.identityCSource, "utf8");
   if (root !== null) {
     try {
       const [cv, fingerprint, programBytes] = await Promise.all([
         ccVersionOnce(driver.argv, toolchainEnv, true),
         runtimeFingerprint(rtDir),
-        readFile(opts.cPath),
+        cachedProgramBytes === null ? readFile(opts.cPath) : Promise.resolve(cachedProgramBytes),
       ]);
       compilerVersion = cv;
       runtimeHash = fingerprint;
       cachedProgramBytes = programBytes;
+      programDependencyHash = await translationUnitDependencyFingerprint(
+        driver,
+        cflags,
+        opts.cPath,
+        programBytes,
+        toolchainEnv,
+      );
       if (cacheCompleteArchive) {
-        const [av, programDependencies] = await Promise.all([
-          toolVersionOnce(arArgv, toolchainEnv, true),
-          translationUnitDependencyFingerprint(
-            driver,
-            cflags,
-            opts.cPath,
-            programBytes,
-            toolchainEnv,
-          ),
-        ]);
+        const av = await toolVersionOnce(arArgv, toolchainEnv, true);
         archiverVersion = av;
-        programDependencyHash = programDependencies;
         const key = createHash("sha256")
           // v7 adds effective compiler-wrapper invocations for the real runtime
           // and program compile flavors.
@@ -1822,7 +1833,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
           .update(implicitToolchain!).update("\0")
           .update(runtimeCompilerInvocation!).update("\0")
           .update(programCompilerInvocation!).update("\0")
-          .update(programDependencies).update("\0")
+          .update(programDependencyHash).update("\0")
           .update(opts.cacheIdentity!).update("\0")
           .update(driver.argv.join("\x1f")).update("\0")
           .update(cv).update("\0")
@@ -1837,6 +1848,9 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
           .update(opts.cPath).update("\0")
           .update(resolve(opts.cPath)).update("\0")
           .update(programBytes)
+          .update("\0identity\0")
+          .update(identityBytes === null ? "<none>" : "<generated>").update("\0")
+          .update(identityBytes ?? Buffer.alloc(0))
           .digest("hex");
         cachedArchive = join(root, "lib", key);
         const tmpOut = privateSiblingPath(opts.outPath, "lib-hit");
@@ -1937,11 +1951,84 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
           ? opts.cPath
           : join(buildDir, `program${opts.cPath.endsWith(".ll") ? ".ll" : ".c"}`);
       if (cachedProgramBytes !== null) await writeFile(programSource, cachedProgramBytes);
-      const programObject = await compileOne(
-        programSource,
-        `${stem}.program.o`,
-        cachedProgramBytes === null ? undefined : opts.cPath,
-      );
+      let cachedProgramObject: string | null = null;
+      if (
+        root !== null && cachedProgramBytes !== null && compilerVersion !== "" &&
+        implicitToolchain !== null && programCompilerInvocation !== null
+      ) {
+        const programKey = createHash("sha256")
+          .update("lib-program-obj-v1\0")
+          .update(cacheTargetIdentity(driver)).update("\0")
+          .update(toolchainEnv).update("\0")
+          .update(implicitToolchain).update("\0")
+          .update(programCompilerInvocation).update("\0")
+          .update(opts.cacheIdentity!).update("\0")
+          .update(driver.argv.join("\x1f")).update("\0")
+          .update(compilerVersion).update("\0")
+          .update(runtimeHash).update("\0")
+          .update(programDependencyHash).update("\0")
+          .update(programCompilerArgs.join("\x1f")).update("\0")
+          .update(opts.cPath).update("\0")
+          .update(resolve(opts.cPath)).update("\0")
+          .update(cachedProgramBytes)
+          .digest("hex");
+        cachedProgramObject = join(root, "program-obj", programKey);
+      }
+      const stagedProgramObject = join(buildDir, `${stem}.program.o`);
+      let programObject: string;
+      if (
+        cachedProgramObject !== null &&
+        await copyValidCachedFile(cachedProgramObject, stagedProgramObject)
+      ) {
+        programObject = stagedProgramObject;
+      } else {
+        programObject = await compileOne(
+          programSource,
+          `${stem}.program.o`,
+          cachedProgramBytes === null ? undefined : opts.cPath,
+        );
+        if (cachedProgramObject !== null) {
+          try {
+            const [currentRuntime, currentImplicit, currentInvocation, currentDependencies, currentCompiler] =
+              await Promise.all([
+                runtimeFingerprint(rtDir),
+                implicitToolchainFingerprint(driver, toolchainEnv),
+                effectiveCompilerInvocationFingerprint(
+                  driver,
+                  toolchainEnv,
+                  programCompilerArgs,
+                  programSourceExtension,
+                ),
+                translationUnitDependencyFingerprint(
+                  driver,
+                  cflags,
+                  opts.cPath,
+                  cachedProgramBytes!,
+                  toolchainEnv,
+                ),
+                ccVersionOnce(driver.argv, toolchainEnv, true),
+              ]);
+            if (
+              currentRuntime === runtimeHash &&
+              currentImplicit === implicitToolchain &&
+              currentInvocation === programCompilerInvocation &&
+              currentDependencies === programDependencyHash &&
+              currentCompiler === compilerVersion
+            ) {
+              await publishCachedFile(programObject, cachedProgramObject);
+            }
+          } catch {
+            // Best-effort: the archive build already owns a valid object.
+          }
+        }
+      }
+      const identityObject = identityBytes === null
+        ? null
+        : await (async () => {
+            const source = join(buildDir, "identity.c");
+            await writeFile(source, identityBytes);
+            return compileOne(source, `${stem}.identity.o`);
+          })();
       let runtimeObjects: string[] | null = null;
       let cacheInputsStable = true;
       let objectImplicitVerification: Promise<boolean> | null = null;
@@ -1990,7 +2077,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
           );
         }
       }
-      const objects = [programObject, ...runtimeObjects, ...lreObjects, ...zlibObjects];
+      const objects = [programObject, ...(identityObject === null ? [] : [identityObject]), ...runtimeObjects, ...lreObjects, ...zlibObjects];
       // Multi-instance library mode: the archive's one member becomes the
       // combined, symbol-localized object (cached vendor/runtime objects
       // are read-only inputs here — the combine step never mutates them).
@@ -2002,7 +2089,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
                 driver,
                 arArgv,
                 buildDir,
-                programObject,
+                [programObject, ...(identityObject === null ? [] : [identityObject])],
                 [...runtimeObjects, ...lreObjects, ...zlibObjects],
                 opts.localizeSymbols,
                 stem,
@@ -2107,7 +2194,8 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  * shared by design. Windows embedders additionally link advapi32, iphlpapi,
  * and ws2_32.
  *
- * Member selection matters: a classic archive's unused members (and their
+ * The generated program and optional identity objects are mandatory roots;
+ * support-member selection still matters. A classic archive's unused members (and their
  * undefined references to units library mode excludes, like the
  * fs-promises unit's fiber symbols) never reach an embedder's link. A
  * blind merge of every object would carry those references into the one
@@ -2116,7 +2204,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
  * members the program object transitively needs (the COFF arm implements
  * the same member semantics in process).
  *
- *   Mach-O — one host-ld64 invocation: -r merges program + needed members,
+ *   Mach-O — one host-ld64 invocation: -r merges roots + needed members,
  *            -exported_symbols_list demotes every unlisted global to
  *            private extern, and -r without -keep_private_externs writes
  *            private externs out as non-external symbols. Apple ASan's
@@ -2151,7 +2239,7 @@ async function localizeLibraryObjects(
   driver: CcDriver,
   arArgv: readonly string[],
   buildDir: string,
-  programObject: string,
+  rootObjects: readonly string[],
   supportObjects: readonly string[],
   keepSymbols: readonly string[],
   stem: string,
@@ -2174,14 +2262,15 @@ async function localizeLibraryObjects(
   if (platform === "win32") {
     // COFF has no relocatable-link tool to stage through; the member
     // selection and combine+demote happen in process over the object bytes.
-    const [program, ...support] = await Promise.all(
-      [programObject, ...supportObjects].map((path) => readFile(path)),
-    );
+    const [roots, support] = await Promise.all([
+      Promise.all(rootObjects.map((path) => readFile(path))),
+      Promise.all(supportObjects.map((path) => readFile(path))),
+    ]);
     try {
       await writeFile(
         combined,
-        mergeAndLocalizeCoffObjects(program!, support, new Set(keepSymbols), {
-          program: basename(programObject),
+        mergeAndLocalizeCoffObjects(roots, support, new Set(keepSymbols), {
+          roots: rootObjects.map((path) => basename(path)),
           support: supportObjects.map((path) => basename(path)),
         }),
       );
@@ -2195,10 +2284,10 @@ async function localizeLibraryObjects(
   await run([arArgv[0] ?? "ar", ...arArgv.slice(1), "rcs", staging, ...supportObjects]);
   if (platform === "darwin") {
     await writeFile(keepFile, keepSymbols.map((s) => `_${s}\n`).join(""));
-    await run(["ld", "-r", programObject, staging, "-o", combined, "-exported_symbols_list", keepFile]);
+    await run(["ld", "-r", ...rootObjects, staging, "-o", combined, "-exported_symbols_list", keepFile]);
   } else if (platform === "linux" && driver.target === null) {
     await writeFile(keepFile, keepSymbols.map((s) => `${s}\n`).join(""));
-    await run(["ld", "-r", "--force-group-allocation", programObject, staging, "-o", combined]);
+    await run(["ld", "-r", "--force-group-allocation", ...rootObjects, staging, "-o", combined]);
     await run(["objcopy", `--keep-global-symbols=${keepFile}`, combined]);
   } else if (platform === "linux") {
     // Cross ELF: the cross driver's own lld performs the relocatable merge
@@ -2212,7 +2301,7 @@ async function localizeLibraryObjects(
       ...driver.argv.slice(1),
       "-target", driver.zigTarget ?? driver.target!,
       "-nostdlib",
-      "-r", programObject, staging,
+      "-r", ...rootObjects, staging,
       "-o", combined,
     ]);
     try {
@@ -2325,6 +2414,31 @@ export function resolveBuildCacheRoot(
   return platform === "darwin"
     ? resolve(userHome, "Library", "Caches", "scriptc", "build")
     : resolve(userHome, ".cache", "scriptc", "build");
+}
+
+/** Shared persistent-cache root for compiler-level tiers.  The early library
+ * cache deliberately follows the native cache's activation and hard-disable
+ * contract, while native compilation retains ownership of toolchain safety. */
+export function buildCacheRoot(): string | null {
+  return resolveBuildCacheRoot();
+}
+
+/** Harden/create a compiler-level cache root using the same privacy policy as
+ * the artifact caches.  Failure disables only the optional caller's tier. */
+export async function prepareBuildCacheRoot(root: string | null): Promise<string | null> {
+  if (root === null) return null;
+  try {
+    await ensurePrivateCacheRoot(root, process.env["SCRIPTC_CACHE_DIR"] === undefined);
+    return root;
+  } catch {
+    return null;
+  }
+}
+
+/** Register a successful compiler-level cache write with the shared bounded
+ * LRU policy. */
+export async function pruneBuildCache(root: string | null): Promise<void> {
+  if (root !== null) await pruneCache(root).catch(() => undefined);
 }
 
 function cacheRootDir(): string | null {

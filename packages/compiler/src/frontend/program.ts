@@ -40,7 +40,6 @@
  *    that path (no snapshot pins it). */
 
 import { builtinModules } from "node:module";
-import { statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import * as ts from "./ts7/adapter.js";
 import type { ScrDiagnostic } from "../diagnostics/diagnostic.js";
@@ -77,6 +76,7 @@ import {
   unsupportedModuleFeatureOf,
   workspacePackageOfPath,
 } from "./shared.js";
+import { trackedFileExists } from "./input-tracker.js";
 
 const BASE_OPTIONS: ts.Ts7CompilerOptions = {
   strict: true,
@@ -437,9 +437,7 @@ export function loadProgram(
       );
     }
     const declarationPath = resolve(file);
-    try {
-      if (!statSync(declarationPath).isFile()) throw new Error("not a file");
-    } catch {
+    if (!trackedFileExists(declarationPath)) {
       throw new TypeError(
         `external type declaration for ${JSON.stringify(specifier)} does not name a readable file: ${declarationPath}`,
       );

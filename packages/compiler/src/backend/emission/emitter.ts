@@ -71,6 +71,7 @@ import { emitAsyncScaffolding, childDataThunkFor, childExitThunkFor, childExitTh
 import { emitNpmEmbedding, islandAdapter, islandTypedAdapter } from "./emit-island.js";
 import { emitFunction, emitBlock, emitStmts, emitStmt, emitTryCatch, emitSwitch, mergeBrace, emitBranchInto, emitCondition } from "./emit-stmts.js";
 import { emitExpr } from "./emit-exprs.js";
+import { emitLibraryIdentityLines } from "../library-identity.js";
 
 /** Emission choices that are not properties of the IR. `checkedNumbers`
  * decides whether a checked-number ingress the number facts proved
@@ -79,6 +80,9 @@ import { emitExpr } from "./emit-exprs.js";
  * slot cannot hold. */
 export interface CEmitOptions {
   readonly checkedNumbers?: "elide-proven" | "always";
+  /** Library archive assembly may move the volatile identity getters into a
+   * separate translation unit. Public/direct emission keeps them by default. */
+  emitLibraryIdentity?: boolean;
 }
 
 export function emitModule(
@@ -324,6 +328,9 @@ export class CEmitter {
   /** Active optional-chain bind temps, by chain id (chainRecv reads). */
   readonly chainTemps = new Map<string, Temp>();
   readonly recordsById = new Map<string, IrRecordShape>();
+  /** Record shapes whose bodies emitted recordClone. Filled while function
+   * bodies emit, before emitStructDefs assembles per-shape helpers. */
+  readonly recordCloneShapes = new Set<string>();
   /** Type-directed JSON walkers, interned per typeKey — one serializer per
    * type used in jsonStringify position (sc_jw_*), one match predicate
    * (sc_dm_*) and one checked builder (sc_dc_*) per type used in dynCheck
@@ -488,7 +495,7 @@ export class CEmitter {
   constructor(
     readonly mod: IrModule,
     sourceText?: string,
-    options: CEmitOptions = {},
+    private readonly options: CEmitOptions = {},
   ) {
     this.provenNumberCrossings = options.checkedNumbers === "always"
       ? new Map()
@@ -1253,21 +1260,12 @@ export class CEmitter {
       }
       out.push(`  return -1;`, `}`, ``);
     }
-    if (lib.identity !== undefined) {
+    if (lib.identity !== undefined && this.options.emitLibraryIdentity !== false) {
       // Profile-declared identity getters (the ask-2 sidecar's boot-time
       // pairing fence): pure data returns with NO entry prologue — exempt
       // from the poisoned guard and every runtime touch (ratified), so a
       // host can read them before init and after a trap.
-      out.push(
-        `uint64_t ${lib.identity.buildIdSymbol}(void) {`,
-        `  return UINT64_C(0x${lib.identity.buildId});`,
-        `}`,
-        ``,
-        `uint32_t ${lib.identity.abiVersionSymbol}(void) {`,
-        `  return ${lib.identity.abiVersion}u;`,
-        `}`,
-        ``,
-      );
+      out.push(...emitLibraryIdentityLines("c", lib.identity));
     }
     if (lib.resultResetSymbol !== null) {
       out.push(

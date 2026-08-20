@@ -322,3 +322,40 @@ test("a body mutation keeps the byte loop on the general f64 path", () => {
   expect(ll).toContain("bytes.index.range");
   expect(ll).toContain("fptoui double");
 });
+
+test("large record clones stay outlined while small clones remain inlineable", () => {
+  const record = (id: string, count: number): IrModule => {
+    const fields = Array.from({ length: count }, (_, i) => ({ name: `f${i}`, type: F64 }));
+    const type = { kind: "record", shapeId: id } as const;
+    return {
+      irVersion: 6,
+      sourceFile: "record-clone.ts",
+      entry: "__main",
+      records: [{ id, fields }],
+      functions: [{
+        name: "__main",
+        params: [],
+        returnType: VOID,
+        locals: [{ id: "source", name: "source", type, mutable: false }],
+        body: [{
+          kind: "exprStmt",
+          expr: {
+            kind: "recordClone",
+            source: { kind: "varRef", localId: "source", type, loc },
+            overrides: [{ name: "f0", value: { kind: "numLit", value: 1, type: F64, loc } }],
+            type,
+            loc,
+          },
+          loc,
+        }],
+        loc,
+      }],
+    };
+  };
+  const small = emitLlvmModule(record("small", 2));
+  const large = emitLlvmModule(record("large", 16));
+  expect(small).toContain("define internal ptr @sc_rclone_small(ptr %src) #0");
+  expect(small).not.toContain("attributes #2");
+  expect(large).toContain("define internal ptr @sc_rclone_large(ptr %src) #2");
+  expect(large).toContain("attributes #2 = { noinline sanitize_address }");
+});

@@ -61,6 +61,7 @@
  * lazy-inflate representation as the C debugging backend.
  */
 import { deflateRawSync } from "node:zlib";
+import { emitLibraryIdentityLines } from "../library-identity.js";
 import type {
   IrBytesElem,
   IrExpr,
@@ -92,7 +93,7 @@ import { numberBoundaryFacts } from "../../ir/number-facts.js";
 import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, nativeCallLifecycle, nativeCallbackPayloads, nativeTrampolineForm, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
 import { nativeArgumentForm, nativeCallDisposal, nativeFailureForm, nativeResultForm, type NativeArgumentFormExhausted } from "../native-call-plan.js";
 import { computeMayThrow } from "../emission/may-throw.js";
-import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleNativeHandleTag, mangleNativeStruct, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
+import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleNativeHandleTag, mangleNativeStruct, mangleRecordClone, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
 import {
   buildClassGraph,
@@ -190,6 +191,9 @@ export interface LlvmTargetOptions {
    * proof throws there instead of silently converting a value the slot
    * cannot hold. */
   checkedNumbers?: "elide-proven" | "always";
+  /** Library archive assembly may move the volatile identity getters into a
+   * separate translation unit. Public/direct emission keeps them by default. */
+  emitLibraryIdentity?: boolean;
 }
 
 export function emitLlvmModule(mod: IrModule, options: LlvmTargetOptions = {}): string {
@@ -999,6 +1003,7 @@ class LlEmitter {
   readonly sizeType: "i32" | "i64";
   readonly cycleColorOffset: number;
   private readonly wasi: boolean;
+  private readonly emitLibraryIdentity: boolean;
   /** Interned string literals: UTF-8 text → { symbol, byte length } —
    * first-use order, the C emitter's determinism discipline. */
   private readonly literals = new Map<string, { sym: string; len: number }>();
@@ -1079,6 +1084,7 @@ class LlEmitter {
   private readonly dynPromiseAdapters = new Map<string, string>();
   readonly unionsById = new Map<string, IrUnionDef>();
   readonly recordsById = new Map<string, IrRecordShape>();
+  readonly recordCloneShapes = new Set<string>();
   readonly tracedShapes: Set<string>;
   readonly tracedUnions: Set<string>;
   /** The class graph (buildClassGraph): preorder numbering, hierarchy
@@ -1176,6 +1182,7 @@ class LlEmitter {
     this.nativeDestructorBindings = nativeDestructorBindingIds(mod);
     this.sizeType = options.pointerBits === 32 ? "i32" : "i64";
     this.wasi = options.wasi === true;
+    this.emitLibraryIdentity = options.emitLibraryIdentity !== false;
     // ScrCycHdr is { ptr trace; ptr free; i32 color; i16 buffered;
     // i16 gen; size_t buf_index }. The object follows it, so color is 12
     // bytes behind a wasm32 object and 16 bytes behind a 64-bit object.
@@ -2254,6 +2261,9 @@ class LlEmitter {
     const asyncDefs = this.emitAsyncScaffolding();
     const ffiCallbacks = { globals: [] as string[], defs: [] as string[] };
     const nativeCallbacks = this.emitNativeCallbackDefs();
+    const hasNoInlineRecordClone = [...this.recordCloneShapes].some(
+      (shapeId) => (this.recordsById.get(shapeId)?.fields.length ?? 0) >= 16,
+    );
     const embedded = this.mod.embedded;
     const usesIsland = embedded !== undefined && embedded.modules.length > 0;
     const storeNpmText = (text: string): { bytes: Buffer; raw: number } => {
@@ -2794,6 +2804,7 @@ class LlEmitter {
       out.push(...this.emitLibDefs(globals, globalReleaseLines, stamps));
       out.push(`attributes #0 = { sanitize_address }`);
       if (this.wasi) out.push(`attributes #1 = { sanitize_address presplitcoroutine }`);
+      if (hasNoInlineRecordClone) out.push(`attributes #2 = { noinline sanitize_address }`);
       out.push(``);
       return out.join("\n");
     }
@@ -2917,6 +2928,7 @@ class LlEmitter {
       // emitted functions too (the runtime TUs get theirs from clang).
       `attributes #0 = { sanitize_address }`,
       ...(this.wasi ? [`attributes #1 = { sanitize_address presplitcoroutine }`] : []),
+      ...(hasNoInlineRecordClone ? [`attributes #2 = { noinline sanitize_address }`] : []),
       ``,
     );
     return out.join("\n");
@@ -3050,25 +3062,13 @@ class LlEmitter {
       });
       out.push(`miss:`, `  ret i32 -1`, `}`, ``);
     }
-    if (lib.identity !== undefined) {
+    if (lib.identity !== undefined && this.emitLibraryIdentity) {
       // Profile-declared identity getters (the ask-2 sidecar's boot-time
       // pairing fence): pure data returns with NO entry prologue — exempt
       // from the poisoned guard and every runtime touch (ratified), so a
       // host can read them before init and after a trap. The u64 rides
       // i64 two's-complement (LLVM integer constants are signed).
-      const buildId = BigInt.asIntN(64, BigInt(`0x${lib.identity.buildId}`)).toString();
-      out.push(
-        `define i64 @${lib.identity.buildIdSymbol}() ${FN_ATTRS} { ; identity getter build_id 0x${lib.identity.buildId}`,
-        `entry:`,
-        `  ret i64 ${buildId}`,
-        `}`,
-        ``,
-        `define i32 @${lib.identity.abiVersionSymbol}() ${FN_ATTRS} { ; identity getter abi_version`,
-        `entry:`,
-        `  ret i32 ${lib.identity.abiVersion}`,
-        `}`,
-        ``,
-      );
+      out.push(...emitLibraryIdentityLines("llvm", lib.identity, FN_ATTRS));
     }
     if (lib.resultResetSymbol !== null) {
       out.push(
@@ -6317,6 +6317,28 @@ class LlEmitter {
           if (isRefCounted(v.type)) this.moveTemp(v);
           const { ptr, type } = this.recordFieldPtr(rec, shapeId, f.name);
           this.storeField(ptr, type, v.name);
+        }
+        return out;
+      }
+      case "recordClone": {
+        if (e.type.kind !== "record") throw new Error("llvm emitter bug: recordClone of non-record type");
+        this.recordCloneShapes.add(e.type.shapeId);
+        const source = this.emitExpr(e.source);
+        const rec = B.tmp();
+        B.line(`${rec} = call ptr @${mangleRecordClone(e.type.shapeId)}(ptr ${source.name})`);
+        const out = this.own({ name: rec, type: e.type });
+        for (const f of e.overrides) {
+          const v = this.emitExpr(f.value);
+          const { ptr, type } = this.recordFieldPtr(rec, e.type.shapeId, f.name);
+          if (isRefCounted(type)) {
+            this.moveTemp(v);
+            const old = B.tmp();
+            B.line(`${old} = load ptr, ptr ${ptr}`);
+            this.storeField(ptr, type, v.name);
+            this.releaseValue(old, type);
+          } else {
+            this.storeField(ptr, type, v.name);
+          }
         }
         return out;
       }

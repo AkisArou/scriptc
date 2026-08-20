@@ -752,6 +752,24 @@ describe("straight-line ordinary-field refinement", () => {
 });
 
 describe("straight-line declared-field refinement", () => {
+  test("recordClone checks explicit integer-slot overrides", () => {
+    const clone: IrStmt = {
+      kind: "exprStmt",
+      expr: {
+        kind: "recordClone",
+        source: recordRef(),
+        overrides: [{ name: "count", value: math("trunc", num(42)) }],
+        type: MODEL,
+        loc,
+      },
+      loc,
+    };
+    const v = onlyRecord([clone]);
+    expect(v.outcome).toBe("prove");
+    expect(v.provenLo).toBe(42);
+    expect(v.provenHi).toBe(42);
+  });
+
   test("an if guard refines the repeated field read through its boundary write", () => {
     const v = onlyRecord([
       iff(bin("<", countRead(), num(1000)), [

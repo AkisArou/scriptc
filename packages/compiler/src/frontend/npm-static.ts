@@ -54,10 +54,10 @@
  * the state, so a flagless compile after a flagged one sees a clean
  * slate. */
 
-import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname } from "node:path";
 import { rewriteBundlerCjsExports } from "./npm-static-rewrite.js";
 import { npmPackageNameOf, registerWorkspacePackage, workspacePackageOfPath } from "./shared.js";
+import { trackedExists, trackedReadFile, trackedRealpath } from "./input-tracker.js";
 
 let activePackages: ReadonlySet<string> = new Set();
 
@@ -129,11 +129,9 @@ const realpathProbed = new Set<string>();
 function registerWorkspaceRealpath(pkg: string, nmDir: string): void {
   if (realpathProbed.has(nmDir)) return;
   realpathProbed.add(nmDir);
-  try {
-    const real = realpathSync(nmDir).split("\\").join("/");
-    if (real !== nmDir && !real.includes("/node_modules/")) registerWorkspacePackage(pkg, real);
-  } catch {
-    /* dangling symlink / missing dir — nothing to register */
+  const real = trackedRealpath(nmDir)?.split("\\").join("/");
+  if (real !== undefined && real !== nmDir && !real.includes("/node_modules/")) {
+    registerWorkspacePackage(pkg, real);
   }
 }
 
@@ -287,22 +285,25 @@ function packageIsUntyped(path: string): boolean {
   if (hit !== undefined) return hit;
   let untyped = true;
   try {
-    const pkg = JSON.parse(readFileSync(`${pkgDir}/package.json`, "utf8")) as Record<string, unknown>;
-    if (pkg["types"] !== undefined || pkg["typings"] !== undefined) untyped = false;
-    if (untyped && typeof pkg["exports"] === "object" && pkg["exports"] !== null) {
-      // a "types" condition anywhere inside exports is a claim too
-      untyped = !JSON.stringify(pkg["exports"]).includes('"types"');
+    const pkgText = trackedReadFile(`${pkgDir}/package.json`);
+    if (pkgText !== null) {
+      const pkg = JSON.parse(pkgText) as Record<string, unknown>;
+      if (pkg["types"] !== undefined || pkg["typings"] !== undefined) untyped = false;
+      if (untyped && typeof pkg["exports"] === "object" && pkg["exports"] !== null) {
+        // a "types" condition anywhere inside exports is a claim too
+        untyped = !JSON.stringify(pkg["exports"]).includes('"types"');
+      }
     }
   } catch {
     /* no package.json — keep probing */
   }
-  if (untyped && existsSync(`${pkgDir}/index.d.ts`)) untyped = false;
+  if (untyped && trackedExists(`${pkgDir}/index.d.ts`)) untyped = false;
   if (untyped) {
     // the @types twin, hoisted anywhere up the realm chain
     const mangled = mangledTypesName(dirName);
     for (let dir = dirname(pkgDir); ; ) {
       const parent = dirname(dir);
-      if (existsSync(`${dir}/node_modules/@types/${mangled}/package.json`) || existsSync(`${dir}/@types/${mangled}/package.json`)) {
+      if (trackedExists(`${dir}/node_modules/@types/${mangled}/package.json`) || trackedExists(`${dir}/@types/${mangled}/package.json`)) {
         untyped = false;
         break;
       }
@@ -344,7 +345,7 @@ export function npmStaticFsShadow(): NpmStaticFsShadow | null {
         if (
           (path.endsWith(".js") || path.endsWith(".cjs")) &&
           isNodeModulesPathNorm(path) &&
-          !existsSync(path.replace(/\.(js|cjs)$/, ".d.ts")) && // a sibling .d.ts types this very file
+          !trackedExists(path.replace(/\.(js|cjs)$/, ".d.ts")) && // a sibling .d.ts types this very file
           packageIsUntyped(path)
         ) {
           return "module.exports = (() => { let u; return u; })();\n";
@@ -354,7 +355,8 @@ export function npmStaticFsShadow(): NpmStaticFsShadow | null {
       if (target.viaTypes) return undefined;
       if (path.endsWith("/package.json") || path.endsWith("\\package.json")) {
         try {
-          return npmStaticTransformPkgJsonText(readFileSync(path, "utf8"));
+          const source = trackedReadFile(path);
+          return source === null ? undefined : npmStaticTransformPkgJsonText(source);
         } catch {
           return undefined;
         }
@@ -373,11 +375,14 @@ export function npmStaticFsShadow(): NpmStaticFsShadow | null {
         if (hit !== undefined) return hit ?? undefined;
         let rewritten: string | null = null;
         try {
-          const answer = rewriteBundlerCjsExports(readFileSync(path, "utf8"), path);
-          if (answer !== null && typeof answer === "object") {
-            reportNpmStaticOffender(target.pkg, answer.degrade);
-          } else {
-            rewritten = answer;
+          const source = trackedReadFile(path);
+          if (source !== null) {
+            const answer = rewriteBundlerCjsExports(source, path);
+            if (answer !== null && typeof answer === "object") {
+              reportNpmStaticOffender(target.pkg, answer.degrade);
+            } else {
+              rewritten = answer;
+            }
           }
         } catch {
           rewritten = null; // unreadable/unparseable: fall through untouched
@@ -444,12 +449,8 @@ export function npmStaticIneligibleReason(
     return "it ships no own .d.ts declaration surface";
   }
   if (jsEntry === null) return "no runtime JS entry resolves";
-  let source: string;
-  try {
-    source = readFileSync(jsEntry, "utf8");
-  } catch {
-    return `its runtime entry ${jsEntry} cannot be read`;
-  }
+  const source = trackedReadFile(jsEntry);
+  if (source === null) return `its runtime entry ${jsEntry} cannot be read`;
   if (!looksUnminified(source)) return "its shipped JS looks minified";
   if (hasTransformMarkers(source)) {
     return "its shipped JS carries build-transform markers (bundled/transpiled dist)";
