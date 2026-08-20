@@ -120,6 +120,9 @@ export declare class NativeCounter {
 export declare function errorHandleFail(code: i32): void;
 /** Fails through a trailing out-parameter, so the quotient survives. */
 export declare function errorOutDivide(numerator: i32, divisor: i32): i32;
+/** Fails through a trailing out-parameter and hands back an owned string when
+ * it succeeds, so the result means something on the path that has one. */
+export declare function errorOutLabel(code: i32): string;
 export declare function fixtureErrorsOutstanding(): i32;
 
 export declare function i8Identity(value: i8): i8;

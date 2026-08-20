@@ -1134,6 +1134,49 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
+      /* The same failure channel with a STRING result the caller must free.
+       * The failure arrives in a slot and reads nothing, so the result is
+       * free to mean something — and the unwind has to precede both the copy
+       * and the release, which the fixture makes observable by answering a
+       * dangling non-null pointer on the failing path. */
+      id: "scriptc.fixture.c-v1@0.0.0#error_out_label",
+      declaration: { module: nativePackage, name: "errorOutLabel" },
+      entry: { symbol: "nts_error_out_label" },
+      sourceCall: { kind: "function" },
+      error: {
+        detect: { kind: "outParameterIsNotNull", parameter: 1 },
+        message: { kind: "symbol", symbol: "nts_fixture_error_message" },
+        release: { kind: "symbol", symbol: "nts_fixture_error_free" },
+      },
+      arguments: [{ name: "code", type: I32 }],
+      parameters: [
+        {
+          name: "code",
+          type: I32,
+          passMode: "value",
+          ownership: { kind: "value" },
+          projection: { kind: "argument", argument: 0 },
+        },
+        {
+          name: "error",
+          type: { kind: "nativeErrorOut", addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "value" },
+          projection: { kind: "errorOut" },
+        },
+      ],
+      result: {
+        type: { kind: "nativePointer", pointee: "i8", const: false, addressSpace: 0 },
+        passMode: "pointer",
+        ownership: { kind: "value" },
+        projection: {
+          kind: "utf8CString",
+          nullable: false,
+          release: { kind: "symbol", symbol: "nts_cstring_free" },
+        },
+      },
+    },
+    {
       id: "scriptc.fixture.c-v1@0.0.0#fixture_errors_outstanding",
       declaration: { module: nativePackage, name: "fixtureErrorsOutstanding" },
       entry: { symbol: "nts_fixture_errors_outstanding" },
@@ -3774,6 +3817,42 @@ describe.each(["c", "llvm"] as const)("Native IR checked-number boundary, %s bac
     expect(generated).toMatch(
       backend === "c" ? /tag == \d+ \? scr_native_cstring_array_borrow/u : /native\.cstrv\.present/u,
     );
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
+      status: 42,
+      signal: null,
+      stderr: "",
+    });
+  });
+
+  localFixtureTest("keeps a string result across a failure that arrives in a slot", async () => {
+    const outDir = join(scratch, `error-out-string-${backend}`);
+    const result = await compile(join(repoRoot, "tests/native-ir/error-out-string.ts"), {
+      outDir,
+      outPath: join(outDir, "program"),
+      backend,
+      sanitize,
+      externalTypes: nativeExternalTypes(),
+      native: frontendNativeInput(),
+      nativeLinkInputs: [fixtureObject(), supportObject()],
+    });
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (backend === "c") {
+      /* The ordering, pinned structurally rather than left to the fixture's
+       * dangling pointer to catch at runtime: the error slot is read and the
+       * unwind emitted BEFORE the string is copied or freed. The runtime
+       * check would crash if this were wrong, but only while the fixture
+       * keeps answering an unmapped pointer — this stays true regardless. */
+      const generated = readFileSync(join(outDir, "error-out-string.c"), "utf8");
+      /* The CALL, not the extern prototype the file opens with. */
+      const call = generated.indexOf("= nts_error_out_label(");
+      const unwind = generated.indexOf("scr_exc_pending()", call);
+      const copy = generated.indexOf("scr_str_from_c_data", call);
+      const release = generated.indexOf("nts_cstring_free", call);
+      expect(unwind).toBeGreaterThan(-1);
+      expect(copy).toBeGreaterThan(unwind);
+      expect(release).toBeGreaterThan(unwind);
+    }
     const run = spawnSync(result.binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
       status: 42,

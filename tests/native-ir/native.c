@@ -386,6 +386,22 @@ int32_t nts_error_out_divide(int32_t numerator, int32_t divisor,
   return numerator / divisor;
 }
 
+/* The same shape with a STRING result the caller must free. On failure it
+ * hands back a pointer that would be wrong to read AND wrong to free — a
+ * dangling non-null — so a lowering that projected or released before
+ * unwinding would corrupt rather than merely answer wrongly. That is the
+ * whole point of the fixture: the failure path has to be taken on the way
+ * out, not cleaned up after. */
+char *nts_error_out_label(int32_t code, NtsFixtureError **error) {
+  if (code < 0) {
+    *error = nts_error_handle_fail(code);
+    return (char *)(uintptr_t)0xD;
+  }
+  char *text = malloc(8);
+  snprintf(text, 8, "code%d", code % 100);
+  return text;
+}
+
 const char *nts_fixture_error_message(NtsFixtureError *error) {
   return error->message;
 }
