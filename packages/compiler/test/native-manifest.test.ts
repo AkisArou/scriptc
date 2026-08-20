@@ -36,6 +36,37 @@ function code(): string {
     .replace(/\/\/[^\n]*/gu, "");
 }
 
+test("the published manifest module is reachable by a supported specifier", () => {
+  /* The two properties above make the file importable. This one makes it
+   * IMPORTED. An `exports` map does not merely describe a package's entry
+   * points, it restricts them: a subpath it does not list cannot be imported
+   * at all, however present the file is on disk. So a contract this package
+   * documents as consumed from outside, and copies into `dist` on every
+   * build, was reachable only by a relative path into the package's source
+   * tree — which is a consumer reading around the package rather than from
+   * it, and breaks silently the first time the layout moves.
+   *
+   * The subpath resolves to the SOURCE file rather than the built copy on
+   * purpose, so it keeps the property the header claims: a consumer needs no
+   * build of this package to typecheck against it. The `dist` copy stays
+   * because this package's own emitted declarations resolve through it. */
+  const manifest = JSON.parse(
+    readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"),
+  ) as { exports: Record<string, string>; files: string[] };
+
+  const subpath = manifest.exports["./native-manifest.d.ts"];
+  expect(subpath).toBe("./src/native-manifest.d.ts");
+
+  /* Listed AND shipped: an export map entry pointing outside `files` resolves
+   * in this checkout and is absent from the published tarball, which is the
+   * one failure mode a test run from inside the repository cannot otherwise
+   * see. */
+  expect(manifest.files).toContain("src/native-manifest.d.ts");
+  expect(
+    readFileSync(fileURLToPath(new URL(`../${subpath.slice(2)}`, import.meta.url)), "utf8"),
+  ).toBe(source);
+});
+
 test("the published manifest module imports nothing", () => {
   expect(code()).not.toMatch(/^\s*import\b/mu);
   expect(code()).not.toMatch(/\bfrom\s*["']/u);

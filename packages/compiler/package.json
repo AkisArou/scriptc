@@ -1,7 +1,7 @@
 {
   "name": "@scriptc/compiler",
   "version": "0.0.33",
-  "description": "The scriptc compiler — TypeScript/JavaScript frontend, typed IR, LLVM and C backends",
+  "description": "The scriptc compiler \u2014 TypeScript/JavaScript frontend, typed IR, LLVM and C backends",
   "license": "Apache-2.0",
   "homepage": "https://scriptc.dev",
   "repository": {
@@ -14,6 +14,7 @@
   "types": "dist/index.d.ts",
   "exports": {
     ".": "./dist/index.js",
+    "./native-manifest.d.ts": "./src/native-manifest.d.ts",
     "./scriptc.d.ts": "./ambient/scriptc.d.ts",
     "./scriptc-overrides.d.ts": "./ambient/scriptc-overrides.d.ts",
     "./scriptc-node-fallback.d.ts": "./ambient/scriptc-node-fallback.d.ts",
@@ -22,6 +23,7 @@
   "files": [
     "dist",
     "ambient",
+    "src/native-manifest.d.ts",
     "surface-manifest.json"
   ],
   "publishConfig": {
