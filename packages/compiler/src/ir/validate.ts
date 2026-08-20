@@ -2997,21 +2997,54 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     }
   }
   const nativeDestructorIds = new Set<string>();
+  /* Which types a handle may be released AS.
+   *
+   * Itself, and anything it identity-upcasts to, transitively. That is sound
+   * rather than lenient: an identity upcast preserves the representation by
+   * definition, so the pointer the destructor receives is the value it
+   * expects, and the edge validation above already refuses an upcast whose
+   * target disagrees about thread safety, identity, or cycle collection — the
+   * three properties a release could otherwise care about. The graph is
+   * proven acyclic just above, so the walk terminates.
+   *
+   * Requiring the exact type instead forced one release symbol per handle
+   * type even where a platform has ONE — `g_object_unref` for every GObject,
+   * `DeleteGlobalRef` for every Java object — and both binding families were
+   * generating a wrapper per class whose body was byte-identical. */
+  const releasableAs = (typeId: string): ReadonlySet<string> => {
+    const reachable = new Set<string>([typeId]);
+    const pending = [typeId];
+    while (pending.length > 0) {
+      const current = pending.pop()!;
+      const definition = nativeTypesById.get(current);
+      if (definition?.kind !== "handle" || !Array.isArray(definition.upcasts)) continue;
+      for (const upcast of definition.upcasts) {
+        if (upcast?.kind !== "identity" || typeof upcast.target !== "string") continue;
+        if (reachable.has(upcast.target)) continue;
+        reachable.add(upcast.target);
+        pending.push(upcast.target);
+      }
+    }
+    return reachable;
+  };
   for (const binding of mod.nativeBindings ?? []) {
     if (binding.result.ownership.kind !== "owned") continue;
     nativeDestructorIds.add(binding.result.ownership.destructor);
     const resultType = binding.result.type;
     const destructor = nativeById.get(binding.result.ownership.destructor);
+    const releasable = resultType.kind === "nativeHandle"
+      ? releasableAs(resultType.typeId)
+      : new Set<string>();
     if (
       resultType.kind !== "nativeHandle" ||
       destructor === undefined ||
       destructor.result.type.kind !== "void" ||
       destructor.arguments.length !== 1 ||
       destructor.arguments[0]?.type.kind !== "nativeHandle" ||
-      destructor.arguments[0].type.typeId !== resultType.typeId ||
+      !releasable.has(destructor.arguments[0].type.typeId) ||
       destructor.parameters.length !== 1 ||
       destructor.parameters[0]?.type.kind !== "nativeHandle" ||
-      destructor.parameters[0].type.typeId !== resultType.typeId ||
+      destructor.parameters[0].type.typeId !== destructor.arguments[0].type.typeId ||
       destructor.parameters[0].ownership.kind !== "owned" ||
       destructor.parameters[0].projection.kind !== "argument" ||
       destructor.parameters[0].projection.argument !== 0

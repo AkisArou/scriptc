@@ -2779,6 +2779,62 @@ test("Native IR rejects invalid binding identity, exact types, and i32 literals"
   );
 });
 
+test("a handle may be released as any type it identity-upcasts to", () => {
+  /* A platform whose release is ONE function — `g_object_unref` for every
+   * GObject, `DeleteGlobalRef` for every Java object — should be able to name
+   * it once. Requiring the destructor's exact type forced a wrapper per class
+   * whose body was byte-identical, in both binding families.
+   *
+   * It is sound rather than lenient. An identity upcast preserves the
+   * representation by definition, and the upcast edge validation refuses a
+   * target that disagrees about thread safety, identity, or cycle collection
+   * — the three properties a release could care about. Nothing in emission
+   * reads the destructor's declared parameter type: it takes `entry.symbol`,
+   * and the handle definition comes from the RESULT's own type. */
+  const native = structuredClone(localNativeInput);
+  const create = native.bindings.find(
+    (candidate) => candidate.id === "scriptc.fixture.c-v1@0.0.0#counter_create",
+  );
+  const destroy = native.bindings.find(
+    (candidate) => candidate.id === "scriptc.fixture.c-v1@0.0.0#counter_destroy",
+  );
+  if (create === undefined || destroy === undefined) {
+    throw new Error("test fixture lost its handle construction pair");
+  }
+  const mod = exactI32Module();
+  mod.nativeTypes = native.types.map((definition) => structuredClone(definition));
+  mod.nativeBindings = [create, destroy].map((binding) =>
+    materializeNativeBinding(binding)
+  );
+  mod.functions = [];
+  expect(validateModule(mod)).toEqual([]);
+
+  /* Retyped to the BASE the counter identity-upcasts to, which is the shape a
+   * one-release platform wants. */
+  const base = structuredClone(mod);
+  const retyped = base.nativeBindings![1]!;
+  const baseHandle = { kind: "nativeHandle", typeId: COUNTER_BASE_ID } as const;
+  retyped.arguments = [{ name: "counter", type: baseHandle }];
+  retyped.parameters = [{
+    ...retyped.parameters[0]!,
+    type: baseHandle,
+  }];
+  expect(validateModule(base)).toEqual([]);
+
+  /* An UNRELATED handle type is still refused: nothing says its
+   * representation matches, so nothing says the pointer is the one the
+   * destructor expects. */
+  const unrelated = structuredClone(base);
+  const strayId = "scriptc.fixture.c-v1@0.0.0#type:vault";
+  const stray = unrelated.nativeBindings![1]!;
+  const strayHandle = { kind: "nativeHandle", typeId: strayId } as const;
+  stray.arguments = [{ name: "counter", type: strayHandle }];
+  stray.parameters = [{ ...stray.parameters[0]!, type: strayHandle }];
+  expect(validateModule(unrelated).map((error) => error.message)).toContain(
+    'Native IR binding "scriptc.fixture.c-v1@0.0.0#counter_create" names an invalid handle destructor "scriptc.fixture.c-v1@0.0.0#counter_destroy"',
+  );
+});
+
 test("Native IR rejects malformed borrowed UTF-8 C-string results", () => {
   const native = structuredClone(localNativeInput);
   const binding = native.bindings.find(
