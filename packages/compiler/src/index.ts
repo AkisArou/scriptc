@@ -249,7 +249,25 @@ export type CompileResult =
  * media type and file name before execution. The ordinary compile() API keeps
  * its default LLVM-with-C-fallback behavior for direct CLI builds. */
 /** Runtime services an embedder can require independently of the program. */
-export type ScrNativeRuntimeService = "retained-callbacks" | "native-handle";
+export type ScrNativeRuntimeService =
+  | "retained-callbacks"
+  | "native-handle"
+  /**
+   * The attached-source API an embedder that OWNS THE LOOP calls:
+   * `scr_loop_set_attached`, `scr_loop_clear_attached`, and the
+   * `scr_loop_checkpoint` each host turn owes.
+   *
+   * Distinct from `retained-callbacks` because answering a callback and
+   * pumping a loop are different capabilities. A host that answers
+   * synchronously — foreign code calls in, TypeScript answers, the call
+   * returns — never enters the loop. A host whose deliveries outlive the
+   * emission must pump one. Folding the second into the first would put
+   * a 3,300-line loop unit into every archive that only ever answers.
+   *
+   * The executable lane needs no such request: its runtime carries the
+   * loop unconditionally, because there the loop IS main.
+   */
+  | "attached-loop";
 
 export type PlanExecutableCompilationOptions = Pick<
   CompileOptions,
@@ -2514,6 +2532,9 @@ function libraryNativeBuildPlan(
       (mod.nativeTypes ?? []).some((definition) => definition.kind === "handle"),
     retainedCallbacks: required.has("retained-callbacks") ||
       moduleUsesRetainedCallbacks(mod),
+    /* Only an embedder can ask: the module never references the
+     * attached-source API, which is the whole reason the request exists. */
+    attachedLoop: required.has("attached-loop"),
   });
 }
 

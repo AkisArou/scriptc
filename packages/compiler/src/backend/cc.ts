@@ -1534,8 +1534,7 @@ async function ensureTlsArchive(
  * completed archive by program-TU content and cache runtime objects separately,
  * so an edit recompiles only the changed program object before re-archiving.
  * The base set narrows from the executable lane's unconditional sources:
- * scr_async.c (fibers, timers, the loop) and scr_child.c drop — the
- * async_free refusal already guarantees nothing references them — and
+ * scr_async.c (fibers, timers, the loop) and scr_child.c drop, and
  * scr_library.c (sink, arena, reset registry, library funnel) joins. The gated
  * units a library may reach are the pure-data ones (regex + the vendored matcher, assert,
  * inspect, symbol, searchParams, emitter+dyn_handle, zlib); every
@@ -1548,7 +1547,19 @@ async function ensureTlsArchive(
  * archive. */
 
 /** The library base: the executable lane's unconditional sources minus the
- * fiber/loop and child-process units, plus the library-mode TU. */
+ * fiber/loop and child-process units, plus the library-mode TU.
+ *
+ * Dropping the loop rested on the async_free refusal guaranteeing that
+ * nothing references it. That guarantee is about the PROGRAM, and it stopped
+ * being the whole story once an embedder could pump: a host runtime calls
+ * `scr_loop_set_attached` and `scr_loop_checkpoint` whether or not the
+ * compiled TypeScript ever awaits anything. So the condition now lives where
+ * conditions about the embedder belong — the requires channel — and an
+ * embedder that owns the loop asks for `attached-loop`.
+ *
+ * Nothing else comes with it. `scr_async.c` reaches no other dropped unit,
+ * and its I/O hook is a file-scope pointer that stays null when no poller is
+ * gated in. */
 const LIB_RUNTIME_SOURCES = [
   ...RUNTIME_SOURCES.filter(
     (f) => f !== "scr_async.c" && f !== "scr_child.c",
@@ -1612,6 +1623,9 @@ export interface LibArchiveOptions {
   textDecoderLegacy?: boolean;
   nativeHandle?: boolean;
   retainedCallbacks?: boolean;
+  /** The embedder owns the loop and calls the attached-source API, so the
+   * unit the library base drops has to come back. */
+  attachedLoop?: boolean;
   /**
    * Receives every driver and archiver invocation instead of running it.
    *
@@ -1672,6 +1686,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     ...(opts.zlib ? ["scr_zlib.c"] : []),
     ...(opts.copying ? ["scr_copying.c"] : []),
     ...(opts.nativeHandle || opts.retainedCallbacks ? ["scr_native_handle.c"] : []),
+    ...(opts.attachedLoop ? ["scr_async.c", "scr_child.c"] : []),
     ...(opts.retainedCallbacks
       ? [
           "scr_owner_gateway.c",

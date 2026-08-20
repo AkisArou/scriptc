@@ -145,28 +145,66 @@ describe("library compilation plan", () => {
     expect(objects.some((name) => name.includes("callback"))).toBe(true);
   }, 120_000);
 
-  it("produces an archive that can become a shared object", async () => {
+  it("produces an archive a host runtime can actually link into", async () => {
     const { profilePath, outDir } = stageProfile("scalars", "c");
-    const built = await compileLibrary({ profilePath, outDir });
+    const built = await compileLibrary({
+      profilePath,
+      outDir,
+      /* What a host that owns the loop asks for. Nothing in `scalars`
+       * references either service — that is the point of the request. */
+      nativeRuntimeRequires: ["retained-callbacks", "attached-loop"],
+    });
     expect(built.ok).toBe(true);
     if (!built.ok) return;
 
-    /* The property the plan CLAIMS, checked by the only consumer that can
-     * see it. Every other suite links an archive into an EXECUTABLE, where a
-     * non-PIC object links happily — which is exactly why the archive shipped
-     * without -fPIC while its contract said otherwise. A shared-object link
-     * is the first thing that notices, and it notices immediately:
-     * `relocation R_X86_64_PC32 ... can not be used when making a shared
-     * object`.
+    /* An EMBEDDER stub, not just a link. Two properties are being checked at
+     * once and both need a real consumer to be visible:
      *
-     * --whole-archive because the point is that EVERY member is embeddable,
-     * not only the ones a link happens to reference. */
+     * PIC — every archive member has to be position-independent or it cannot
+     * enter a shared object at all. Every other suite links archives into
+     * EXECUTABLES, where a non-PIC object links happily, which is exactly how
+     * the archive shipped without -fPIC while its contract claimed otherwise.
+     *
+     * SYMBOLS — the requires channel has to deliver the code behind the flag,
+     * not merely set the flag. A plan can say `retainedCallbacks: true` and
+     * still omit the unit that defines the attached-source API, and the only
+     * thing that notices is a host that calls it. So the stub calls it. */
+    const stub = join(outDir, "host.c");
+    writeFileSync(stub, [
+      "#include <stdbool.h>",
+      "#include <stddef.h>",
+      "typedef enum { SCR_ATTACHED_LOOP_POLL_COMPLETE = 0 } ScrAttachedLoopPollResult;",
+      "extern bool scr_loop_set_attached(bool (*pending)(void *),",
+      "                                  ScrAttachedLoopPollResult (*poll)(void *, double),",
+      "                                  void *context);",
+      "extern bool scr_loop_clear_attached(void *context);",
+      "extern int scr_loop_checkpoint(void);",
+      "static bool pending(void *c) { (void)c; return false; }",
+      "static ScrAttachedLoopPollResult poll_(void *c, double ms) {",
+      "  (void)c; (void)ms; return SCR_ATTACHED_LOOP_POLL_COMPLETE;",
+      "}",
+      "void nts_host_pump(void) {",
+      "  scr_loop_set_attached(pending, poll_, NULL);",
+      "  scr_loop_checkpoint();",
+      "  scr_loop_clear_attached(NULL);",
+      "}",
+      "",
+    ].join("\n"));
+
     const shared = join(outDir, "library.so");
     expect(() =>
       execFileSync("clang", [
         "-shared",
+        "-fPIC",
+        /* Without this a shared-object link ACCEPTS undefined symbols and
+         * defers them to load — which is the very failure this gate exists
+         * to catch, and why an earlier version of it passed with the runtime
+         * unit missing. `--no-undefined` moves the discovery back to the
+         * build, where the omission happened. */
+        "-Wl,--no-undefined",
         "-o",
         shared,
+        stub,
         "-Wl,--whole-archive",
         built.archivePath,
         "-Wl,--no-whole-archive",
