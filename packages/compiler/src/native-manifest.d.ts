@@ -507,8 +507,15 @@ export type IrNativeResultProjection =
    *
    * Decoded the way every other foreign byte sequence is — maximal-subpart
    * U+FFFD replacement — and NOT scanned for a terminator, because there
-   * isn't one. */
-  | { kind: "utf8Span"; release: IrNativeRelease }
+   * isn't one.
+   *
+   * `nullable` because a producer may need BOTH facts at once and no metadata
+   * separates them. A Java String result is routinely null AND may contain
+   * U+0000; nothing in a class file says which methods do which, so a
+   * projection offering only one forces a boundary to choose between
+   * refusing ordinary absence and refusing ordinary text. Absence is a value
+   * here, exactly as it is for a NUL-terminated string. */
+  | { kind: "utf8Span"; nullable: boolean; release: IrNativeRelease }
   /** An owned handle the callee may report as absent, projected as a union of
    * the handle and null. Absence is a value, not a failure. */
   | { kind: "nullableHandle" }

@@ -8038,13 +8038,19 @@ class LlEmitter {
           releaseArguments();
           return value;
         }
-        if (resultForm.kind === "utf8SpanResult") {
+        if (
+          resultForm.kind === "utf8SpanResult" ||
+          resultForm.kind === "utf8SpanResultOrNull"
+        ) {
           /* The byte-span result with a decode on the end, in the same order:
            * copy into managed storage, then free, so nothing that survives
            * points into storage the release reclaims. */
           const raw = B.tmp();
           B.line(`${raw} = ${call}`);
-          {
+          if (resultForm.kind === "utf8SpanResult") {
+            /* The contract says the text is there. A callee answering NULL
+             * has violated it — but only where the projection did not admit
+             * absence, which is what the nullable arm is for. */
             const absent = B.tmp();
             const missing = B.newLabel("native.utf8span.null");
             const present = B.newLabel("native.utf8span.ok");
@@ -8057,16 +8063,39 @@ class LlEmitter {
             B.startBlock(present);
             this.emitPendingCheck();
           }
-          const length = B.tmp();
-          B.line(`${length} = load i64, ptr ${bytesLengthSlot}`);
           /* BYTES, not elements: UTF-8 is a byte encoding, and the decoder
            * receives exactly what the callee produced — never scanned for a
-           * terminator, since text that may contain one is the point. */
+           * terminator, since text that may contain one is the point.
+           *
+           * Decoded only when there is something to decode. Handing the
+           * decoder a null pointer would either trap or build a string
+           * nothing keeps, and absence is supposed to be a value. */
           this.declare("declare ptr @scr_str_from_utf8_lossy(ptr, i64)");
+          const decoded = B.slot();
+          B.entryAllocas.push(`${decoded} = alloca ptr`);
+          {
+            const absent = B.tmp();
+            const has = B.newLabel("native.utf8span.decode");
+            const none = B.newLabel("native.utf8span.absent");
+            const join = B.newLabel("native.utf8span.decoded");
+            B.line(`${absent} = icmp eq ptr ${raw}, null`);
+            B.condBr(absent, none, has);
+            B.startBlock(has);
+            const length = B.tmp();
+            B.line(`${length} = load i64, ptr ${bytesLengthSlot}`);
+            const text = B.tmp();
+            B.line(
+              `${text} = call ptr @scr_str_from_utf8_lossy(ptr ${raw}, i64 ${length})`,
+            );
+            B.line(`store ptr ${text}, ptr ${decoded}`);
+            B.br(join);
+            B.startBlock(none);
+            B.line(`store ptr null, ptr ${decoded}`);
+            B.br(join);
+            B.startBlock(join);
+          }
           const managed = B.tmp();
-          B.line(
-            `${managed} = call ptr @scr_str_from_utf8_lossy(ptr ${raw}, i64 ${length})`,
-          );
+          B.line(`${managed} = load ptr, ptr ${decoded}`);
           if (resultForm.release !== null) {
             this.declare(`declare void @${resultForm.release}(ptr)`);
             const present = B.newLabel("native.utf8span.free");
@@ -8078,6 +8107,20 @@ class LlEmitter {
             B.line(`call void @${resultForm.release}(ptr ${raw})`);
             B.br(freed);
             B.startBlock(freed);
+          }
+          if (resultForm.kind === "utf8SpanResultOrNull") {
+            const { stringTag, nullTag, unionId } = resultForm;
+            const value = this.wrapNullable(
+              raw,
+              managed,
+              STRING,
+              stringTag,
+              { kind: "union", unionId },
+              nullTag,
+            );
+            if (callbacksMayThrow) this.emitPendingCheck();
+            releaseArguments();
+            return value;
           }
           const value = this.own({ name: managed, type: e.type });
           if (callbacksMayThrow) this.emitPendingCheck();

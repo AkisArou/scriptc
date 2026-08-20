@@ -99,6 +99,15 @@ export type NativeResultForm =
     }
   /** The same, where the callee may answer with NULL and absence is a value. */
   | {
+      readonly kind: "utf8SpanResultOrNull";
+      readonly release: string | null;
+      readonly lengthParameter: number;
+      readonly unionId: string;
+      readonly stringTag: number;
+      readonly nullTag: number;
+    }
+  /** The same, where the callee may answer with NULL and absence is a value. */
+  | {
       readonly kind: "utf8CStringArrayOrNull";
       readonly release: string | null;
       readonly unionId: string;
@@ -231,9 +240,6 @@ export function nativeResultForm(
 
   if (projection.kind === "utf8Span") {
     const release = projection.release.kind === "symbol" ? projection.release.symbol : null;
-    if (!typeEquals(sourceType, STRING)) {
-      fail("UTF-8 span result does not project as a string");
-    }
     /* The same slot the byte-span result reads, and for the same reason: a
      * length that arrives beside the pointer is the only way text containing
      * NUL can cross at all. */
@@ -241,7 +247,28 @@ export function nativeResultForm(
       (parameter) => parameter.projection.kind === "bytesLengthOut",
     );
     if (lengthParameter < 0) fail("UTF-8 span result without a length slot");
-    return { kind: "utf8SpanResult", release, lengthParameter };
+    if (!projection.nullable) {
+      if (!typeEquals(sourceType, STRING)) {
+        fail("UTF-8 span result does not project as a string");
+      }
+      return { kind: "utf8SpanResult", release, lengthParameter };
+    }
+    if (sourceType.kind !== "union") fail("nullable UTF-8 span result is not a union");
+    const unionId = (sourceType as { readonly unionId: string }).unionId;
+    const arms = tables.unionsById.get(unionId)?.arms;
+    const stringTag = armTag(arms, (arm) => typeEquals(arm, STRING));
+    const nullTag = armTag(arms, (arm) => arm.kind === "nullT");
+    if (stringTag < 0 || nullTag < 0) {
+      fail("nullable UTF-8 span result lacks string/null arms");
+    }
+    return {
+      kind: "utf8SpanResultOrNull",
+      release,
+      lengthParameter,
+      unionId,
+      stringTag,
+      nullTag,
+    };
   }
 
   if (projection.kind === "utf8CStringArray") {

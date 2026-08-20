@@ -2675,7 +2675,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       | { kind: "utf8CString"; nullable?: unknown; release?: unknown }
       | { kind: "utf8CStringArray"; nullable?: unknown; release?: unknown }
       | { kind: "bytes"; elem?: unknown; release?: unknown }
-      | { kind: "utf8Span"; release?: unknown }
+      | { kind: "utf8Span"; nullable?: unknown; release?: unknown }
       | { kind: "nullableHandle" }
       | { kind: "errorChannel" }
       | undefined;
@@ -2888,6 +2888,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         !validNativePointer(binding.result.type) ||
         binding.result.type.pointee === "ptr" ||
         binding.result.passMode !== "pointer" ||
+        typeof resultProjection.nullable !== "boolean" ||
         lengthSlots !== 1 ||
         !releaseValid ||
         /* Consumed by the projection like every other copied span: the text

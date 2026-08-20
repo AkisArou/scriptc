@@ -2990,7 +2990,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           releaseArguments();
           return result;
         }
-        if (resultForm.kind === "utf8SpanResult") {
+        if (
+          resultForm.kind === "utf8SpanResult" ||
+          resultForm.kind === "utf8SpanResultOrNull"
+        ) {
           /* The byte-span result with a decode on the end, and deliberately
            * the same order: copy into managed storage first, then free, so
            * nothing that survives points into storage the release reclaims. */
@@ -3000,19 +3003,44 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
            * violated it, and this is where that becomes catchable rather
            * than a trap or a silently empty string — the same distinction
            * between absent and empty the span family is careful about. */
-          E.line(`if (${raw} == NULL) scr_native_throw_null(${operation});`);
-          E.emitPendingCheck();
+          if (resultForm.kind === "utf8SpanResult") {
+            /* The contract says the text is there. A callee answering NULL
+             * has violated it — but only where the projection did not admit
+             * absence, which is exactly what the nullable arm is for. */
+            E.line(`if (${raw} == NULL) scr_native_throw_null(${operation});`);
+            E.emitPendingCheck();
+          }
           /* Length in BYTES here, not elements: UTF-8 is a byte encoding, and
            * the decoder is handed exactly the bytes the callee produced —
            * never scanned for a terminator, because the whole point of this
            * projection is text that may contain one. */
-          const managed = E.newTemp(
-            e.type,
-            `scr_str_from_utf8_lossy((const uint8_t *)${raw}, ${bytesLengthSlot})`,
+          const decoded = `sc_t${E.tempCounter++}`;
+          /* Decoded only when there is something to decode: the length slot
+           * describes a pointer, and handing the decoder a null one would
+           * trap where absence is supposed to be a value. */
+          E.line(
+            `ScrStr *${decoded} = ${raw} != NULL ? ` +
+              `scr_str_from_utf8_lossy((const uint8_t *)${raw}, ${bytesLengthSlot}) : NULL;`,
           );
           if (resultForm.release !== null) {
             E.line(`if (${raw} != NULL) ${resultForm.release}((void *)${raw});`);
           }
+          if (resultForm.kind === "utf8SpanResultOrNull") {
+            const { stringTag, nullTag } = resultForm;
+            const adapters = vAdapters(STRING);
+            const present =
+              `scr_union_new_ref(${stringTag}, ${decoded}, ` +
+              `&${adapters.retain}, &${adapters.release}, ${E.traceArgC(STRING)})`;
+            const absent = E.unitInstanceRef(resultForm.unionId, nullTag);
+            const result = E.newTemp(
+              e.type,
+              `${raw} != NULL ? ${present} : scr_union_retain(${absent})`,
+            );
+            if (callbacksMayThrow) E.emitPendingCheck();
+            releaseArguments();
+            return result;
+          }
+          const managed = E.newTemp(e.type, decoded);
           if (callbacksMayThrow) E.emitPendingCheck();
           releaseArguments();
           return managed;

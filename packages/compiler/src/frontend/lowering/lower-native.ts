@@ -230,10 +230,18 @@ function matchesNativeResultSource(
   if (binding.result.projection.kind === "bytes") {
     return mapped.kind === "bytes" && mapped.elem === binding.result.projection.elem;
   }
-  /* Text carried as a pointer and a length reads as a plain string, and has
-   * no nullable arm for the same reason the byte span has none: absence would
-   * need its own contract and its own motivating program. */
-  if (binding.result.projection.kind === "utf8Span") return mapped.kind === "string";
+  /* Text carried as a pointer and a length reads as a plain string, or as a
+   * string-or-null union where the producer admits absence. Both facts are
+   * needed at once by a boundary whose metadata separates neither — a Java
+   * String result is routinely null AND may contain U+0000. */
+  if (binding.result.projection.kind === "utf8Span") {
+    if (!binding.result.projection.nullable) return mapped.kind === "string";
+    if (mapped.kind !== "union") return false;
+    const spanArms = L.unions.get(mapped.unionId)?.arms;
+    return spanArms?.length === 2 &&
+      spanArms.some((arm) => arm.kind === "string") &&
+      spanArms.some((arm) => arm.kind === "nullT");
+  }
   if (!binding.result.projection.nullable) return mapped.kind === "string";
   if (mapped.kind !== "union") return false;
   const arms = L.unions.get(mapped.unionId)?.arms;
