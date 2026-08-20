@@ -61,6 +61,7 @@
  * lazy-inflate representation as the C debugging backend.
  */
 import { deflateRawSync } from "node:zlib";
+import { LLVM_LIBRARY_IDENTITY_BEGIN, LLVM_LIBRARY_IDENTITY_END } from "../library-identity.js";
 import type {
   IrBytesElem,
   IrExpr,
@@ -190,6 +191,9 @@ export interface LlvmTargetOptions {
   pointerBits?: 32 | 64;
   /** Select the WASI libc entry-point convention. */
   wasi?: boolean;
+  /** Library archive assembly may move the volatile identity getters into a
+   * separate translation unit. Public/direct emission keeps them by default. */
+  emitLibraryIdentity?: boolean;
 }
 
 export function emitLlvmModule(mod: IrModule, options: LlvmTargetOptions = {}): string {
@@ -974,6 +978,7 @@ class LlEmitter {
   readonly sizeType: "i32" | "i64";
   readonly cycleColorOffset: number;
   private readonly wasi: boolean;
+  private readonly emitLibraryIdentity: boolean;
   /** Interned string literals: UTF-8 text → { symbol, byte length } —
    * first-use order, the C emitter's determinism discipline. */
   private readonly literals = new Map<string, { sym: string; len: number }>();
@@ -1141,6 +1146,7 @@ class LlEmitter {
   constructor(private readonly mod: IrModule, options: LlvmTargetOptions) {
     this.sizeType = options.pointerBits === 32 ? "i32" : "i64";
     this.wasi = options.wasi === true;
+    this.emitLibraryIdentity = options.emitLibraryIdentity !== false;
     // ScrCycHdr is { ptr trace; ptr free; i32 color; i16 buffered;
     // i16 gen; size_t buf_index }. The object follows it, so color is 12
     // bytes behind a wasm32 object and 16 bytes behind a 64-bit object.
@@ -2322,7 +2328,7 @@ class LlEmitter {
       });
       out.push(`miss:`, `  ret i32 -1`, `}`, ``);
     }
-    if (lib.identity !== undefined) {
+    if (lib.identity !== undefined && this.emitLibraryIdentity) {
       // Profile-declared identity getters (the ask-2 sidecar's boot-time
       // pairing fence): pure data returns with NO entry prologue — exempt
       // from the poisoned guard and every runtime touch (ratified), so a
@@ -2330,6 +2336,7 @@ class LlEmitter {
       // i64 two's-complement (LLVM integer constants are signed).
       const buildId = BigInt.asIntN(64, BigInt(`0x${lib.identity.buildId}`)).toString();
       out.push(
+        LLVM_LIBRARY_IDENTITY_BEGIN,
         `define i64 @${lib.identity.buildIdSymbol}() ${FN_ATTRS} { ; identity getter build_id 0x${lib.identity.buildId}`,
         `entry:`,
         `  ret i64 ${buildId}`,
@@ -2340,6 +2347,7 @@ class LlEmitter {
         `  ret i32 ${lib.identity.abiVersion}`,
         `}`,
         ``,
+        LLVM_LIBRARY_IDENTITY_END,
       );
     }
     if (lib.resultResetSymbol !== null) {

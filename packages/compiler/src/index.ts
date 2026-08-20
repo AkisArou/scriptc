@@ -1,8 +1,9 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { buildCacheRoot, CcCompileError, compileC, compileLibArchive, mobileLibraryTarget, mobileTargetRefusal, prepareBuildCacheRoot, pruneBuildCache, resolveCc, targetPlatform } from "./backend/cc.js";
 import { emitModule } from "./backend/emission/emitter.js";
 import { emitLlvmModule, LlvmUnsupportedError } from "./backend/llvm/emitter.js";
+import { stripLibraryIdentity } from "./backend/library-identity.js";
 import { checkerPanicDiag, ffiNativeBuildDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libIntBoundaryDiag, libNpmIneligibleDiag, libSidecarDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, LIB_INBOUND_BYTES_TRAP_CODE, LIB_RUNTIME_TRAP_CODES, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
 import { checkLibraryIntegerSlots, classSeed, hasIntSlots, numberCarrierKind, type FnIntSlots, type IntSlotConfig } from "./library/int-infer.js";
 import { loadLibraryProfile, profileRemediation, profileTeaching, type LibraryProfile } from "./library/profile.js";
@@ -41,7 +42,7 @@ export const VERSION = "0.0.1";
 
 export { compileC, runtimeSrcDir, type CcOptions } from "./backend/cc.js";
 export { ANDROID_MIN_API, IPHONEOS_MIN_VERSION, isAndroidTarget, isIosTarget, isMobileTarget, mobileLibraryTarget, mobileTargetRefusal } from "./backend/cc.js";
-export { emitModule } from "./backend/emission/emitter.js";
+export { emitModule, type CEmitOptions } from "./backend/emission/emitter.js";
 export type { ScrDiagnostic } from "./diagnostics/diagnostic.js";
 export { renderAll, renderDiagnostic } from "./diagnostics/render.js";
 export { renderCoverage, type CoverageInput } from "./coverage/report.js";
@@ -1522,6 +1523,7 @@ function libraryNativeFeatures(
     zlib: moduleUsesZlib(mod),
     copying: moduleUsesCopying(mod),
     textDecoderLegacy: moduleUsesLegacyTextDecoder(mod),
+    ...(mod.lib?.identity !== undefined ? { buildId: mod.lib.identity.buildId } : {}),
   };
 }
 
@@ -1549,8 +1551,27 @@ async function compileLibraryNative(
   features: EarlyLibraryNativeFeatures,
 ): Promise<void> {
   const localizeSymbols = libraryLocalizeSymbols(profile);
+  let identityCSource: string | undefined;
+  let programSource: string | undefined;
+  if (profile.sidecar !== null) {
+    if (features.buildId === undefined) throw new Error("library identity TU has no build id");
+    const publicSource = await readFile(cPath, "utf8");
+    programSource = stripLibraryIdentity(publicSource, profile.emission);
+    if (programSource === publicSource) {
+      throw new Error("generated public library TU has no identity region");
+    }
+    identityCSource = [
+      "#include <stdint.h>",
+      "#include <inttypes.h>",
+      `uint64_t ${profile.sidecar.buildIdSymbol}(void) { return UINT64_C(0x${features.buildId}); }`,
+      `uint32_t ${profile.sidecar.abiVersionSymbol}(void) { return ${profile.sidecar.abiVersion}u; }`,
+      "",
+    ].join("\n");
+  }
   await compileLibArchive({
     cPath,
+    ...(programSource !== undefined ? { programSource } : {}),
+    ...(identityCSource !== undefined ? { identityCSource } : {}),
     outPath: archivePath,
     cacheIdentity: "scriptc-generated-library-v1",
     sanitize,
@@ -1592,6 +1613,7 @@ async function emitSemanticLibraryHit(
       modules,
     );
     mod.lib.identity.buildId = buildId;
+    hit.native.buildId = buildId;
     sidecarJson = updateSidecarIdentity(sidecarJson, buildId, sourceHash);
   }
   const validation = validateModule(mod);
@@ -1612,7 +1634,10 @@ async function emitSemanticLibraryHit(
     timing("semantic-llvm-emit", { output_bytes: Buffer.byteLength(ll) });
   } else {
     cPath = join(opts.outDir, `${stem}.lib.c`);
-    await writeFile(cPath, emitModule(mod, hit.sourceTexts.get(profile.entry)));
+    await writeFile(
+      cPath,
+      emitModule(mod, hit.sourceTexts.get(profile.entry)),
+    );
     timing("semantic-c-emit");
   }
   await rm(join(opts.outDir, `${stem}.lib.${profile.emission === "llvm" ? "c" : "ll"}`), { force: true });
@@ -2005,9 +2030,9 @@ async function compileLibraryTracked(
   // The ask-2 contract sidecar rides the same invocation. Identity first
   // (schema §2's worked build_id definition over compiler version, profile
   // bytes, and the sorted canonical module graph; source_hash per the
-  // profile's "module-graph" contract) — the u64 lands on the IR so both
-  // backends emit the identity getters from the ONE value the sidecar
-  // records (V12's coherence by construction), then the projection into
+  // profile's "module-graph" contract) — the u64 lands on the IR so native
+  // archive assembly emits the identity getters from the ONE value the
+  // sidecar records (V12's coherence by construction), then the projection into
   // the schema (declaration orders from the AST) and the V1–V14
   // self-check before anything is written.
   let sidecarJson: string | null = null;

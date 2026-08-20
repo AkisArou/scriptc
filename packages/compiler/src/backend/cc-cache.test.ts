@@ -2936,3 +2936,126 @@ test("library archives hit by content, invalidate on edits, and reuse runtime ob
     else process.env["PATH"] = oldPath;
   }
 });
+
+test("library identity edits reuse the cached large program object", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scriptc-lib-program-object-"));
+  scratch.push(dir);
+  const cacheRoot = join(dir, "cache");
+  const cPath = join(dir, "program.c");
+  const outPath = join(dir, "program.lib.a");
+  const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
+  const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+  try {
+    process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+    delete process.env["SCRIPTC_NO_CACHE"];
+    await mkdir(cacheRoot, { mode: 0o700 });
+    const programSource = "int scriptc_large_program_value(void) { return 7; }\n";
+    await writeFile(
+      cPath,
+      `${programSource}unsigned long long scriptc_build_id(void) { return 1; }\n`,
+    );
+    await compileLibArchive({
+      cPath,
+      programSource,
+      identityCSource: "unsigned long long scriptc_build_id(void) { return 1; }\n",
+      outPath,
+      cacheIdentity: TEST_CACHE_IDENTITY,
+    });
+    const [objectName] = (await readdir(join(cacheRoot, "program-obj")))
+      .filter((name) => !name.endsWith(".sha256"));
+    expect(objectName).toBeDefined();
+    const objectPath = join(cacheRoot, "program-obj", objectName!);
+    const objectDigest = await readFile(`${objectPath}.sha256`, "utf8");
+    const old = new Date("2000-01-01T00:00:00.000Z");
+    await utimes(objectPath, old, old);
+
+    await writeFile(
+      cPath,
+      `${programSource}unsigned long long scriptc_build_id(void) { return 2; }\n`,
+    );
+    await compileLibArchive({
+      cPath,
+      programSource,
+      identityCSource: "unsigned long long scriptc_build_id(void) { return 2; }\n",
+      outPath,
+      cacheIdentity: TEST_CACHE_IDENTITY,
+    });
+    expect(await readFile(`${objectPath}.sha256`, "utf8")).toBe(objectDigest);
+    expect((await stat(objectPath)).mtimeMs).toBeGreaterThan(old.getTime());
+    expect((await readdir(join(cacheRoot, "program-obj"))).filter((name) => !name.endsWith(".sha256"))).toEqual([objectName]);
+    const probeSource = join(dir, "probe.c");
+    const probe = join(dir, "probe");
+    await writeFile(
+      probeSource,
+      "#include <stdio.h>\nint scriptc_large_program_value(void);\nunsigned long long scriptc_build_id(void);\nint main(void) { printf(\"%d %llu\\n\", scriptc_large_program_value(), scriptc_build_id()); }\n",
+    );
+    execFileSync("clang", [probeSource, outPath, "-lm", "-o", probe]);
+    expect(execFileSync(probe, { encoding: "utf8" })).toBe("7 2\n");
+  } finally {
+    if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+    else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
+    if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
+    else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
+  }
+});
+
+test.skipIf(process.platform === "win32" || zigExecutable === undefined)(
+  "cross-ELF localized archives retain unreferenced identity roots",
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "scriptc-lib-localized-identity-"));
+    scratch.push(dir);
+    const cPath = join(dir, "program.c");
+    const probePath = join(dir, "probe.c");
+    const archivePath = join(dir, "program.lib.a");
+    const probeOutput = join(dir, "probe");
+    const cacheRoot = join(dir, "cache");
+    const target = "x86_64-linux-gnu.2.36";
+    const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
+    const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+    const oldCc = process.env["SCRIPTC_CC"];
+    const oldTarget = process.env["SCRIPTC_TARGET"];
+    try {
+      process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+      delete process.env["SCRIPTC_NO_CACHE"];
+      process.env["SCRIPTC_CC"] = "zigcc";
+      process.env["SCRIPTC_TARGET"] = target;
+      await writeFile(cPath, "int scriptc_large_program_value(void) { return 7; }\n");
+      await compileLibArchive({
+        cPath,
+        identityCSource: [
+          "unsigned long long scriptc_build_id(void) { return 2; }",
+          "unsigned scriptc_abi_version(void) { return 1; }",
+          "",
+        ].join("\n"),
+        outPath: archivePath,
+        cacheIdentity: TEST_CACHE_IDENTITY,
+        localizeSymbols: [
+          "scriptc_large_program_value",
+          "scriptc_build_id",
+          "scriptc_abi_version",
+        ],
+      });
+      await writeFile(probePath, [
+        "int scriptc_large_program_value(void);",
+        "unsigned long long scriptc_build_id(void);",
+        "unsigned scriptc_abi_version(void);",
+        "int main(void) {",
+        "  return scriptc_large_program_value() != 7 || scriptc_build_id() != 2 || scriptc_abi_version() != 1;",
+        "}",
+        "",
+      ].join("\n"));
+      execFileSync(zigExecutable!, [
+        "cc", "-target", target, probePath, archivePath, "-lm", "-o", probeOutput,
+      ]);
+    } finally {
+      if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+      else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
+      if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
+      else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
+      if (oldCc === undefined) delete process.env["SCRIPTC_CC"];
+      else process.env["SCRIPTC_CC"] = oldCc;
+      if (oldTarget === undefined) delete process.env["SCRIPTC_TARGET"];
+      else process.env["SCRIPTC_TARGET"] = oldTarget;
+    }
+  },
+);

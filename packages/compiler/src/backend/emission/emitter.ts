@@ -62,9 +62,20 @@ import { emitAsyncScaffolding, childDataThunkFor, childExitThunkFor, childExitTh
 import { emitNpmEmbedding, islandAdapter, islandTypedAdapter } from "./emit-island.js";
 import { emitFunction, emitBlock, emitStmts, emitStmt, emitTryCatch, emitSwitch, mergeBrace, emitBranchInto, emitCondition } from "./emit-stmts.js";
 import { emitExpr } from "./emit-exprs.js";
+import { C_LIBRARY_IDENTITY_BEGIN, C_LIBRARY_IDENTITY_END } from "../library-identity.js";
 
-export function emitModule(mod: IrModule, sourceText?: string): string {
-  return new CEmitter(mod, sourceText).emit();
+export interface CEmitOptions {
+  /** Library archive assembly may move the volatile identity getters into a
+   * separate translation unit. Public/direct emission keeps them by default. */
+  emitLibraryIdentity?: boolean;
+}
+
+export function emitModule(
+  mod: IrModule,
+  sourceText?: string,
+  options: CEmitOptions = {},
+): string {
+  return new CEmitter(mod, sourceText, options).emit();
 }
 
 // Box construction moved onto CEmitter (boxNewC method): obj-kind boxes now
@@ -414,6 +425,7 @@ export class CEmitter {
   constructor(
     readonly mod: IrModule,
     sourceText?: string,
+    private readonly options: CEmitOptions = {},
   ) {
     this.ffiCallbackAdapters = allocateFfiCallbackAdapters(mod.ffiImports ?? []);
     this.ffiHasRetainedCallback = hasRetainedFfiCallback(mod.ffiImports ?? []);
@@ -1141,12 +1153,13 @@ export class CEmitter {
       }
       out.push(`  return -1;`, `}`, ``);
     }
-    if (lib.identity !== undefined) {
+    if (lib.identity !== undefined && this.options.emitLibraryIdentity !== false) {
       // Profile-declared identity getters (the ask-2 sidecar's boot-time
       // pairing fence): pure data returns with NO entry prologue — exempt
       // from the poisoned guard and every runtime touch (ratified), so a
       // host can read them before init and after a trap.
       out.push(
+        C_LIBRARY_IDENTITY_BEGIN,
         `uint64_t ${lib.identity.buildIdSymbol}(void) {`,
         `  return UINT64_C(0x${lib.identity.buildId});`,
         `}`,
@@ -1155,6 +1168,7 @@ export class CEmitter {
         `  return ${lib.identity.abiVersion}u;`,
         `}`,
         ``,
+        C_LIBRARY_IDENTITY_END,
       );
     }
     if (lib.resultResetSymbol !== null) {
