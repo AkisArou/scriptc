@@ -1270,6 +1270,48 @@ const localNativeInput: NativeFrontendInput = {
       ],
       result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
+    /* The same failure channel with a SUB-WORD result — the pair that had no
+     * representative until now. The extension attribute a u8/i8 result
+     * carries belongs on a call and on a declare, and is a syntax error in
+     * every position that wants a bare type; the failure slot is what drives
+     * the emitter into one of those positions. */
+    ...([
+      ["u8", U8, "errorOutU8", "nts_error_out_u8"],
+      ["i8", I8, "errorOutI8", "nts_error_out_i8"],
+    ] as const).map(([scalar, type, declaration, symbol]) => ({
+      id: `scriptc.fixture.c-v1@0.0.0#error_out_${scalar}`,
+      declaration: { module: nativePackage, name: declaration },
+      entry: { symbol },
+      sourceCall: { kind: "function" as const },
+      error: {
+        detect: { kind: "outParameterIsNotNull" as const, parameter: 1 },
+        message: { kind: "symbol" as const, symbol: "nts_fixture_error_message" },
+        release: { kind: "symbol" as const, symbol: "nts_fixture_error_free" },
+      },
+      arguments: [{ name: "value", type: I32 }],
+      parameters: [
+        {
+          name: "value",
+          type: I32,
+          passMode: "value" as const,
+          ownership: { kind: "value" as const },
+          projection: { kind: "argument" as const, argument: 0 },
+        },
+        {
+          name: "error",
+          type: { kind: "nativeErrorOut" as const, addressSpace: 0 },
+          passMode: "pointer" as const,
+          ownership: { kind: "value" as const },
+          projection: { kind: "errorOut" as const },
+        },
+      ],
+      result: {
+        type,
+        passMode: "value" as const,
+        ownership: { kind: "value" as const },
+        projection: DIRECT_RESULT,
+      },
+    })),
     {
       /* The same failure channel with a STRING result the caller must free.
        * The failure arrives in a slot and reads nothing, so the result is

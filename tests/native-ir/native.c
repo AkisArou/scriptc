@@ -438,6 +438,33 @@ int32_t nts_error_out_divide(int32_t numerator, int32_t divisor,
   return numerator / divisor;
 }
 
+/* The same failure channel with a SUB-WORD result.
+ *
+ * Both facts have to meet in one callable. A u8 or i8 result is the only kind
+ * whose ABI spelling carries an extension attribute, and a failure slot is
+ * what makes a backend bind the call into a temporary before projecting it —
+ * the one position where a bare type is required instead. Either fact alone
+ * emits nothing unusual, which is why exact-integer identity bindings and
+ * error-out bindings both passed for as long as no callable had both.
+ *
+ * On failure each returns a value that would be wrong to use, so a lowering
+ * that forgets to unwind reads it and says so. */
+uint8_t nts_error_out_u8(int32_t value, NtsFixtureError **error) {
+  if (value < 0) {
+    *error = nts_error_handle_fail(value);
+    return 0xFEu;
+  }
+  return (uint8_t)(value & 0xFF);
+}
+
+int8_t nts_error_out_i8(int32_t value, NtsFixtureError **error) {
+  if (value < 0) {
+    *error = nts_error_handle_fail(value);
+    return -128;
+  }
+  return (int8_t)(value & 0x7F);
+}
+
 /* The same shape with a STRING result the caller must free. On failure it
  * hands back a pointer that would be wrong to read AND wrong to free — a
  * dangling non-null — so a lowering that projected or released before

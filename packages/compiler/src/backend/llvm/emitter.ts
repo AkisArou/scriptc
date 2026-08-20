@@ -1365,8 +1365,22 @@ class LlEmitter {
   /** C's default ABI extends integer values narrower than `int` at call
    * boundaries. LLVM represents that contract with parameter/return
    * attributes rather than in the integer type itself. */
+  /**
+   * A native result spelled as a TYPE, with no ABI extension attribute.
+   *
+   * `nativeReturnType` below adds `signext`/`zeroext` for sub-word scalars,
+   * which is required on a call and on a declare and is a syntax error
+   * everywhere a bare type is expected — `select`, `phi`, and every
+   * conversion. The two spellings coincide for every result wider than a
+   * half word, which is why the difference stayed invisible until a binding
+   * returned a u8.
+   */
+  private nativeResultValueType(t: IrNativeBinding["result"]["type"]): string {
+    return t.kind === "nativePointer" ? "ptr" : this.llType(t);
+  }
+
   private nativeReturnType(t: IrNativeBinding["result"]["type"]): string {
-    const type = t.kind === "nativePointer" ? "ptr" : this.llType(t);
+    const type = this.nativeResultValueType(t);
     if (t.kind !== "nativeScalar") return type;
     switch (t.scalar) {
       case "i8":
@@ -7309,6 +7323,12 @@ class LlEmitter {
         const returnType = aggregateResult === null
           ? this.nativeReturnType(binding.result.type)
           : this.nativePhysicalResult(aggregateResult.definition.abi.result, aggregateResult.definition);
+        /* The same result where a bare type is required rather than a call
+         * signature. An aggregate's physical spelling never carries an
+         * attribute, so only the scalar arm can differ. */
+        const returnValueType = aggregateResult === null
+          ? this.nativeResultValueType(binding.result.type)
+          : returnType;
         const parameterTypes = binding.parameters.map((parameter) => {
           if (parameter.type.kind !== "nativeStruct") {
             return [this.nativeParameterType(parameter.type)];
@@ -7886,7 +7906,7 @@ class LlEmitter {
             /* Every branch below writes `<tmp> = <call>`, so the already
              * evaluated result is spelled as a copy of itself rather than
              * threaded through each branch as a special case. */
-            call = `select i1 true, ${returnType} ${bound}, ${returnType} ${bound}`;
+            call = `select i1 true, ${returnValueType} ${bound}, ${returnValueType} ${bound}`;
           }
           for (const emit of afterCall) emit();
           /* On failure the result is not a value. Unwinding here is what lets
