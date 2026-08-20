@@ -670,6 +670,12 @@ export function elemKindC(elem: IrType): string {
   }
 }
 
+/** How many bytes one element of a typed array occupies. The runtime's own
+ * `scr_bytes_elem_size` in the two places a compiler needs the same number. */
+export function bytesElemByteSize(elem: "u8" | "u32" | "i32" | "f32"): number {
+  return elem === "u8" ? 1 : 4;
+}
+
 /** The runtime's element-kind tag for a bytes (typed array) type. */
 export function bytesElemKindC(elem: "u8" | "u32" | "i32" | "f32"): string {
   return elem === "u8" ? "SCR_BYTES_U8" : elem === "u32" ? "SCR_BYTES_U32" : elem === "i32" ? "SCR_BYTES_I32" : "SCR_BYTES_F32";

@@ -231,6 +231,9 @@ export declare function cstringArrayMeasureNamed(
 /** A span of a WIDER element, where a length counting elements and one
  * counting bytes differ by four. */
 export declare function i32SpanMake(count: i32): Int32Array;
+/** Answers the BYTE length it was handed, so which count crossed is
+ * observable rather than assumed. */
+export declare function i32SpanBytes(data: Int32Array): i32;
 /** Answers NULL where the contract says a span. Its failure is the contract
  * violation becoming a catchable error. */
 export declare function bytesAbsent(): Uint8Array;

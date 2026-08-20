@@ -3,7 +3,7 @@
  * emitter's frames (see the discipline comment in emitter core). */
 import type { CEmitter, Temp } from "./emitter.js";
 import { arrayOf, nativeIntegerInfo, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, IrRecordShape, IrType, islandPromisePayloadTag, isFfiCallbackParam, isFfiContextParam, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, nativeIntegerOpTraps, nativeScalarWidensToNumber, provenNumberLiteral, RUNTIME_ERROR_CLASSES, STRING, typeEquals, typeKey, isFfiReleaseParam } from "../../ir/nodes.js";
-import { boxAccess, BYTES_NUM_KIND_C, BYTES_NUM_VAR_C, bytesElemKindC, cDecl, cFnPtrCast, cNativeScalarLiteral, cNumberLiteral, cStringLiteral, cType, DV_GET_KIND_C, DV_SET_KIND_C, elemAccess, mapKeyAccess, mapKeyKindC, mapValKindC, releaseCallC, retainCallC, vAdapters } from "./emit-types.js";
+import { boxAccess, BYTES_NUM_KIND_C, BYTES_NUM_VAR_C, bytesElemByteSize, bytesElemKindC, cDecl, cFnPtrCast, cNativeScalarLiteral, cNumberLiteral, cStringLiteral, cType, DV_GET_KIND_C, DV_SET_KIND_C, elemAccess, mapKeyAccess, mapKeyKindC, mapValKindC, releaseCallC, retainCallC, vAdapters } from "./emit-types.js";
 import { mangleClassNew, mangleClassRetain, mangleClassStruct, mangleField, mangleFnClosure, mangleFunction, mangleGlobal, mangleLocal, mangleNativeField, mangleNativeHandleTag, mangleRecordNew, mangleRecordStruct, mangleVtStruct } from "../mangle.js";
 import { OVERFLOW_MEMBER } from "./emit-shapes.js";
 import { dynDestrCheckHelper, dynIterNHelper, dynKeyGetHelper } from "./emit-walkers.js";
@@ -2526,8 +2526,18 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             case "bytesData":
               return `(const void *)${args[form.argument]!.name}->data`;
             case "utf8ByteLength":
-            case "bytesByteLength":
               return `${args[form.argument]!.name}->len`;
+            case "bytesLength": {
+              /* `->len` is an ELEMENT count. A signature asking for bytes gets
+               * the multiplication here rather than a differently-named
+               * projection, because the two readings are one fact about one
+               * position. */
+              const count = `${args[form.argument]!.name}->len`;
+              const size = bytesElemByteSize(form.elem);
+              return form.units === "elements" || size === 1
+                ? count
+                : `(${count} * ${size})`;
+            }
             case "callbackFunction":
               return `&${E.nativeCallbackAdapter(binding.id, form.argument).symbol}`;
             case "callbackRelease":

@@ -1992,13 +1992,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         argument.type.kind !== "string" &&
         argument.type.kind !== "nullableString" &&
         argument.type.kind !== "nullableNativeHandle" &&
-        /* Still u8 only, and not for want of a runtime: the length projection
-         * beside a span ARGUMENT is named `bytesByteLength` and has always
-         * emitted an element count, which are the same number only for u8.
-         * Widening the element here would make the name a lie in the one
-         * place a reader would trust it, so the units get spelled in the
-         * manifest before a wider element arrives. */
-        !(argument.type.kind === "bytes" && argument.type.elem === "u8") &&
+        !(argument.type.kind === "bytes" && nativeSpanElems.has(argument.type.elem)) &&
         /* An array of plain strings, which is what a NUL-terminated `char **`
          * receives. One element type, because a terminated vector cannot
          * carry an absent element without ending itself where it is. */
@@ -2032,7 +2026,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       utf8Data: 0,
       utf8ByteLength: 0,
       bytesData: 0,
-      bytesByteLength: 0,
+      bytesLength: 0,
       callbackFunction: 0,
       callbackContext: 0,
       callbackRelease: 0,
@@ -2335,7 +2329,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
            * pointee. */
           if (
             sourceArgument.type.kind !== "bytes" ||
-            sourceArgument.type.elem !== "u8" ||
+            !nativeSpanElems.has(sourceArgument.type.elem) ||
             parameter.type.kind !== "nativePointer" ||
             parameter.type.pointee !== "u8" ||
             parameter.type.const !== true ||
@@ -2348,11 +2342,16 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             });
           }
           break;
-        case "bytesByteLength":
-          projectionCounts.bytesByteLength++;
+        case "bytesLength":
+          projectionCounts.bytesLength++;
+          /* The units are required rather than defaulted: which count a
+           * foreign signature takes is an ABI-adjacent fact, and a manifest
+           * that omits it has not said the one thing the field exists for. */
           if (
             sourceArgument.type.kind !== "bytes" ||
-            sourceArgument.type.elem !== "u8" ||
+            !nativeSpanElems.has(sourceArgument.type.elem) ||
+            (parameter.projection.units !== "elements" &&
+              parameter.projection.units !== "bytes") ||
             parameter.type.kind !== "nativeScalar" ||
             parameter.type.scalar !== "usize" ||
             parameter.ownership.kind !== "value"
@@ -2650,7 +2649,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             : argument.type.kind === "bytes"
               ? projections.total === 2 &&
                 projections.bytesData === 1 &&
-                projections.bytesByteLength === 1
+                projections.bytesLength === 1
               : argument.type.kind === "func"
                 /* A function value either MAKES a registration or unmakes
                  * one, never both and never neither, and each takes the same

@@ -936,6 +936,9 @@ const USES_TIMERS_LIB_FNS = new Set<string>([
 
 /** ScrBytesElem (scr_runtime.h): U8, U32, F32, I32. */
 const BYTES_ELEM_NUM: Record<"u8" | "u32" | "f32" | "i32", number> = { u8: 0, u32: 1, f32: 2, i32: 3 };
+/** Bytes per element, the runtime's `scr_bytes_elem_size` in the one place
+ * this backend needs the same number. */
+const BYTES_ELEM_SIZE: Record<"u8" | "u32" | "f32" | "i32", number> = { u8: 1, u32: 4, f32: 4, i32: 4 };
 
 /** ScrBytesNumKind + littleEndian per readNum/writeNum kind token —
  * emit-types.ts's BYTES_NUM_KIND_C with the enum values spelled out
@@ -7584,12 +7587,23 @@ class LlEmitter {
               callArgs.push(`${parameterType} ${data}`);
               return;
             }
-            case "bytesByteLength": {
+            case "bytesLength": {
               const lenPtr = B.tmp();
               const len = B.tmp();
               B.line(`${lenPtr} = getelementptr inbounds %ScrBytes, ptr ${valueOf(form.argument)}, i64 0, i32 1`);
               B.line(`${len} = load ${this.sizeType}, ptr ${lenPtr}`);
-              callArgs.push(`${parameterType} ${len}`);
+              /* The stored length is an ELEMENT count. A signature asking for
+               * bytes gets the multiplication here rather than a
+               * differently-named projection, because the two readings are
+               * one fact about one position. */
+              const elemSize = BYTES_ELEM_SIZE[form.elem];
+              if (form.units === "elements" || elemSize === 1) {
+                callArgs.push(`${parameterType} ${len}`);
+                return;
+              }
+              const scaled = B.tmp();
+              B.line(`${scaled} = mul ${this.sizeType} ${len}, ${elemSize}`);
+              callArgs.push(`${parameterType} ${scaled}`);
               return;
             }
             case "callbackFunction": {

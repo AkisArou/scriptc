@@ -1032,10 +1032,38 @@ const localNativeInput: NativeFrontendInput = {
           type: USIZE,
           passMode: "value",
           ownership: { kind: "value" },
-          projection: { kind: "bytesByteLength", argument: 0 },
+          projection: { kind: "bytesLength", argument: 0, units: "elements" },
         },
       ],
       result: { type: U64, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      /* The same wider element on the ARGUMENT side, with a length the
+       * signature wants in BYTES. Four elements is sixteen bytes, so which
+       * reading crossed is a different answer rather than a subtle one. */
+      id: "scriptc.fixture.c-v1@0.0.0#i32_span_bytes",
+      declaration: { module: nativePackage, name: "i32SpanBytes" },
+      entry: { symbol: "nts_i32_span_bytes" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      arguments: [{ name: "data", type: { kind: "bytes", elem: "i32" } }],
+      parameters: [
+        {
+          name: "data",
+          type: { kind: "nativePointer", pointee: "u8", const: true, addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "borrowed", scope: "call" },
+          projection: { kind: "bytesData", argument: 0 },
+        },
+        {
+          name: "byte_length",
+          type: USIZE,
+          passMode: "value",
+          ownership: { kind: "value" },
+          projection: { kind: "bytesLength", argument: 0, units: "bytes" },
+        },
+      ],
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
       /* A span RESULT with a wider element. The physical slot is still a
@@ -1125,7 +1153,7 @@ const localNativeInput: NativeFrontendInput = {
           type: USIZE,
           passMode: "value",
           ownership: { kind: "value" },
-          projection: { kind: "bytesByteLength", argument: 0 },
+          projection: { kind: "bytesLength", argument: 0, units: "elements" },
         },
         {
           name: "out_length",
@@ -3024,7 +3052,7 @@ test("Native IR rejects malformed or ambiguous borrowed-byte projections", () =>
     ownership: { kind: "borrowed", scope: "call" },
     projection: { kind: "bytesData", argument: 0 },
   };
-  binding.parameters[1]!.projection = { kind: "bytesByteLength", argument: 0 };
+  binding.parameters[1]!.projection = { kind: "bytesLength", argument: 0, units: "elements" };
   expect(validateModule(mutablePointer).map((error) => error.message)).toContain(
     'Native IR binding "fixture.i32_identity" parameter "data" has an invalid byte-data projection',
   );
@@ -4561,7 +4589,9 @@ describe.each(["c", "llvm"] as const)("Native IR borrowed bytes, %s backend", (b
         arguments: [{ name: "data", type: { kind: "bytes", elem: "u8" } }],
         parameters: [
           expect.objectContaining({ projection: { kind: "bytesData", argument: 0 } }),
-          expect.objectContaining({ projection: { kind: "bytesByteLength", argument: 0 } }),
+          expect.objectContaining({
+            projection: { kind: "bytesLength", argument: 0, units: "elements" },
+          }),
         ],
       }),
     );

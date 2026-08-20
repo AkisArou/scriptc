@@ -370,7 +370,10 @@ export function desugarFfiValueBinding(
           ownership: { kind: "value" },
           projection: cls === "string"
             ? { kind: "utf8ByteLength", argument: index }
-            : { kind: "bytesByteLength", argument: index },
+            /* The FFI surface's spans are u8, where the two counts agree; it
+             * still says which, because the field exists so nobody has to
+             * know that. */
+            : { kind: "bytesLength", argument: index, units: "elements" },
         });
         return;
       }

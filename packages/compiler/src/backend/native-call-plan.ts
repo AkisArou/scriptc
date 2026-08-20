@@ -406,7 +406,14 @@ export type NativeArgumentForm =
     }
   /** The two physical slots a span occupies, and the two a UTF-8 view does. */
   | {
-      readonly kind: "utf8Data" | "utf8ByteLength" | "bytesData" | "bytesByteLength";
+      readonly kind: "utf8Data" | "utf8ByteLength" | "bytesData";
+      readonly argument: number;
+    }
+  /** A span argument's length, and what it counts. */
+  | {
+      readonly kind: "bytesLength";
+      readonly units: "elements" | "bytes";
+      readonly elem: IrNativeSpanElem;
       readonly argument: number;
     }
   /** The trampoline this call registers. */
@@ -568,10 +575,18 @@ export function nativeArgumentForm(
       }
       return { kind: "cStringArray", argument };
     }
+    case "bytesLength":
+      /* The units and the element travel with the form, so neither backend
+       * decides how many bytes an element is. */
+      return {
+        kind: "bytesLength",
+        argument,
+        units: projection.units,
+        elem: valueType.kind === "bytes" ? valueType.elem : "u8",
+      };
     case "utf8Data":
     case "utf8ByteLength":
     case "bytesData":
-    case "bytesByteLength":
       return { kind: projection.kind, argument };
     case "callbackFunction":
     case "callbackContext":

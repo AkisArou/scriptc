@@ -193,6 +193,15 @@ uint8_t *nts_bytes_reverse(const uint8_t *data, size_t length, size_t *out_lengt
  * counts elements from one that counts bytes: four int32 values are four
  * elements and sixteen bytes, so a lowering that conflated them would build a
  * span four times too long or too short. Reversing keeps order observable. */
+/* A signature that wants a BYTE count beside an i32 span — the memcpy-shaped
+ * convention, where GTK's span members live. It answers the byte length it
+ * was given, so a lowering passing an element count answers a quarter of the
+ * truth and the test sees which reading crossed. */
+int32_t nts_i32_span_bytes(const int32_t *data, size_t byte_length) {
+  (void)data;
+  return (int32_t)byte_length;
+}
+
 int32_t *nts_i32_span_make(int32_t count, size_t *out_length) {
   size_t n = count < 0 ? 0 : (size_t)count;
   *out_length = n;

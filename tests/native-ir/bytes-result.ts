@@ -9,7 +9,8 @@
  * copy that read the right bytes in the wrong place is a different wrong
  * answer from one that read the wrong bytes.
  */
-import { bytesAbsent, bytesReverse, i32SpanMake, type i32 } from "@scriptc/native-abi-fixture";
+import { bytesAbsent, bytesReverse, i32SpanBytes,
+  i32SpanMake, type i32 } from "@scriptc/native-abi-fixture";
 import { exit } from "scriptc-native-test";
 
 function check(): number {
@@ -83,6 +84,13 @@ function check(): number {
   ok(wide[0] === -2000000);
   ok(wide[3] === -1700000);
   ok(i32SpanMake(0 as i32).length === 0);
+
+  /* And the other denomination, on a signature that wants bytes. Four i32
+   * elements are sixteen bytes; a lowering that passed the element count
+   * would answer four, so the two readings are distinguishable rather than
+   * merely declared. */
+  ok(i32SpanBytes(new Int32Array([1, 2, 3, 4])) === (16 as i32));
+  ok(i32SpanBytes(new Int32Array([])) === (0 as i32));
 
   return failures;
 }

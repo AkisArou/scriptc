@@ -365,12 +365,10 @@ export type IrNativeArgumentType =
    * consulting the handle table; a present handle is validated exactly as a
    * required one is. */
   | { kind: "nullableNativeHandle"; typeId: string }
-  /* A borrowed typed array, u8 only for now — the length projection beside it
-   * is named for bytes and emits elements, which coincide only here, so the
-   * units are stated in the manifest before a wider element arrives. A
-   * RESULT span has no such ambiguity: its length slot is the compiler's and
-   * counts elements by construction. */
-  | (IrBytesType & { elem: "u8" })
+  /* A borrowed typed array of any element the runtime carries. The length
+   * beside it names its own units, which is what lets an element wider than
+   * a byte cross without the two readings becoming indistinguishable. */
+  | (IrBytesType & { elem: IrNativeSpanElem })
   /** A managed array of plain strings, which is what a C API taking a
    * NUL-terminated `char **` receives. The element is not nullable: a
    * terminated vector cannot carry an absent element without ending itself
@@ -419,7 +417,16 @@ export type IrNativeParameterProjection =
   | { kind: "utf8Data"; argument: number }
   | { kind: "utf8ByteLength"; argument: number }
   | { kind: "bytesData"; argument: number }
-  | { kind: "bytesByteLength"; argument: number }
+  /** The sibling position carrying a span argument's extent, and what it
+   * counts.
+   *
+   * Required rather than defaulted, because which count a foreign signature
+   * takes is an ABI-adjacent fact and this compiler does not infer those. A
+   * `memcpy`-shaped function takes bytes and an array-shaped one takes
+   * elements; both exist, and for `u8` they are the same number, which is
+   * exactly why the earlier name — `bytesByteLength`, emitting an element
+   * count — could be wrong for as long as only `u8` crossed. */
+  | { kind: "bytesLength"; argument: number; units: "elements" | "bytes" }
   /** The compiler's own error slot. It projects no source argument: nothing
    * in the program supplies it, and nothing reads it but the error contract. */
   | { kind: "errorOut" }
