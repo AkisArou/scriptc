@@ -2748,19 +2748,18 @@ test("Native IR validates and serializes an exact i32 call without a number carr
   expect(deserializeModule(json)).toEqual(mod);
 });
 
-test("Native IR rejects a synchronously answered callback with no answer", () => {
-  /* A void answer is the queued contract's business. Admitting it here would
-   * give one delivery two spellings, and the choice between them would be
-   * invisible at the call site. */
+/* Builds the owner-scoped synchronous binding both forms share, differing only
+ * in what the handler gives back. */
+function ownerSynchronousModule(result: IrType, executor = "same-as-caller"): IrModule {
   const mod = exactI32Module();
   const binding = mod.nativeBindings![0]!;
   (binding as { arguments: unknown }).arguments = [{
     name: "callback",
-    type: { kind: "func", params: [], ret: { kind: "void" } },
+    type: { kind: "func", params: [], ret: result },
     callback: {
       owner: { kind: "result" },
       cancellationBinding: binding.id,
-      allowedInvocationExecutors: ["same-as-caller"],
+      allowedInvocationExecutors: [executor],
       synchronousReturn: true,
       sourceArguments: [],
     },
@@ -2769,18 +2768,48 @@ test("Native IR rejects a synchronously answered callback with no answer", () =>
     name: "callback",
     type: {
       kind: "nativeCallback",
-      signature: {
-        parameters: [CONTEXT],
-        result: { kind: "void" },
-            },
+      signature: { parameters: [CONTEXT], result },
     },
     passMode: "pointer",
     ownership: { kind: "callback" },
     projection: { kind: "callbackFunction", argument: 0 },
   }];
-  expect(validateModule(mod).map(({ message }) => message)).toContain(
-    `Native IR binding "${binding.id}" argument "callback" has an invalid callback contract`,
-  );
+  return mod;
+}
+
+test("a synchronous retained callback may tell as well as ask", () => {
+  /* This refused until a program needed it, on the ground that a void answer
+   * is the queued contract's business and one delivery should not have two
+   * spellings. The ground was right; the premise was not. For a framework
+   * lifecycle method the two are not one delivery — the caller invokes the
+   * handler and then reads state it was supposed to establish, so a queued
+   * delivery arrives after the reading. `fixture/Lifecycle.start` in the JVM
+   * suite is that program, and it is committed. */
+  /* Asserted as the ABSENCE of the contract refusal rather than as a clean
+   * module: the shared fixture's call site still passes an exact scalar where
+   * this binding now takes a function, which is a fixture fact and not the
+   * rule under test. Naming the message keeps the assertion pointed at the
+   * rule that changed. */
+  const contractRefusal = (mod: IrModule): boolean =>
+    validateModule(mod).some(({ message }) =>
+      message.includes(`argument "callback" has an invalid callback contract`)
+    );
+  expect(contractRefusal(ownerSynchronousModule({ kind: "void" }))).toBe(false);
+  expect(contractRefusal(ownerSynchronousModule(I32))).toBe(false);
+});
+
+test("telling synchronously relaxes nothing else about the delivery", () => {
+  /* The result is the only axis that moved. Synchronous delivery is
+   * admissible for one reason — the invocation is same-as-caller on the
+   * owner's thread, because reaching the handler means reading a closure and
+   * a foreign producer may never read one. That reason does not weaken when
+   * nothing is answered, so the executor restriction stands. */
+  const foreign = ownerSynchronousModule({ kind: "void" }, "any-attached-thread");
+  expect(
+    validateModule(foreign).some(({ message }) =>
+      message.includes(`argument "callback" has an invalid callback contract`)
+    ),
+  ).toBe(true);
 });
 
 test("Native IR rejects an f32 slot outside the number projection", () => {

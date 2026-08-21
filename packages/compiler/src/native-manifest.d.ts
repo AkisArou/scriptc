@@ -316,11 +316,22 @@ export type IrNativeCallbackContract =
       sourceArguments: readonly IrNativeCallbackSourceArgument[];
     }
   /**
-   * A retained callback the native side ASKS rather than tells: it is
-   * registered once and its answer is the value the emitting call returns.
-   * An event handler that reports whether it consumed the event has this
-   * shape, and it is common across C toolkits and window systems: such a
-   * handler cannot say so after the event is gone.
+   * A retained callback delivered DURING the caller's frame, whether or not
+   * it answers.
+   *
+   * The asking form is registered once and its answer is the value the
+   * emitting call returns. An event handler that reports whether it consumed
+   * the event has this shape, and it is common across C toolkits and window
+   * systems: such a handler cannot say so after the event is gone.
+   *
+   * The telling form answers nothing and is still synchronous, because WHEN
+   * it runs is observable even when nothing comes back. A framework lifecycle
+   * method is the case: the caller invokes it and then reads state the
+   * handler was supposed to establish, so a delivery that arrives on a later
+   * turn arrives after the question has already been answered wrongly. Which
+   * form a binding means is stated by `synchronousReturn` rather than
+   * inferred from the result type, because the queued contract is also void
+   * and the two are different deliveries rather than two spellings of one.
    *
    * So delivery is synchronous, which is admissible for exactly one reason:
    * the invocation is same-as-caller, on the thread that owns the runtime. A
@@ -333,7 +344,10 @@ export type IrNativeCallbackContract =
    * frame. It stays pending, the trampoline answers with the ABI zero, and
    * the next runtime turn reports it — the discipline a call-scoped callback
    * already follows, with the difference that here the turn rather than an
-   * outer native call is what observes it.
+   * outer native call is what observes it. A telling form has no answer to
+   * give, so it returns having done nothing else; the pending exception and
+   * where it surfaces are unchanged, which is why this form needed no new
+   * answer to the question of where a synchronous throw goes.
    */
   | {
       owner: { kind: "result" } | { kind: "argument"; argument: number };

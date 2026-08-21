@@ -1747,13 +1747,24 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           ownerCandidate["kind"] === "argument" &&
           Number.isSafeInteger(ownerCandidate["argument"]) &&
           Number(ownerCandidate["argument"]) >= 0);
-      /* A retained callback the native side asks for an answer. Synchronous
+      /* A retained callback delivered DURING the caller's frame. Synchronous
        * delivery is admissible only because the invocation is same-as-caller
-       * on the owner's thread: answering means reading a closure, and a
-       * foreign producer may never read one. The result must be a value the
-       * handler can supply — a void answer is the queued contract's business,
-       * and having two ways to spell one delivery would be worse than either.
-       * Payloads are borrowed, because nothing outlives the answer. */
+       * on the owner's thread: reaching the handler means reading a closure,
+       * and a foreign producer may never read one.
+       *
+       * The result may be void. That was refused until a program needed it,
+       * on the ground that a void answer is the queued contract's business
+       * and two ways to spell one delivery is worse than either. The ground
+       * was sound and the premise turned out to be false: for a framework
+       * lifecycle method they are not one delivery. `fixture/Lifecycle.start`
+       * calls `onCreate` and then OBSERVES it, so a queued handler runs after
+       * the observation and answers with a value that is simply wrong. Which
+       * of the two a binding means is not inferred here — `synchronousReturn`
+       * says it, and the two are distinguishable by construction.
+       *
+       * Nothing else relaxes. Payloads stay borrowed values, because nothing
+       * outlives the frame whether or not an answer comes back, and the
+       * executor stays same-as-caller for the same reason it always was. */
       if (candidate["synchronousReturn"] === true) {
         /* Only values live for the call. A copied string or an interned
          * handle payload belongs to the queued delivery that has to outlive
@@ -1771,8 +1782,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           validOwner &&
           typeof candidate["cancellationBinding"] === "string" &&
           candidate["cancellationBinding"] !== "" &&
-          executors.length === 1 && executors[0] === "same-as-caller" &&
-          type.ret.kind !== "void";
+          executors.length === 1 && executors[0] === "same-as-caller";
       }
       /* A queued delivery has no span emission: the length slot is consumed
        * when the payload is read, and the record that outlives the call has
