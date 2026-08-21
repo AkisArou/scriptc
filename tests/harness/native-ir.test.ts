@@ -588,6 +588,14 @@ const localNativeInput: NativeFrontendInput = {
     declaration: { module: nativePackage, name: "FixtureValue.answer" },
     type: I32,
     value: "42",
+  }, {
+    /* The same exact type declared as an ordinary `number`, which is the only
+     * spelling a generated surface can use: mapping runs from the underlying
+     * primitive, so a platform's `jint` is `number` however it is branded. */
+    id: "scriptc.fixture.c-v1@0.0.0#fixture_count",
+    declaration: { module: nativePackage, name: "FixtureValue.count" },
+    type: I32,
+    value: "17",
   }],
   operations: [
     {
@@ -1742,9 +1750,10 @@ const localNativeInput: NativeFrontendInput = {
     },
     {
       /* A second registration over the same C constructor, differing only in
-       * what its handler is handed. Two bindings may name one symbol: the
-       * contract is what a binding declares, and these declare different
-       * ones. */
+       * what its handler is handed. Two bindings may name one symbol because a
+       * binding declares a contract rather than a symbol — but only one of
+       * them may be REACHED per module: the validator refuses a duplicate
+       * Native IR C symbol, so a program picks the contract it means. */
       id: "scriptc.fixture.c-v1@0.0.0#maybe_judge_create",
       declaration: { module: nativePackage, name: "maybeJudgeWith" },
       entry: { symbol: "nts_judge_create" },
@@ -5783,6 +5792,35 @@ describe.each(["c", "llvm"] as const)(
       }
       expect(validateModule(deserializeModule(readFileSync(result.irPath, "utf8"))))
         .toEqual([]);
+      const run = spawnSync(result.binaryPath);
+      expect({
+        status: run.status,
+        signal: run.signal,
+        stderr: run.stderr.toString(),
+      }).toEqual({ status: 42, signal: null, stderr: "" });
+    });
+  },
+);
+
+describe.each(["c", "llvm"] as const)(
+  "Native IR constants declared as numbers, %s backend",
+  (backend) => {
+    test("admits an exact integer constant a surface can only spell as number", async () => {
+      const outDir = join(scratch, `constant-number-${backend}`);
+      const result = await compile(
+        join(repoRoot, "tests/native-ir/constant-number.ts"),
+        {
+          outDir,
+          outPath: join(outDir, "program"),
+          backend,
+          sanitize,
+          externalTypes: nativeExternalTypes(),
+          native: frontendNativeInput(),
+          nativeLinkInputs: [fixtureObject(), supportObject()],
+        },
+      );
+      expect(result.ok ? [] : result.diagnostics).toEqual([]);
+      if (!result.ok) throw new Error("number-declared constant compile failed");
       const run = spawnSync(result.binaryPath);
       expect({
         status: run.status,

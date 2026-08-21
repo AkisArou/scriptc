@@ -17,7 +17,7 @@ import type {
   NullableHandleUnionId,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { nativeArgumentScriptType, nativeCallbackIsOwnerScoped, nativeIntegerInfo, provenNumberLiteral, typeEquals, typeKey } from "../../ir/nodes.js";
+import { F64, nativeArgumentScriptType, nativeCallbackIsOwnerScoped, nativeIntegerInfo, nativeScalarWidensToNumber, provenNumberLiteral, typeEquals, typeKey } from "../../ir/nodes.js";
 import type { NativeFrontendInput } from "../native.js";
 import { locOf } from "../program.js";
 import { tsgoPath } from "../shared.js";
@@ -598,7 +598,29 @@ export function lowerNativeConstant(
     throw new PoisonError();
   }
   const mapped = L.mapTypeOf(L.typeOf(expression));
-  if (mapped === null || !typeEquals(mapped, constant.type)) {
+  /* A constant whose manifest type is an exact integer may be declared
+   * `number`, and this is the only way it CAN be declared.
+   *
+   * Mapping runs from the underlying primitive — `number` to f64, `bigint` to
+   * i64 — and a brand does not change it, so a platform's `jint` is `number`
+   * however it is spelled. Requiring the mapped type to equal the manifest's
+   * therefore admits f64 constants and refuses every integer one, which is not
+   * a rule anybody chose: the manifest is right that the class file says int,
+   * and TypeScript has no spelling that maps to i32.
+   *
+   * The admission is exact representability, asked through the same predicate
+   * the widening rules ask, so a constant and a payload cannot disagree about
+   * which integers a double carries. i64 and u64 fall out of it for the reason
+   * they fall out everywhere else, and need no case here.
+   *
+   * f32 is excluded despite widening: its values are a subset of f64's, but
+   * ScriptC has no f32 VALUE for the literal to be, so admitting one here
+   * would produce a literal that a later rule refuses — a late diagnostic
+   * about a decision made in this line. */
+  const declaredAsNumber = mapped !== null && typeEquals(mapped, F64) &&
+    constant.type.scalar !== "f32" &&
+    nativeScalarWidensToNumber(constant.type.scalar);
+  if (mapped === null || !(typeEquals(mapped, constant.type) || declaredAsNumber)) {
     L.pushDiag(nativeSignatureDiag(
       constant.id,
       `the constant maps to '${mapped === null ? L.checker.typeToString(L.typeOf(expression)) : L.fmt(mapped)}', not '${L.fmt(constant.type)}'`,
@@ -608,6 +630,15 @@ export function lowerNativeConstant(
   }
   if (constant.type.scalar === "isize" || constant.type.scalar === "usize") {
     L.usesNativeTarget = true;
+  }
+  /* Declared `number`, so it IS one. The manifest's integer type is what
+   * proved the value survives a double rather than what the expression
+   * becomes: lowering it as an exact scalar would put an i32 everywhere the
+   * program's own declaration promised a number, and every use would then be
+   * ill-typed at a site that did nothing wrong. A program wanting the exact
+   * type declares the exact type and takes the branch above. */
+  if (declaredAsNumber && !typeEquals(mapped, constant.type)) {
+    return { kind: "numLit", value: Number(constant.value), type: F64, loc };
   }
   return {
     kind: "nativeScalarLit",

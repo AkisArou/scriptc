@@ -16,6 +16,9 @@ export type f64 = number & { readonly [nativeScalar]: "f64" };
 
 export declare namespace FixtureValue {
   const answer: i32;
+  /* An i32 constant a generated surface would declare as `number`, because a
+   * brand does not change what the primitive maps to. */
+  const count: number;
   function combine(first: i32, ...rest: readonly i32[]): i32;
 }
 
