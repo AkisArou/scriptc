@@ -26,7 +26,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "./nodes.js";
-import { arrayOf, BIGINT, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, ffiClassType, ffiSourceParamTypes, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, isFfiCallbackParam, isFfiContextParam, isFfiReleaseParam, isJsonSafeType, islandPromisePayloadTag, isRefCounted, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, nativeArgumentScriptType, nativeCallbackIsOwnerScoped, nativeFailureReadsResult, nativeIntegerInfo, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, shapeHasAccessorSlots, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
+import { arrayOf, BIGINT, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, ffiClassType, ffiSourceParamTypes, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, isFfiCallbackParam, isFfiContextParam, isFfiReleaseParam, isJsonSafeType, islandPromisePayloadTag, isRefCounted, isSupportedArrayElem, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, nativeArgumentScriptType, nativeCallbackIsOwnerScoped, nativeFailureReadsResult, nativeIntegerInfo, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, shapeHasAccessorSlots, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
 
 /**
  * A published union as it arrives from OUTSIDE, with every payload field
@@ -4509,6 +4509,9 @@ function validateFunction(
           break;
         }
         const elem = e.type.elem;
+        if (!isSupportedArrayElem(elem)) {
+          err(`arrayLit with unsupported ${elem.kind} elements (frontend must fence)`, e.loc);
+        }
         const spreadSet = new Set(e.spreads ?? []);
         for (const i of spreadSet) {
           if (!Number.isInteger(i) || i < 0 || i >= e.elems.length) {
@@ -4532,6 +4535,9 @@ function validateFunction(
         }
         if (!isRefCounted(e.type.elem)) {
           err(`arrayNewLen with non-refcounted ${e.type.elem.kind} elements (no absent value)`, e.loc);
+        }
+        if (!isSupportedArrayElem(e.type.elem)) {
+          err(`arrayNewLen with unsupported ${e.type.elem.kind} elements (frontend must fence)`, e.loc);
         }
         checkExpr(e.length);
         expectType(e.length, F64, "arrayNewLen length");

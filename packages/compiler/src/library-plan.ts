@@ -13,15 +13,23 @@ import { validateModule } from "./ir/validate.js";
  * The archive settings a library implies, with every path and every piece of
  * translation-unit content removed.
  *
- * `programSource` and `identityCSource` are omitted rather than carried:
- * both are derived from the emitted translation unit at archive time, when
- * the volatile build id is split into its own tiny unit, so a plan carrying
- * them would duplicate the very unit it already describes.
+ * `programSource`, `identityCSource`, `programShards` and
+ * `programPublicSymbols` are omitted rather than carried: all four are derived
+ * from the emitted translation unit at archive time — the volatile build id
+ * split into its own tiny unit, and a large dev-mode LLVM program sharded for
+ * parallel compilation — so a plan carrying them would duplicate, several
+ * times over, the very unit it already describes.
  */
 export type LibraryNativeBuildPlan = Readonly<
   Omit<
     LibArchiveOptions,
-    "cPath" | "outPath" | "commandExecutor" | "programSource" | "identityCSource"
+    | "cPath"
+    | "outPath"
+    | "commandExecutor"
+    | "programSource"
+    | "identityCSource"
+    | "programShards"
+    | "programPublicSymbols"
   >
 >;
 

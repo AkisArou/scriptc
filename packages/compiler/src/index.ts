@@ -3,6 +3,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { CcCompileError, buildCacheRoot, compileC, compileLibArchive, mobileLibraryTarget, mobileTargetRefusal, prepareBuildCacheRoot, pruneBuildCache, resolveCc, targetPlatform, type CcOptions } from "./backend/cc.js";
 import { emitModule } from "./backend/emission/emitter.js";
 import { emitLlvmModule, LlvmUnsupportedError } from "./backend/llvm/emitter.js";
+import { splitLlvmProgram } from "./backend/llvm/split.js";
 import { checkerPanicDiag, ffiNativeBuildDiag, libAsyncExportDiag, libAsyncSurfaceDiag, libExportUnresolvedDiag, libGenericExportDiag, libIntBoundaryDiag, libNpmIneligibleDiag, libSidecarDiag, libUnmappableSignatureDiag, iceDiag, isCheckerPanic, LIB_INBOUND_BYTES_TRAP_CODE, LIB_RUNTIME_TRAP_CODES, nativeBindingDiag, nativeBuildDiag, nativeCrossingDiag, nativeSignatureDiag, nativeTargetDiag, type ScrDiagnostic } from "./diagnostics/diagnostic.js";
 import { checkLibraryIntegerSlots, classSeed, hasIntSlots, numberBoundaryFacts, numberCarrierKind, type FnIntSlots, type IntSlotConfig } from "./ir/number-facts.js";
 import { loadLibraryProfile, profileRemediation, profileTeaching, type LibraryProfile } from "./library/profile.js";
@@ -2637,7 +2638,14 @@ async function buildLibraryArchive(
 ): Promise<void> {
   let programSource: string | undefined;
   let identityCSource: string | undefined;
-  if (profile.sidecar !== null || record.backend === "c") {
+  /* Upstream shards a large dev-mode LLVM program so clang compiles the pieces
+   * in parallel. It is gated where it pays and nowhere else: a dev build of a
+   * big unit, never under a sanitizer, whose instrumentation is the very thing
+   * such a build exists to observe. Reading the unit is the precondition, so
+   * the gate has to be decided before the read rather than at the archive. */
+  const splitEligible = record.backend === "llvm" &&
+    record.archive.optimization === "dev" && record.archive.sanitize !== true;
+  if (profile.sidecar !== null || record.backend === "c" || splitEligible) {
     programSource = await readFile(cPath, "utf8");
   }
   if (profile.sidecar !== null) {
@@ -2662,10 +2670,21 @@ async function buildLibraryArchive(
   if (record.backend === "c") {
     programSource = stripLibrarySourceComments(programSource!, profile.entry);
   }
+  /* After the identity split and the comment strip, so the shards describe the
+   * unit that is actually compiled rather than the one on disk. */
+  const llvmSplit = splitEligible && programSource !== undefined
+    ? splitLlvmProgram(programSource)
+    : null;
   await compileLibArchive({
     ...record.archive,
     ...(programSource !== undefined ? { programSource } : {}),
     ...(identityCSource !== undefined ? { identityCSource } : {}),
+    ...(llvmSplit !== null
+      ? {
+          programShards: llvmSplit.shards,
+          programPublicSymbols: llvmSplit.publicSymbols,
+        }
+      : {}),
     cPath,
     outPath: archivePath,
   });
