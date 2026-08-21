@@ -561,3 +561,27 @@ export function nativeQueuedPayloadCleanup(
   }
   return { copiedStrings, ownedHandles };
 }
+
+/**
+ * How many pointer-sized fields `ScrCallbackInvocation` occupies before a
+ * queued invocation's own payload fields begin.
+ *
+ * The C backend never needs this: it names the runtime struct and lets the C
+ * compiler place what follows. LLVM has no such option — a queued invocation
+ * is a flat literal type there, so the base has to be spelled out, and every
+ * payload field is addressed by an index counted from it.
+ *
+ * It was spelled as the bare number 7, twice, with nothing tying it to the
+ * header it describes. The count is:
+ *
+ *   ScrOwnerGatewayEvent  next, deliver, destroy                      3
+ *   ScrCallbackInvocation signature, invoke, payload_destroy, token   4
+ *
+ * Adding a field to either struct is an ordinary runtime change that would
+ * leave the C backend correct and silently move every LLVM payload index by
+ * one — reading a string out of what is now the token slot. Naming it here
+ * puts the number in one place; `native-callbacks.test.ts` reads the header
+ * and fails when the header stops agreeing with it, which is the half that
+ * makes the name worth having.
+ */
+export const NATIVE_CALLBACK_INVOCATION_BASE_FIELDS = 7;

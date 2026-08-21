@@ -90,7 +90,7 @@ import type {
 import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, islandPromisePayloadTag, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, moduleHasProcessScopedRegistration, nativeCallbackSourceScriptType, nativeDestructorBindingIds, nativeIntegerInfo, nativeIntegerOpTraps, nativeScalarWidensToNumber, NPM_COMPRESS_MIN, provenNumberLiteral, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID, isFfiReleaseParam } from "../../ir/nodes.js";
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
-import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, nativeCallLifecycle, nativeCallbackPayloads, nativeQueuedPayloadCleanup, nativeTrampolineForm, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
+import { NATIVE_CALLBACK_INVOCATION_BASE_FIELDS, allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, nativeCallLifecycle, nativeCallbackPayloads, nativeQueuedPayloadCleanup, nativeTrampolineForm, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
 import { nativeArgumentBorrow, nativeArgumentHandle, nativeArgumentForm, nativeCallDisposal, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultCopy, nativeResultForm, nativeResultHandle, type NativeArgumentFormExhausted } from "../native-call-plan.js";
 import { computeMayThrow } from "../emission/may-throw.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleNativeHandleTag, mangleNativeStruct, mangleRecordClone, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
@@ -1867,7 +1867,7 @@ class LlEmitter {
         const injectsOwner = adapter.contract.sourceArguments.some(
           (argument) => argument.kind === "registration-owner",
         );
-        const ownerField = 7;
+        const ownerField = NATIVE_CALLBACK_INVOCATION_BASE_FIELDS;
         const physicalFieldBase = ownerField + (injectsOwner ? 1 : 0);
         const invocationType = `%${adapter.symbol}_invocation`;
         const signatureId = `@${adapter.symbol}_signature`;
@@ -1882,7 +1882,7 @@ class LlEmitter {
          * a second way. */
         const { copiedStrings, ownedHandles } = nativeQueuedPayloadCleanup(payloads);
         const fields = [
-          ...Array.from({ length: 7 }, () => "ptr"),
+          ...Array.from({ length: NATIVE_CALLBACK_INVOCATION_BASE_FIELDS }, () => "ptr"),
           ...(injectsOwner ? ["ptr"] : []),
           ...signature.parameters.map((parameter, index) =>
             copiedStrings.has(index) || ownedHandles.has(index) ||
