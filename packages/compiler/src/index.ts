@@ -2629,12 +2629,29 @@ function libraryNativeBuildPlan(
  * hit that assembled its archive by a second route would be free to assemble
  * it differently, and the difference would surface as a link error in the
  * embedder rather than as a failure here.
+ *
+ * It carries upstream's NAME and parameter order deliberately, because
+ * upstream wrote this function independently and edits it often — three times
+ * in the four days after it appeared. Two functions doing one job under two
+ * names are not merged by git; they are ported by hand, every time, by someone
+ * who first has to notice the port is needed. Under one name an upstream edit
+ * arrives as an ordinary three-way merge and conflicts only where it touches
+ * what this fork changed.
+ *
+ * What it changes is the last parameter. Upstream passes the reached runtime
+ * units and recomputes the remaining archive settings from the profile; this
+ * fork passes the settings themselves, because three of them — native handles,
+ * retained callbacks, the attached loop — are read off the lowered module or
+ * the embedder's request, and a cache hit has no module to read. Upstream's
+ * separate `sanitize` parameter is gone for the same reason: the record
+ * already carries it, and a parameter that restates its neighbour is one more
+ * thing two call sites can disagree about.
  */
-async function buildLibraryArchive(
+async function compileLibraryNative(
   profile: LibraryProfile,
-  record: EarlyLibraryNativeRecord,
   cPath: string,
   archivePath: string,
+  native: EarlyLibraryNativeRecord,
 ): Promise<void> {
   let programSource: string | undefined;
   let identityCSource: string | undefined;
@@ -2643,14 +2660,14 @@ async function buildLibraryArchive(
    * big unit, never under a sanitizer, whose instrumentation is the very thing
    * such a build exists to observe. Reading the unit is the precondition, so
    * the gate has to be decided before the read rather than at the archive. */
-  const splitEligible = record.backend === "llvm" &&
-    record.archive.optimization === "dev" && record.archive.sanitize !== true;
-  if (profile.sidecar !== null || record.backend === "c" || splitEligible) {
+  const splitEligible = native.backend === "llvm" &&
+    native.archive.optimization === "dev" && native.archive.sanitize !== true;
+  if (profile.sidecar !== null || native.backend === "c" || splitEligible) {
     programSource = await readFile(cPath, "utf8");
   }
   if (profile.sidecar !== null) {
-    if (record.buildId === undefined) throw new Error("library identity TU has no build id");
-    const withoutIdentity = stripLibraryIdentity(programSource!, record.backend);
+    if (native.buildId === undefined) throw new Error("library identity TU has no build id");
+    const withoutIdentity = stripLibraryIdentity(programSource!, native.backend);
     if (withoutIdentity === programSource) {
       throw new Error("generated public library TU has no identity region");
     }
@@ -2658,7 +2675,7 @@ async function buildLibraryArchive(
     identityCSource = [
       "#include <stdint.h>",
       "#include <inttypes.h>",
-      `uint64_t ${profile.sidecar.buildIdSymbol}(void) { return UINT64_C(0x${record.buildId}); }`,
+      `uint64_t ${profile.sidecar.buildIdSymbol}(void) { return UINT64_C(0x${native.buildId}); }`,
       `uint32_t ${profile.sidecar.abiVersionSymbol}(void) { return ${profile.sidecar.abiVersion}u; }`,
       "",
     ].join("\n");
@@ -2667,7 +2684,7 @@ async function buildLibraryArchive(
    * generated file. They carry no code, so the compiler never sees them — and
    * stripping them means a comment-only edit leaves the compiled input
    * unchanged, which is the whole basis of the semantic tier below. */
-  if (record.backend === "c") {
+  if (native.backend === "c") {
     programSource = stripLibrarySourceComments(programSource!, profile.entry);
   }
   /* After the identity split and the comment strip, so the shards describe the
@@ -2676,7 +2693,7 @@ async function buildLibraryArchive(
     ? splitLlvmProgram(programSource)
     : null;
   await compileLibArchive({
-    ...record.archive,
+    ...native.archive,
     ...(programSource !== undefined ? { programSource } : {}),
     ...(identityCSource !== undefined ? { identityCSource } : {}),
     ...(llvmSplit !== null
@@ -2765,7 +2782,7 @@ async function emitSemanticLibraryHit(
     irPath = join(opts.outDir, `${stem}.lib.ir.json`);
     await writeFile(irPath, serializeModule(mod));
   }
-  await buildLibraryArchive(profile, record, cPath, archivePath);
+  await compileLibraryNative(profile, cPath, archivePath, record);
   timing("native-archive");
   let sidecarPath: string | undefined;
   if (sidecarJson !== null) {
@@ -2861,7 +2878,7 @@ async function compileLibraryTracked(
   const earlyHit = await readEarlyLibraryCache(cacheRoot, cacheOptions, sidecarConfigured);
   if (earlyHit !== null) {
     timing("early-cache-hit");
-    await buildLibraryArchive(profile, earlyHit.native, earlyHit.cPath, archivePath);
+    await compileLibraryNative(profile, earlyHit.cPath, archivePath, earlyHit.native);
     timing("native-archive");
     timing("complete");
     return {
@@ -2935,7 +2952,7 @@ async function compileLibraryTracked(
       opts.nativeRuntimeRequires ?? [],
     ),
   };
-  await buildLibraryArchive(profile, record, cPath, archivePath);
+  await compileLibraryNative(profile, cPath, archivePath, record);
   timing("native-archive");
 
   // The sidecar lands beside the compiled object, written by the same
