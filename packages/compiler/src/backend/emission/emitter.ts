@@ -166,7 +166,7 @@ function nativePayloadReadC(payload: NativeCallbackPayload): string {
   }
 }
 
-/** A handler's answer, written into the physical result's representation./** A handler's answer, written into the physical result's representation.
+/** A handler's answer, written into the physical result's representation.
  * An exact answer is already that representation; a boolean answers with the
  * two values the declaration names; an ordinary number narrows, naming which
  * conversion it performs — the same choice a parameter position makes, for
