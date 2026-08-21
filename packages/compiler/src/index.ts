@@ -39,7 +39,8 @@ import { hasForeignFfiCallback } from "./backend/ffi-callbacks.js";
 import { FrontendInputTracker, trackedReadFile } from "./frontend/input-tracker.js";
 import { libraryFrontendImplementationFingerprint, publishEarlyLibraryCache, readEarlyLibraryCache, readSemanticLibraryCache, type EarlyLibraryCacheOptions, type EarlyLibraryCachePublish, type EarlyLibraryNativeFeatures, type SemanticLibraryCacheHit } from "./library/early-cache.js";
 import { createSourceLineRebaser } from "./library/semantic-source.js";
-import { publishEarlyExecutableCache, readEarlyExecutableCache, type EarlyExecutableCacheOptions, type EarlyExecutableNativeFeatures } from "./executable/early-cache.js";
+import { publishEarlyExecutableCache, publishEarlyExecutableRoute, readEarlyExecutableCache, type EarlyExecutableCacheOptions, type EarlyExecutableNativeFeatures } from "./executable/early-cache.js";
+import { compilerImplementationIdentity } from "./library/implementation-identity.js";
 
 export const VERSION = "0.0.1";
 
@@ -988,6 +989,7 @@ async function compileTracked(
   const cacheRoot = provenanceSources() === null
     ? await prepareBuildCacheRoot(buildCacheRoot())
     : null;
+  const implementation = await compilerImplementationIdentity();
   const earlyCacheOptions: EarlyExecutableCacheOptions = {
     entryPath,
     outDir: opts.outDir,
@@ -1005,10 +1007,15 @@ async function compileTracked(
     compiler: [process.env["SCRIPTC_CC"] ?? "clang"],
     nativeEnvironment: await executableNativeEnvironmentFingerprint(),
     nodeVersion: process.version,
-    implementation: await libraryFrontendImplementationFingerprint(),
+    implementation: implementation.digest,
+    implementationDependencies: implementation.dependencies,
   };
   const earlyHit = await readEarlyExecutableCache(cacheRoot, earlyCacheOptions);
   if (earlyHit !== null) {
+    // Route/proof metadata is independently evictable. A full-compiler
+    // fallback that still finds the validated payload repairs that lightweight
+    // index so the next identical CLI invocation can avoid this module graph.
+    await publishEarlyExecutableRoute(cacheRoot, earlyCacheOptions).catch(() => undefined);
     if (earlyHit.executableRestored) {
       await pruneBuildCache(cacheRoot);
       return {
