@@ -3049,6 +3049,74 @@ function ownerSynchronousModule(result: IrType, executor = "same-as-caller"): Ir
   return mod;
 }
 
+/* A registration nothing in the program owns, carrying an object.
+ *
+ * The shape a framework dispatch takes when the PLATFORM constructs the
+ * receiver: there is no instance to anchor a registration to at the moment
+ * one could be made, so the owner is the process and the receiver arrives as
+ * an ordinary payload instead of an injected registration-owner. */
+function processCallbackModule(
+  payload: IrType | null,
+  result: IrType = { kind: "void" },
+): IrModule {
+  const mod = exactI32Module();
+  const binding = mod.nativeBindings![0]!;
+  const params = payload === null ? [] : [payload];
+  (binding as { arguments: unknown }).arguments = [{
+    name: "callback",
+    type: { kind: "func", params, ret: result },
+    callback: {
+      owner: { kind: "process" },
+      allowedInvocationExecutors: ["same-as-caller"],
+      synchronousReturn: true,
+      sourceArguments: payload === null
+        ? []
+        : [{ kind: "callback-parameter", parameter: 0, destructor: COUNTER_DESTROY }],
+    },
+  }];
+  (binding as { parameters: unknown }).parameters = [{
+    name: "callback",
+    type: {
+      kind: "nativeCallback",
+      signature: { parameters: [...params, CONTEXT], result },
+    },
+    passMode: "pointer",
+    ownership: { kind: "callback" },
+    projection: { kind: "callbackFunction", argument: 0 },
+  }];
+  return mod;
+}
+
+test("a process-owned registration may carry a handle payload", () => {
+  /* No test anywhere reached a process-owned Native IR contract before this
+   * one — the arm was declared, validated and produced by the FFI desugar
+   * path, and exercised through Native IR by nothing. The Android acceptance
+   * app needs exactly this shape, because the platform constructs the
+   * receiver: at the moment a registration could be made there is no
+   * instance, and at the moment the instance exists the callback has already
+   * fired. The receiver therefore arrives as a payload rather than as an
+   * injected registration-owner, which is what makes the owner the process. */
+  const refused = (mod: IrModule): boolean =>
+    validateModule(mod).some(({ message }) =>
+      message.includes(`argument "callback" has an invalid callback contract`)
+    );
+  expect(refused(processCallbackModule(null))).toBe(false);
+  expect(refused(processCallbackModule(COUNTER))).toBe(false);
+});
+
+test("a process-owned registration answers nothing and injects no owner", () => {
+  /* The two facts the arm rests on, asserted rather than read off a key list.
+   * A library calling a stored callback at a moment of its own choosing has
+   * nowhere to put an answer, and there is no owner whose disposal could
+   * cancel it — which is why a release names the function VALUE back instead,
+   * and why this arm carries no cancellation binding to omit. */
+  const refused = (mod: IrModule): boolean =>
+    validateModule(mod).some(({ message }) =>
+      message.includes(`argument "callback" has an invalid callback contract`)
+    );
+  expect(refused(processCallbackModule(COUNTER, I32))).toBe(true);
+});
+
 test("a synchronous retained callback may tell as well as ask", () => {
   /* This refused until a program needed it, on the ground that a void answer
    * is the queued contract's business and one delivery should not have two
