@@ -10,7 +10,7 @@ import { dynDestrCheckHelper, dynIterNHelper, dynKeyGetHelper } from "./emit-wal
 import { genResultThunkFor } from "./emit-async.js";
 import { nativeCallbackCancellationArgument } from "../native-callbacks.js";
 import { nativeCallLifecycle } from "../native-callbacks.js";
-import { nativeArgumentForm, nativeCallDisposal, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultCopy, nativeResultForm, type NativeArgumentFormExhausted } from "../native-call-plan.js";
+import { nativeArgumentForm, nativeCallDisposal, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultCopy, nativeResultForm, nativeResultHandle, type NativeArgumentFormExhausted } from "../native-call-plan.js";
 
 function streamTypedRefCommitAdapter(
   E: CEmitter,
@@ -2870,7 +2870,13 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
            * a throw, so a container with no child has answered rather than
            * failed. A present object still goes through the identity map, so
            * two reads of one object name one cell. */
-          const { definition, destructor, handleTag, nullTag } = resultForm;
+          const plan = nativeResultHandle(
+            resultForm,
+            binding.error.detect.kind === "resultIsNull",
+            lifecycle.registrationOwner,
+          );
+          const { definition, destructor } = plan;
+          const { presentTag: handleTag, nullTag } = plan.absent!;
           const handleType = { kind: "nativeHandle", typeId: definition.id } as const;
           const raw = `sc_t${E.tempCounter++}`;
           const cell = `sc_t${E.tempCounter++}`;
@@ -2911,7 +2917,12 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           return result;
         }
         if (resultForm.kind === "handle") {
-          const { definition, destructor } = resultForm;
+          const plan = nativeResultHandle(
+            resultForm,
+            binding.error.detect.kind === "resultIsNull",
+            lifecycle.registrationOwner,
+          );
+          const { definition, destructor } = plan;
           const raw = `sc_t${E.tempCounter++}`;
           const prepared = `sc_t${E.tempCounter++}`;
           E.line(
@@ -2919,7 +2930,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               `&${destructor}, &${mangleNativeHandleTag(definition.id)}, ` +
               `${cStringLiteral(Buffer.from(definition.nativeName, "utf8"))});`,
           );
-          const retainedOwnerArgument = lifecycle.registrationOwner;
+          const retainedOwnerArgument = plan.prepareBeforeCall!.ownerArgument;
           if (retainedOwnerArgument !== null) {
             E.line(
               `scr_native_handle_prepare_owner(${prepared}, ` +
@@ -2935,7 +2946,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
            * that cell is the answer, and the reference the callee handed over
            * is surplus — releasing it is what stops a second projection from
            * outliving the object it names. */
-          const interns = definition.identity === "pointer";
+          const interns = plan.interns;
           const result = E.newTemp(e.type, "NULL");
           if (interns) {
             const existing = `sc_t${E.tempCounter++}`;
@@ -2950,13 +2961,13 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             E.line(`${result.name} = ${existing};`);
             E.indent--;
             E.line(`} else if (${raw} == NULL) {`);
-          } else if (binding.error.detect.kind === "resultIsNull") {
+          } else if (plan.onNull === "throw") {
             E.line(`if (${raw} == NULL) {`);
           }
-          if (interns || binding.error.detect.kind === "resultIsNull") {
+          if (plan.onNull !== "unchecked") {
             E.indent++;
             E.line(`scr_native_handle_abandon(${prepared});`);
-            if (binding.error.detect.kind === "resultIsNull") {
+            if (plan.onNull === "throw") {
               E.line(`if (!scr_exc_pending()) scr_native_throw_null(${operation});`);
             } else {
               E.line(

@@ -91,7 +91,7 @@ import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, islandPr
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
 import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, nativeCallLifecycle, nativeCallbackPayloads, nativeTrampolineForm, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
-import { nativeArgumentForm, nativeCallDisposal, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultCopy, nativeResultForm, type NativeArgumentFormExhausted } from "../native-call-plan.js";
+import { nativeArgumentForm, nativeCallDisposal, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultCopy, nativeResultForm, nativeResultHandle, type NativeArgumentFormExhausted } from "../native-call-plan.js";
 import { computeMayThrow } from "../emission/may-throw.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleNativeHandleTag, mangleNativeStruct, mangleRecordClone, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
@@ -8245,7 +8245,13 @@ class LlEmitter {
         if (resultForm.kind === "handleOrNull") {
           /* Absence is a value: NULL becomes the union's null arm rather than
            * a throw. A present object still goes through the identity map. */
-          const { definition, destructor, handleTag, nullTag } = resultForm;
+          const plan = nativeResultHandle(
+            resultForm,
+            binding.error.detect.kind === "resultIsNull",
+            lifecycle.registrationOwner,
+          );
+          const { definition, destructor } = plan;
+          const { presentTag: handleTag, nullTag } = plan.absent!;
           const handleType = { kind: "nativeHandle", typeId: definition.id } as const;
           this.declare(`declare void @${destructor}(ptr)`);
           this.declare(`declare ptr @scr_native_handle_prepare(ptr, ptr, ptr)`);
@@ -8309,7 +8315,12 @@ class LlEmitter {
           return value;
         }
         if (resultForm.kind === "handle") {
-          const { definition, destructor } = resultForm;
+          const plan = nativeResultHandle(
+            resultForm,
+            binding.error.detect.kind === "resultIsNull",
+            lifecycle.registrationOwner,
+          );
+          const { definition, destructor } = plan;
           this.declare(`declare void @${destructor}(ptr)`);
           this.declare(`declare ptr @scr_native_handle_prepare(ptr, ptr, ptr)`);
           this.declare(`declare void @scr_native_handle_commit(ptr, ptr)`);
@@ -8320,7 +8331,7 @@ class LlEmitter {
               `ptr @${destructor}, ptr @${mangleNativeHandleTag(definition.id)}, ` +
               `ptr ${this.cstr(definition.nativeName)})`,
           );
-          const retainedOwnerArgument = lifecycle.registrationOwner;
+          const retainedOwnerArgument = plan.prepareBeforeCall!.ownerArgument;
           if (retainedOwnerArgument !== null) {
             this.declare(`declare void @scr_native_handle_prepare_owner(ptr, ptr)`);
             B.line(
@@ -8342,7 +8353,7 @@ class LlEmitter {
           /* An interned type answers about the object rather than about which
            * call produced the reference, so an existing cell wins and the
            * reference the callee handed over is released. */
-          const interns = definition.identity === "pointer";
+          const interns = plan.interns;
           if (interns) {
             const resultSlot = B.slot();
             B.entryAllocas.push(`${resultSlot} = alloca ptr ; interned native handle result`);
@@ -8374,7 +8385,7 @@ class LlEmitter {
             B.condBr(isNull, nullBlock, wrapBlock);
             B.startBlock(nullBlock);
             B.line(`call void @scr_native_handle_abandon(ptr ${prepared})`);
-            if (binding.error.detect.kind === "resultIsNull") {
+            if (plan.onNull === "throw") {
               this.declare("declare zeroext i1 @scr_exc_pending()");
               const pending = B.tmp();
               B.line(`${pending} = call zeroext i1 @scr_exc_pending()`);
@@ -8401,7 +8412,7 @@ class LlEmitter {
             B.startBlock(continuation);
             result = B.tmp();
             B.line(`${result} = load ptr, ptr ${resultSlot}`);
-          } else if (binding.error.detect.kind === "resultIsNull") {
+          } else if (plan.onNull === "throw") {
             const resultSlot = B.slot();
             B.entryAllocas.push(`${resultSlot} = alloca ptr ; nullable native handle result`);
             B.line(`store ptr null, ptr ${resultSlot}`);

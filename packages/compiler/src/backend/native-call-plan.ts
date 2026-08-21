@@ -962,3 +962,77 @@ export function nativeResultCopy(form: NativeResultCopyForm): NativeResultCopy {
     }
   }
 }
+
+/** The result forms that produce an owned native handle. */
+export type NativeResultHandleForm = Extract<
+  NativeResultForm,
+  { kind: "handle" | "handleOrNull" }
+>;
+
+/**
+ * How an owned handle result reaches a managed cell.
+ *
+ * Both backends walked this tree by hand, and the two arms differ in a way
+ * neither said out loud. `handle` PREPARES THE CELL BEFORE THE CALL, because a
+ * registration owner and any retained callback tokens have to be attached to
+ * it while the callee still might fire a callback; `handleOrNull` prepares
+ * lazily, after, because it has nothing to attach. That ordering is load
+ * bearing and invisible in either ladder.
+ *
+ * `interns` is faithful to each arm rather than unified, and the difference is
+ * recorded rather than decided here: the nullable arm asks the identity map
+ * unconditionally while the non-nullable arm asks only for pointer identity.
+ * The runtime makes the extra ask harmless — `scr_native_handle_interned`
+ * answers NULL immediately for a type that does not intern — so this is a
+ * call that cannot matter rather than a defect, and collapsing it would change
+ * emitted output for no behavioural gain.
+ */
+export interface NativeResultHandle {
+  readonly definition: IrNativeHandleDef;
+  readonly destructor: string;
+  /** Whether a live cell for the same pointer IS the answer, making the
+   * reference the callee handed over surplus. */
+  readonly interns: boolean;
+  /** Present when the cell is prepared before the call, naming the argument
+   * that owns the registration, if any. */
+  readonly prepareBeforeCall: { readonly ownerArgument: number | null } | null;
+  /** What a NULL pointer means here. `value` is the union's null arm, `throw`
+   * is the declared failure, `trap` is a contract nobody can honour — a
+   * non-failing call that produced nothing — and `unchecked` is a type that
+   * neither interns nor declares null as failure, where no test is emitted. */
+  readonly onNull: "value" | "throw" | "trap" | "unchecked";
+  readonly absent: {
+    readonly unionId: string;
+    readonly presentTag: number;
+    readonly nullTag: number;
+  } | null;
+}
+
+/** The handle description for a form already narrowed to the handle arms. */
+export function nativeResultHandle(
+  form: NativeResultHandleForm,
+  failsOnNullResult: boolean,
+  registrationOwner: number | null,
+): NativeResultHandle {
+  if (form.kind === "handleOrNull") {
+    return {
+      definition: form.definition,
+      destructor: form.destructor,
+      interns: true,
+      prepareBeforeCall: null,
+      onNull: "value",
+      absent: { unionId: form.unionId, presentTag: form.handleTag, nullTag: form.nullTag },
+    };
+  }
+  const interns = form.definition.identity === "pointer";
+  return {
+    definition: form.definition,
+    destructor: form.destructor,
+    interns,
+    prepareBeforeCall: { ownerArgument: registrationOwner },
+    /* A type that neither interns nor declares null as failure emits no test
+     * at all: there is no cell to abandon and no contract to report. */
+    onNull: failsOnNullResult ? "throw" : interns ? "trap" : "unchecked",
+    absent: null,
+  };
+}
