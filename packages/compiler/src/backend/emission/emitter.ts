@@ -146,6 +146,41 @@ function cstringNullTrapC(index: number): string {
 
 /** One payload, read where the library left it. The DECISION is the shared
  * plan's; this is only how C spells it. */
+/**
+ * The lines that turn an OWNED foreign pointer into a managed handle cell.
+ *
+ * Both delivery shapes need it and for the same reason: a handle payload
+ * arrives with a reference the contract's destructor gives back, and a handler
+ * must receive a cell rather than the pointer — so that two payloads naming
+ * one object name one cell, and so that keeping the handle keeps the object.
+ *
+ * The interned branch is not an optimisation. A live cell for this pointer
+ * already owns a reference, so the one that just arrived is surplus and
+ * releasing it here is what stops a second cell from outliving the object.
+ */
+function nativeHandleCellC(
+  cell: string,
+  pointer: string,
+  tag: string,
+  free: string,
+  nativeName: string,
+  clear: string | null,
+): string[] {
+  return [
+    `  ScrNativeHandle *${cell} = scr_native_handle_interned(&${tag}, ${pointer});`,
+    `  if (${cell} != NULL) {`,
+    `    ${free}(${pointer});`,
+    `  } else {`,
+    `    ${cell} = scr_native_handle_prepare(&${free}, &${tag}, ` +
+      `${cStringLiteral(Buffer.from(nativeName, "utf8"))});`,
+    `    scr_native_handle_commit(${cell}, ${pointer});`,
+    `  }`,
+    /* The reference moved into the cell, so whatever else would have released
+     * it must stop naming it. */
+    ...(clear === null ? [] : [`  ${clear} = NULL;`]),
+  ];
+}
+
 function nativePayloadReadC(payload: NativeCallbackPayload): string {
   switch (payload.kind) {
     case "registrationOwner":
@@ -2184,17 +2219,14 @@ export class CEmitter {
           if (definition?.kind !== "handle") {
             throw new Error(`emitter bug: unknown payload handle ${owned.typeId}`);
           }
-          handleCells.push(
-            `  ScrNativeHandle *${cell} = scr_native_handle_interned(&${tag}, sc_invocation->sc_a${index});`,
-            `  if (${cell} != NULL) {`,
-            `    ${owned.free}(sc_invocation->sc_a${index});`,
-            `  } else {`,
-            `    ${cell} = scr_native_handle_prepare(&${owned.free}, &${tag}, ` +
-              `${cStringLiteral(Buffer.from(definition.nativeName, "utf8"))});`,
-            `    scr_native_handle_commit(${cell}, sc_invocation->sc_a${index});`,
-            `  }`,
-            `  sc_invocation->sc_a${index} = NULL;`,
-          );
+          handleCells.push(...nativeHandleCellC(
+            cell,
+            `sc_invocation->sc_a${index}`,
+            tag,
+            owned.free,
+            definition.nativeName,
+            `sc_invocation->sc_a${index}`,
+          ));
           return cell;
         });
         const call = `(${cFnPtrCast(nativeCallbackSourceSignature(sourceType))}sc_cb->fn)(sc_cb${args.length > 0 ? `, ${args.join(", ")}` : ""})`;
