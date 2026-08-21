@@ -2175,6 +2175,14 @@ class LlEmitter {
         }
         continue;
       }
+      /* Every shape above leaves through `continue`, so reaching here means
+       * the form is call-scoped. Spelling that as a TYPE is what makes a
+       * fourth shape a build failure instead of a silent call-scoped
+       * emission: this union is read by both backends and neither switched on
+       * it, so an unhandled arm would have been lowered wrongly in both, with
+       * nothing to notice. */
+      const remainingShape: "call-scoped" = form.shape;
+      void remainingShape;
       /* A signature with no userdata slot cannot be handed its closure, so
        * the call lends one through this thread-local for its own dynamic
        * extent. The NULL check below is what makes an invocation outside that
@@ -7277,6 +7285,11 @@ class LlEmitter {
               B.startBlock(done);
             }
           } else {
+            /* The two arms above are exhaustive but for requireProcess; saying
+             * so as a type is what makes a fourth setup kind a build failure
+             * rather than a silent require-process emission. */
+            const remainingSetup: "requireProcess" = step.kind;
+            void remainingSetup;
             this.declare(`declare ptr @scr_retained_callbacks_require_process(ptr)`);
             B.line(
               `${token} = call ptr @scr_retained_callbacks_require_process(ptr ${closure})`,
@@ -7868,6 +7881,11 @@ class LlEmitter {
             B.line(`store ptr ${token}, ptr @${step.slot}`);
             return;
           }
+          /* Both arms above return; reaching here means releaseProcess. The C
+           * backend gets this from a total switch; LLVM's if-chain needs the
+           * type spelled out to fail the same way. */
+          const remainingTeardown: "releaseProcess" = step.kind;
+          void remainingTeardown;
           /* The slot must not outlive the registration it names, and only the
            * registration it actually names may clear it. */
           if (step.clearSlot !== null) {

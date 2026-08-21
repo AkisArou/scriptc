@@ -2242,6 +2242,14 @@ export class CEmitter {
         );
         continue;
       }
+      /* Every shape above leaves through `continue`, so reaching here means
+       * the form is call-scoped. Spelling that as a TYPE is what makes a
+       * fourth shape a build failure instead of a silent call-scoped
+       * emission: this union is read by both backends and neither switched on
+       * it, so an unhandled arm would have been lowered wrongly in both, with
+       * nothing to notice. */
+      const remainingShape: "call-scoped" = form.shape;
+      void remainingShape;
       /* Everything that outlives its call is handled above, through a token.
        * What is left is the call-scoped callback, which reaches its closure
        * directly: the context slot IS the closure pointer. */

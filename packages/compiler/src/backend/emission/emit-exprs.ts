@@ -2318,6 +2318,11 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               E.line(`if (${step.armSlot} == NULL) ${step.armSlot} = ${token};`);
             }
           } else {
+            /* The two arms above return; reaching here means requireProcess.
+             * Spelling it as a type is what makes a fourth setup kind a build
+             * failure rather than a silent require-process emission. */
+            const remainingSetup: "requireProcess" = step.kind;
+            void remainingSetup;
             E.line(
               `ScrCallbackToken *${token} = scr_retained_callbacks_require_process(${closure});`,
             );
