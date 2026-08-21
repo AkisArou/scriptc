@@ -46,7 +46,7 @@ import type {
 } from "../../ir/nodes.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
 import { nativeIntegerInfo, nativeCallbackIsOwnerScoped, nativeCallbackSourceSignature, moduleHasProcessScopedRegistration, nativeDestructorBindingIds, funcOf, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, STRING, VOID } from "../../ir/nodes.js";
-import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackPayloads, nativeTrampolineForm, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
+import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackPayloads, nativeQueuedPayloadCleanup, nativeTrampolineForm, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
 import {
   mangleAsyncSpawn,
   mangleGenSpawn,
@@ -2033,16 +2033,7 @@ export class CEmitter {
        * the decode happens when the signal fires — and an owned handle
        * arrives already referenced, so the invocation owns one and the
        * dropped path has to give it back. */
-      const copiedStrings = new Set<number>(
-        payloads.flatMap((payload) => payload.kind === "cstring" ? [payload.slot] : []),
-      );
-      const ownedHandles = new Map<number, { typeId: string; free: string }>(
-        payloads.flatMap((payload) =>
-          payload.kind === "ownedHandle"
-            ? [[payload.slot, { typeId: payload.typeId, free: payload.free }] as const]
-            : []
-        ),
-      );
+      const { copiedStrings, ownedHandles } = nativeQueuedPayloadCleanup(payloads);
       const ret = cType(signature.result).trim();
       /* A registration a foreign thread may raise cannot be delivered where
        * it is raised: reading a closure is a script-thread operation. The

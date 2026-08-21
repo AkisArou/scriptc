@@ -518,3 +518,46 @@ function resolveCancellation(
   }
   return { argument, typeId: type.typeId };
 }
+
+/** What a queued invocation must give back if it is dropped instead of run. */
+export interface NativeQueuedPayloadCleanup {
+  /** Slots holding a string this invocation copied out of foreign storage. */
+  readonly copiedStrings: ReadonlySet<number>;
+  /** Slots holding a handle reference this invocation owns, with the binding
+   * that gives that reference back. */
+  readonly ownedHandles: ReadonlyMap<
+    number,
+    { readonly typeId: string; readonly free: string }
+  >;
+}
+
+/**
+ * The slots a dropped queued delivery has to release.
+ *
+ * A queued invocation materializes its payloads before the delivery runs,
+ * because the thread that raised it may not be the thread that can read a
+ * closure. Two of those payload kinds are OWNED — a copied string and a
+ * retained handle reference — so a delivery that is dropped rather than run
+ * still has to give them back.
+ *
+ * Both backends computed this, and computed it differently: one filtered the
+ * payloads, the other walked the contract's source arguments and re-derived
+ * the same conditions from the adapter's parameter kinds. They agreed, which
+ * is the only reason it was not a defect — `nativeCallbackPayloads` produces
+ * an `ownedHandle` under exactly the condition the second derivation tested
+ * for, and a `cstring` under exactly the other. Two computations that agree by
+ * construction are still two places for one answer to change.
+ */
+export function nativeQueuedPayloadCleanup(
+  payloads: readonly NativeCallbackPayload[],
+): NativeQueuedPayloadCleanup {
+  const copiedStrings = new Set<number>();
+  const ownedHandles = new Map<number, { typeId: string; free: string }>();
+  for (const payload of payloads) {
+    if (payload.kind === "cstring") copiedStrings.add(payload.slot);
+    else if (payload.kind === "ownedHandle") {
+      ownedHandles.set(payload.slot, { typeId: payload.typeId, free: payload.free });
+    }
+  }
+  return { copiedStrings, ownedHandles };
+}

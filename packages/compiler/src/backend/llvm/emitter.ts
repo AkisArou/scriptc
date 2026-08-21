@@ -90,7 +90,7 @@ import type {
 import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, islandPromisePayloadTag, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, moduleHasProcessScopedRegistration, nativeCallbackSourceScriptType, nativeDestructorBindingIds, nativeIntegerInfo, nativeIntegerOpTraps, nativeScalarWidensToNumber, NPM_COMPRESS_MIN, provenNumberLiteral, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID, isFfiReleaseParam } from "../../ir/nodes.js";
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
-import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, nativeCallLifecycle, nativeCallbackPayloads, nativeTrampolineForm, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
+import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, nativeCallLifecycle, nativeCallbackPayloads, nativeQueuedPayloadCleanup, nativeTrampolineForm, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
 import { nativeArgumentBorrow, nativeArgumentHandle, nativeArgumentForm, nativeCallDisposal, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultCopy, nativeResultForm, nativeResultHandle, type NativeArgumentFormExhausted } from "../native-call-plan.js";
 import { computeMayThrow } from "../emission/may-throw.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleNativeHandleTag, mangleNativeStruct, mangleRecordClone, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
@@ -1876,33 +1876,11 @@ class LlEmitter {
         /* Physical slots whose source value is a string. The pointer the
          * emitter passes must not be stored: a queued delivery outlives it, so
          * the copy is made when the callback fires and the record holds that. */
-        const copiedStrings = new Set<number>(
-          adapter.contract.sourceArguments.flatMap((argument, sourceIndex) =>
-            argument.kind === "callback-parameter" &&
-              adapter.source.params[sourceIndex]?.kind === "cstring"
-              ? [argument.parameter]
-              : []
-          ),
-        );
-        /* Owned handle payloads, and the binding that gives each reference
-         * back. The pointer arrives already retained by the emitter, so the
-         * invocation owns one and the dropped path has to release it. */
-        const ownedHandles = new Map<number, { typeId: string; free: string }>();
-        adapter.contract.sourceArguments.forEach((argument, sourceIndex) => {
-          if (argument.kind !== "callback-parameter") return;
-          const sourceParam = adapter.source.params[sourceIndex];
-          if (argument.destructor === undefined || sourceParam?.kind !== "nativeHandle") {
-            return;
-          }
-          const free = this.nativeById.get(argument.destructor);
-          if (free === undefined) {
-            throw new Error(`llvm emitter bug: unknown payload destructor ${argument.destructor}`);
-          }
-          ownedHandles.set(argument.parameter, {
-            typeId: sourceParam.typeId,
-            free: free.entry.symbol,
-          });
-        });
+        /* Both owned payload kinds, from the payloads themselves. This used to
+         * re-derive them from the contract's source arguments and the
+         * adapter's parameter kinds — the same answer by construction, reached
+         * a second way. */
+        const { copiedStrings, ownedHandles } = nativeQueuedPayloadCleanup(payloads);
         const fields = [
           ...Array.from({ length: 7 }, () => "ptr"),
           ...(injectsOwner ? ["ptr"] : []),
