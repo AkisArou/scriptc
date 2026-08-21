@@ -1730,7 +1730,43 @@ class LlEmitter {
         );
         return `double %a${payload.slot}.wide`;
       }
-      case "ownedHandle":
+      case "ownedHandle": {
+        /* The reference the toolkit handed over moves into a managed cell, so
+         * the handler receives something that owns its object rather than a
+         * pointer about to be reclaimed. The interned branch is not an
+         * optimisation: a live cell for this pointer already owns a reference,
+         * making the one that just arrived surplus, and releasing it there is
+         * what stops a second cell from outliving the object. */
+        const definition = this.nativeTypesById.get(payload.typeId);
+        if (definition?.kind !== "handle") {
+          throw new Error(`llvm emitter bug: unknown payload handle ${payload.typeId}`);
+        }
+        const tag = mangleNativeHandleTag(payload.typeId);
+        const slot = payload.slot;
+        const reuse = `cell${slot}.reuse`;
+        const fresh = `cell${slot}.fresh`;
+        const done = `cell${slot}.done`;
+        this.declare("declare ptr @scr_native_handle_interned(ptr, ptr)");
+        this.declare("declare ptr @scr_native_handle_prepare(ptr, ptr, ptr)");
+        this.declare("declare void @scr_native_handle_commit(ptr, ptr)");
+        this.declare(`declare void @${payload.free}(ptr)`);
+        prepare.push(
+          `  %existing${slot} = call ptr @scr_native_handle_interned(ptr @${tag}, ptr %a${slot})`,
+          `  %existing${slot}.found = icmp ne ptr %existing${slot}, null`,
+          `  br i1 %existing${slot}.found, label %${reuse}, label %${fresh}`,
+          `${reuse}:`,
+          `  call void @${payload.free}(ptr %a${slot})`,
+          `  br label %${done}`,
+          `${fresh}:`,
+          `  %prepared${slot} = call ptr @scr_native_handle_prepare(` +
+            `ptr @${payload.free}, ptr @${tag}, ptr ${this.cstr(definition.nativeName)})`,
+          `  call void @scr_native_handle_commit(ptr %prepared${slot}, ptr %a${slot})`,
+          `  br label %${done}`,
+          `${done}:`,
+          `  %cell${slot} = phi ptr [ %existing${slot}, %${reuse} ], [ %prepared${slot}, %${fresh} ]`,
+        );
+        return `ptr %cell${slot}`;
+      }
       case "direct":
         return `${this.llType(payload.scriptType)} %a${payload.slot}`;
     }
@@ -1780,7 +1816,19 @@ class LlEmitter {
          * token in a replaceable global instead of being handed one. Kept in
          * lockstep with the C backend. */
         const voids = signature.result.kind === "void";
-        const bail = voids ? "ret void" : `ret ${rawRet} ${pendingResult}`;
+        /* Every bail is a path where the reference was handed over and the
+         * handler will not run, so it goes back here. Leaving without it would
+         * leak the object on exactly the paths nobody exercises — a disposed
+         * registration, an already-unwinding turn, a closure already gone. */
+        const bailReleases = payloads.flatMap((payload) => {
+          if (payload.kind !== "ownedHandle") return [];
+          this.declare(`declare void @${payload.free}(ptr)`);
+          return [`  call void @${payload.free}(ptr %a${payload.slot})`];
+        });
+        const bail = [
+          ...bailReleases,
+          voids ? "ret void" : `ret ${rawRet} ${pendingResult}`,
+        ].join("\n  ");
         const tok = form.closure.kind === "tokenGlobal" ? "%tok" : "%ctx";
         this.declare(`declare ptr @scr_callback_table_acquire(ptr, ${this.sizeType}, i64, ptr)`);
         this.declare(`declare void @scr_closure_release(ptr)`);

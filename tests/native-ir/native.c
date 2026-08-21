@@ -686,6 +686,80 @@ void nts_counter_destroy(NtsCounter *counter) {
 
 int32_t nts_counter_destroyed_count(void) { return nts_counter_destroyed; }
 
+/* Two registrations that hand a handler an OBJECT while it runs inside the
+ * caller's frame — the pair no fixture inhabited, and the reason this exists.
+ *
+ * Handle payloads are reachable on the queued path, and synchronous delivery
+ * is reachable with exact scalars. Their INTERSECTION was reachable from
+ * neither, which is the shape that lets two complete-looking test lists agree
+ * while the pair they imply is unreachable. `tell` and `judge` are that pair's
+ * programs, one per synchronous form.
+ *
+ * Transfer is FULL in both. The subject is created per invocation and the
+ * handler's cell owns it, which is the only spelling JNI has for an object
+ * reaching a callback: a local reference dies with the native frame, so the
+ * adapter promotes it and the cell's destructor is what gives it back. */
+typedef void (*NtsTellCallback)(NtsCounter *subject, void *context);
+
+typedef struct NtsTeller {
+  NtsTellCallback callback;
+  void *context;
+} NtsTeller;
+
+static int32_t nts_tell_marks = 0;
+
+NtsTeller *nts_teller_create(NtsTellCallback callback, void *context) {
+  NtsTeller *teller = calloc(1, sizeof *teller);
+  if (teller == NULL) return NULL;
+  teller->callback = callback;
+  teller->context = context;
+  return teller;
+}
+
+/* The handler calls this, so a mark appearing before `tell` returns is what
+ * separates synchronous delivery from queued. */
+void nts_tell_mark(void) { nts_tell_marks++; }
+
+/* The `onCreate` shape: tells rather than asks, and is handed an object. Reads
+ * its mark AFTER invoking, so a delivery that arrived on a later turn answers
+ * 0 where the truth is 1. */
+int32_t nts_teller_tell(NtsTeller *teller, int32_t seed) {
+  nts_tell_marks = 0;
+  NtsCounter *subject = nts_counter_create(seed);
+  teller->callback(subject, teller->context);
+  return nts_tell_marks;
+}
+
+void nts_teller_destroy(NtsTeller *teller) { free(teller); }
+
+/* The `onKeyDown` shape, and the conjunction the JVM acceptance pin needs: a
+ * synchronous handler that ANSWERS a boolean while holding both a scalar and
+ * an object. The answer is the emitting call's result, so a delivery that
+ * arrived later would answer with this function's own zero rather than the
+ * handler's. */
+typedef int32_t (*NtsJudgeCallback)(int32_t code, NtsCounter *subject,
+                                    void *context);
+
+typedef struct NtsJudge {
+  NtsJudgeCallback callback;
+  void *context;
+} NtsJudge;
+
+NtsJudge *nts_judge_create(NtsJudgeCallback callback, void *context) {
+  NtsJudge *judge = calloc(1, sizeof *judge);
+  if (judge == NULL) return NULL;
+  judge->callback = callback;
+  judge->context = context;
+  return judge;
+}
+
+int32_t nts_judge_ask(NtsJudge *judge, int32_t code, int32_t seed) {
+  NtsCounter *subject = nts_counter_create(seed);
+  return judge->callback(code, subject, judge->context);
+}
+
+void nts_judge_destroy(NtsJudge *judge) { free(judge); }
+
 int32_t nts_counter_verify(int32_t actual_value, int32_t actual_destroyed,
                            int32_t expected_value, int32_t expected_destroyed) {
   return actual_value == expected_value && actual_destroyed == expected_destroyed

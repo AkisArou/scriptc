@@ -1766,13 +1766,27 @@ export function validateModule(mod: IrModule): IrValidationError[] {
        * outlives the frame whether or not an answer comes back, and the
        * executor stays same-as-caller for the same reason it always was. */
       if (candidate["synchronousReturn"] === true) {
-        /* Only values live for the call. A copied string or an interned
-         * handle payload belongs to the queued delivery that has to outlive
-         * the emission; here nothing does, and pretending otherwise would
-         * hand a handler a pointer the toolkit still owns. */
+        /* Values live for the call, and a handle payload may cross beside
+         * them. Neither is a copy that outlives the frame: the payload arrives
+         * OWNED — `validSourceArguments` above has already established that a
+         * `nativeHandle` parameter carries a destructor and that nothing else
+         * does — so the reference moves into a managed cell exactly as it does
+         * on the queued path, and a handler that keeps the handle keeps a cell
+         * that owns its object rather than a pointer the toolkit reclaims.
+         *
+         * Where a toolkit only LENDS an object for the frame, promotion is the
+         * adapter's job and not a second contract: a JNI local reference dies
+         * with the native frame, so the adapter promotes it and the cell's
+         * destructor is what gives the promotion back. There is no borrowed
+         * handle form here because there is none in the runtime either.
+         *
+         * A copied string still has no arm. That is a length question rather
+         * than an ownership one — the copy is what gives a queued payload its
+         * bytes, and a borrowed C string is already expressible as a value. */
         if (
           !type.params.every((parameter) =>
-            parameter.kind === "f64" || validNativeScalar(parameter)
+            parameter.kind === "f64" || parameter.kind === "nativeHandle" ||
+            validNativeScalar(parameter)
           )
         ) {
           return false;

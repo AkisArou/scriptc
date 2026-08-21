@@ -660,6 +660,18 @@ function lowerNativeInvocation(
     if (argument.callback && nativeCallbackIsOwnerScoped(argument.callback)) {
       L.usedNativeBindingIds.add(argument.callback.cancellationBinding);
     }
+    /* A payload destructor is reached through the CONTRACT and nowhere else.
+     * The program never names it — the reference arrives with the payload and
+     * the trampoline gives it back — so a binding reached only this way would
+     * be stripped, and the emitter would fail resolving a destructor the
+     * contract still points at. Every other binding a contract depends on is
+     * marked here for the same reason; this one was missing because no program
+     * had a handle payload until one did. */
+    for (const source of argument.callback?.sourceArguments ?? []) {
+      if (source.kind === "callback-parameter" && source.destructor !== undefined) {
+        L.usedNativeBindingIds.add(source.destructor);
+      }
+    }
   }
   for (const argument of binding.arguments) {
     if (argument.type.kind === "nativeStruct" || argument.type.kind === "nativeHandle") {

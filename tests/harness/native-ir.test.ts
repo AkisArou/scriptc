@@ -357,6 +357,76 @@ const ASK_BOOL_CONTRACT = {
   ...ASK_I32_CONTRACT,
   cancellationBinding: "scriptc.fixture.c-v1@0.0.0#answerer_destroy",
 } as const satisfies IrNativeCallbackContract;
+/* The two synchronous deliveries that hold an OBJECT while they run, which is
+ * the pair no fixture inhabited. Handle payloads were reachable on the queued
+ * path and synchronous delivery was reachable with exact scalars; their
+ * intersection was reachable from neither. */
+const TELLER_ID = "scriptc.fixture.c-v1@0.0.0#type:teller";
+const TELLER = { kind: "nativeHandle", typeId: TELLER_ID } as const;
+const JUDGE_ID = "scriptc.fixture.c-v1@0.0.0#type:judge";
+const JUDGE = { kind: "nativeHandle", typeId: JUDGE_ID } as const;
+const COUNTER_DESTROY = "scriptc.fixture.c-v1@0.0.0#counter_destroy";
+
+/* The `onCreate` shape: answers nothing, and the object is the whole payload.
+ * The physical slot is the handle type itself — an opaque pointer at the ABI,
+ * a managed cell to the handler. */
+const TELL_CALLBACK = {
+  parameters: [COUNTER, CONTEXT],
+  result: { kind: "void" },
+} as const;
+const TELL_SOURCE = nativeCallbackArgumentType(TELL_CALLBACK);
+const TELL_CONTRACT = {
+  owner: { kind: "result" },
+  cancellationBinding: "scriptc.fixture.c-v1@0.0.0#teller_destroy",
+  allowedInvocationExecutors: ["same-as-caller"],
+  synchronousReturn: true,
+  sourceArguments: [
+    { kind: "callback-parameter", parameter: 0, destructor: COUNTER_DESTROY },
+  ],
+} as const satisfies IrNativeCallbackContract;
+
+/* The `onKeyDown` shape, and the conjunction the JVM acceptance pin needs: a
+ * boolean answer alongside a scalar AND an object. */
+const JUDGE_CALLBACK = {
+  parameters: [I32, COUNTER, CONTEXT],
+  result: I32,
+} as const;
+const JUDGE_SOURCE = {
+  ...nativeCallbackArgumentType(JUDGE_CALLBACK),
+  ret: { kind: "bool", falseValue: "0", trueValue: "1" },
+} as const;
+const JUDGE_CONTRACT = {
+  owner: { kind: "result" },
+  cancellationBinding: "scriptc.fixture.c-v1@0.0.0#judge_destroy",
+  allowedInvocationExecutors: ["same-as-caller"],
+  synchronousReturn: true,
+  sourceArguments: [
+    { kind: "callback-parameter", parameter: 0 },
+    { kind: "callback-parameter", parameter: 1, destructor: COUNTER_DESTROY },
+  ],
+} as const satisfies IrNativeCallbackContract;
+
+const TELLER_DEFINITION = {
+  kind: "handle",
+  id: TELLER_ID,
+  declaration: { module: nativePackage, name: "Teller" },
+  nativeName: "NtsTeller",
+  threadSafety: "confined",
+  identity: "pointer",
+  cycleCollection: "none",
+  upcasts: [],
+} as const satisfies NativeFrontendInput["types"][number];
+const JUDGE_DEFINITION = {
+  kind: "handle",
+  id: JUDGE_ID,
+  declaration: { module: nativePackage, name: "Judge" },
+  nativeName: "NtsJudge",
+  threadSafety: "confined",
+  identity: "pointer",
+  cycleCollection: "none",
+  upcasts: [],
+} as const satisfies NativeFrontendInput["types"][number];
+
 const VAULT_DEFINITION = {
   kind: "handle",
   id: VAULT_ID,
@@ -462,6 +532,8 @@ const localNativeInput: NativeFrontendInput = {
       type: SUBSCRIPTION,
     },
     { declaration: { module: nativePackage, name: "Asker" }, type: ASKER },
+    { declaration: { module: nativePackage, name: "Teller" }, type: TELLER },
+    { declaration: { module: nativePackage, name: "Judge" }, type: JUDGE },
     { declaration: { module: nativePackage, name: "Vault" }, type: VAULT },
   ],
   constants: [{
@@ -516,6 +588,8 @@ const localNativeInput: NativeFrontendInput = {
     COUNTER_DEFINITION,
     SUBSCRIPTION_DEFINITION,
     ASKER_DEFINITION,
+    TELLER_DEFINITION,
+    JUDGE_DEFINITION,
     VAULT_DEFINITION,
   ],
   exports: [],
@@ -1493,6 +1567,139 @@ const localNativeInput: NativeFrontendInput = {
       /* The boolean flavor of the same registration, over the same C
        * symbols: the handler answers true or false and the emitter reads the
        * exact storage value each one means. */
+      /* The two synchronous registrations that hold an object. Their callbacks
+       * differ only in what comes back, which is the axis these fixtures
+       * exist to separate. */
+      /* Called by the handler, so the mark appearing before `tell` returns is
+       * what separates synchronous delivery from queued. */
+      id: "scriptc.fixture.c-v1@0.0.0#tell_mark",
+      declaration: { module: nativePackage, name: "tellMark" },
+      entry: { symbol: "nts_tell_mark" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([]),
+      result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#teller_create",
+      declaration: { module: nativePackage, name: "tellWith" },
+      entry: { symbol: "nts_teller_create" },
+      sourceCall: { kind: "function" },
+      error: NULL_IS_FAILURE,
+      arguments: [
+        { name: "callback", type: TELL_SOURCE, callback: TELL_CONTRACT },
+      ],
+      parameters: [
+        {
+          name: "callback",
+          type: { kind: "nativeCallback", signature: TELL_CALLBACK },
+          passMode: "pointer",
+          ownership: { kind: "callback" },
+          projection: { kind: "callbackFunction", argument: 0 },
+        },
+        {
+          name: "context",
+          type: { kind: "nativeContext", addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "callback" },
+          projection: { kind: "callbackContext", argument: 0 },
+        },
+      ],
+      result: {
+        type: TELLER,
+        passMode: "pointer",
+        ownership: {
+          kind: "owned",
+          transfer: "to-runtime",
+          destructor: "scriptc.fixture.c-v1@0.0.0#teller_destroy",
+        },
+        projection: DIRECT_RESULT,
+      },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#teller_destroy",
+      declaration: { module: nativePackage, name: "Teller.dispose" },
+      entry: { symbol: "nts_teller_destroy" },
+      sourceCall: { kind: "method", receiverArgument: 0 },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "teller", type: TELLER, passMode: "pointer", ownership: { kind: "owned", transfer: "to-native" } },
+      ]),
+      result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#teller_tell",
+      declaration: { module: nativePackage, name: "Teller.tell" },
+      entry: { symbol: "nts_teller_tell" },
+      sourceCall: { kind: "method", receiverArgument: 0 },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "teller", type: TELLER, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
+        { name: "seed", type: I32, passMode: "value", ownership: { kind: "value" } },
+      ]),
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#judge_create",
+      declaration: { module: nativePackage, name: "judgeWith" },
+      entry: { symbol: "nts_judge_create" },
+      sourceCall: { kind: "function" },
+      error: NULL_IS_FAILURE,
+      arguments: [
+        { name: "callback", type: JUDGE_SOURCE, callback: JUDGE_CONTRACT },
+      ],
+      parameters: [
+        {
+          name: "callback",
+          type: { kind: "nativeCallback", signature: JUDGE_CALLBACK },
+          passMode: "pointer",
+          ownership: { kind: "callback" },
+          projection: { kind: "callbackFunction", argument: 0 },
+        },
+        {
+          name: "context",
+          type: { kind: "nativeContext", addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "callback" },
+          projection: { kind: "callbackContext", argument: 0 },
+        },
+      ],
+      result: {
+        type: JUDGE,
+        passMode: "pointer",
+        ownership: {
+          kind: "owned",
+          transfer: "to-runtime",
+          destructor: "scriptc.fixture.c-v1@0.0.0#judge_destroy",
+        },
+        projection: DIRECT_RESULT,
+      },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#judge_destroy",
+      declaration: { module: nativePackage, name: "Judge.dispose" },
+      entry: { symbol: "nts_judge_destroy" },
+      sourceCall: { kind: "method", receiverArgument: 0 },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "judge", type: JUDGE, passMode: "pointer", ownership: { kind: "owned", transfer: "to-native" } },
+      ]),
+      result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#judge_ask",
+      declaration: { module: nativePackage, name: "Judge.ask" },
+      entry: { symbol: "nts_judge_ask" },
+      sourceCall: { kind: "method", receiverArgument: 0 },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "judge", type: JUDGE, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
+        { name: "code", type: I32, passMode: "value", ownership: { kind: "value" } },
+        { name: "seed", type: I32, passMode: "value", ownership: { kind: "value" } },
+      ]),
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
       id: "scriptc.fixture.c-v1@0.0.0#answerer_create",
       declaration: { module: nativePackage, name: "answerWith" },
       entry: { symbol: "nts_answerer_create" },
@@ -5162,6 +5369,48 @@ describe.each(["c", "llvm"] as const)("Native IR nullable handles, %s backend", 
     });
   });
 });
+
+/* Synchronous delivery holding an OBJECT, in both of its forms.
+ *
+ * The pair is what matters. Handle payloads were reachable on the queued path
+ * and synchronous delivery was reachable with exact scalars, so two complete
+ * lists agreed while the shape they imply — a handler that runs inside the
+ * caller's frame with a managed cell in its hands — was reachable from
+ * neither. That is the same trap as a sub-word result with a failure slot, and
+ * the reason this program exists rather than a wider unit assertion.
+ *
+ * It also gives the queued handle-payload machinery its first running program
+ * in this repository, which it had never had. */
+describe.each(["c", "llvm"] as const)(
+  "Native IR synchronous handle payloads, %s backend",
+  (backend) => {
+    test("a handler told and a handler asked both receive a managed cell", async () => {
+      const outDir = join(scratch, `synchronous-payload-${backend}`);
+      const result = await compile(
+        join(repoRoot, "tests/native-ir/synchronous-payload.ts"),
+        {
+          outDir,
+          outPath: join(outDir, "program"),
+          backend,
+          emitIr: true,
+          sanitize,
+          externalTypes: nativeExternalTypes(),
+          native: frontendNativeInput(),
+          nativeLinkInputs: [fixtureObject(), supportObject(), retainedSupportObject()],
+        },
+      );
+      expect(result.ok ? [] : result.diagnostics).toEqual([]);
+      if (!result.ok || result.irPath === undefined) {
+        throw new Error("synchronous payload frontend compile did not emit IR");
+      }
+      expect(validateModule(deserializeModule(readFileSync(result.irPath, "utf8"))))
+        .toEqual([]);
+      const run = spawnSync(result.binaryPath);
+      expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() })
+        .toEqual({ status: 42, signal: null, stderr: "" });
+    });
+  },
+);
 
 describe.each(["c", "llvm"] as const)("Native IR opaque handles, %s backend", (backend) => {
   test.each([

@@ -2084,7 +2084,35 @@ export class CEmitter {
       if (form.shape === "direct") {
         const signatureId = `${adapter.symbol}_signature`;
         const sourceType = adapter.source;
-        const args = payloads.map((payload) => nativePayloadReadC(payload));
+        /* A handle payload arrives with a reference the contract's destructor
+         * gives back, so it becomes a managed cell here exactly as it does on
+         * the queued path — a handler receives something that owns its object
+         * rather than a pointer the toolkit is about to reclaim. */
+        const handleCells: string[] = [];
+        const args = payloads.map((payload) => {
+          if (payload.kind !== "ownedHandle") return nativePayloadReadC(payload);
+          const definition = this.nativeTypesById.get(payload.typeId);
+          if (definition?.kind !== "handle") {
+            throw new Error(`emitter bug: unknown payload handle ${payload.typeId}`);
+          }
+          const cell = `sc_cell${payload.slot}`;
+          handleCells.push(...nativeHandleCellC(
+            cell,
+            `sc_a${payload.slot}`,
+            mangleNativeHandleTag(payload.typeId),
+            payload.free,
+            definition.nativeName,
+            null,
+          ));
+          return cell;
+        });
+        /* Every bail is a path where the reference was handed over and the
+         * handler will not run. Leaving without giving it back would leak the
+         * object on exactly the paths nobody exercises — a disposed
+         * registration, an already-unwinding turn, a closure already gone. */
+        const bailReleases = payloads.flatMap((payload) =>
+          payload.kind === "ownedHandle" ? [`${payload.free}(sc_a${payload.slot}); `] : []
+        ).join("");
         const call =
           `(${cFnPtrCast(nativeCallbackSourceSignature(sourceType))}sc_cb->fn)(sc_cb${args.length > 0 ? `, ${args.join(", ")}` : ""})`;
         /* A boolean answer is written into the physical result's own
@@ -2101,7 +2129,17 @@ export class CEmitter {
           : "sc_answer";
         /* A signature with no userdata slot carries its token in a
          * replaceable global instead, because there is nothing to hand it. */
-        const bail = voids ? "return;" : "return 0;";
+        /* Braced when it is more than one statement, because every use is
+         * `if (cond) ${bail}` and C binds only the first statement to the
+         * `if` — an unbraced release plus a return leaves the return
+         * unconditional, so the trampoline would give the payload back and
+         * then return before ever reaching the handler. Unbraced when there
+         * is nothing to release, which keeps every existing trampoline
+         * byte-identical. */
+        const bailReturn = voids ? "return;" : "return 0;";
+        const bail = bailReleases === ""
+          ? bailReturn
+          : `{ ${bailReleases}${bailReturn} }`;
         out.push(
           `static const unsigned char ${signatureId};`,
           ...(form.closure.kind === "tokenGlobal"
@@ -2124,6 +2162,7 @@ export class CEmitter {
           `      scr_callback_token_slot(sc_token),`,
           `      scr_callback_token_generation(sc_token), &${signatureId});`,
           `  if (sc_cb == NULL) ${bail}`,
+          ...handleCells,
           ...(voids
             ? [`  ${call};`, `  scr_closure_release(sc_cb);`, `  return;`]
             : [

@@ -176,6 +176,29 @@ export declare function createVault(): Vault;
 /* The same question answered with an ordinary boolean. */
 export declare function answerWith(callback: (value: i32) => boolean): Asker;
 
+/* Two synchronous registrations that hand the handler an OBJECT while it runs
+ * inside the caller's frame — the pair neither delivery shape could express
+ * before. The counter is the handler's: it arrives with a reference, and the
+ * cell that receives it is what gives that reference back. */
+export interface Teller {
+  /* Invokes the handler and then reads its mark, so a delivery that arrived
+   * on a later turn answers 0 where the truth is 1. */
+  tell(seed: i32): i32;
+  dispose(): void;
+}
+export declare function tellWith(callback: (subject: Counter) => void): Teller;
+export declare function tellMark(): void;
+
+/* The `onKeyDown` shape: answers a boolean while holding both a scalar and an
+ * object. */
+export interface Judge {
+  ask(code: i32, seed: i32): i32;
+  dispose(): void;
+}
+export declare function judgeWith(
+  callback: (code: i32, subject: Counter) => boolean,
+): Judge;
+
 export declare function subscribe(
   callback: (value: i32) => void,
 ): Subscription;
