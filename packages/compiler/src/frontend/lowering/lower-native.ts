@@ -1308,6 +1308,33 @@ function materializeNativeCallbackContract(
       sourceArguments,
     };
   }
+  if (contract.owner.kind === "process") {
+    /* Nothing in the program owns it, so there is no cancellation binding to
+     * carry and no owner to preserve — which is what makes this its own arm
+     * rather than a case of the retained one below. `nativeCallbackIsOwnerScoped`
+     * stays as it is and keeps its name: a process registration genuinely is
+     * not owner-scoped, and widening that predicate to admit it here would
+     * make it false wherever else it is asked.
+     *
+     * Both deliveries exist for this owner. Direct when the thread that
+     * registered is the one the library calls back on, which is the framework
+     * dispatch case; queued when a foreign producer raised it and the payload
+     * had to be copied to cross. The contract already says which, so this
+     * carries the answer rather than deciding it. */
+    return contract.synchronousReturn
+      ? {
+        owner: { kind: "process" },
+        allowedInvocationExecutors: ["same-as-caller"],
+        synchronousReturn: true,
+        sourceArguments,
+      }
+      : {
+        owner: { kind: "process" },
+        allowedInvocationExecutors: [...contract.allowedInvocationExecutors],
+        synchronousReturn: false,
+        sourceArguments,
+      };
+  }
   if (!nativeCallbackIsOwnerScoped(contract)) {
     throw new Error("frontend bug: a non-call callback owner must be retained");
   }

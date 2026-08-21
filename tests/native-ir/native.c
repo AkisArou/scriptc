@@ -784,6 +784,32 @@ int32_t nts_judge_ask(NtsJudge *judge, int32_t code, int32_t seed) {
 
 void nts_judge_destroy(NtsJudge *judge) { free(judge); }
 
+/* A registration NOTHING owns: stored in a global, fired by a later call, and
+ * never cancelled — the shape a framework dispatch takes when the platform
+ * constructs the receiver, so there is no instance to anchor to at the moment
+ * one could register. The receiver arrives as an ordinary payload instead. */
+typedef void (*NtsNoticeCallback)(NtsCounter *subject, void *context);
+
+static NtsNoticeCallback nts_notice_cb = NULL;
+static void *nts_notice_ctx = NULL;
+static int32_t nts_notice_marks = 0;
+
+void nts_notice_register(NtsNoticeCallback callback, void *context) {
+  nts_notice_cb = callback;
+  nts_notice_ctx = context;
+}
+
+void nts_notice_mark(void) { nts_notice_marks++; }
+
+/* Reads its mark AFTER invoking, so a delivery that arrived on a later turn
+ * answers 0 where the truth is 1. */
+int32_t nts_notice_fire(int32_t seed) {
+  nts_notice_marks = 0;
+  NtsCounter *subject = nts_counter_create(seed);
+  nts_notice_cb(subject, nts_notice_ctx);
+  return nts_notice_marks;
+}
+
 int32_t nts_counter_verify(int32_t actual_value, int32_t actual_destroyed,
                            int32_t expected_value, int32_t expected_destroyed) {
   return actual_value == expected_value && actual_destroyed == expected_destroyed

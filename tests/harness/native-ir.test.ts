@@ -406,6 +406,17 @@ const JUDGE_CONTRACT = {
   ],
 } as const satisfies IrNativeCallbackContract;
 
+/* The same telling delivery, owned by nothing. No cancellation binding,
+ * because there is no receiver whose disposal could cancel it. */
+const NOTICE_CONTRACT = {
+  owner: { kind: "process" },
+  allowedInvocationExecutors: ["same-as-caller"],
+  synchronousReturn: true,
+  sourceArguments: [
+    { kind: "callback-parameter", parameter: 0, destructor: COUNTER_DESTROY },
+  ],
+} as const satisfies IrNativeCallbackContract;
+
 const TELLER_DEFINITION = {
   kind: "handle",
   id: TELLER_ID,
@@ -1637,6 +1648,56 @@ const localNativeInput: NativeFrontendInput = {
        * exist to separate. */
       /* Called by the handler, so the mark appearing before `tell` returns is
        * what separates synchronous delivery from queued. */
+      /* A registration nothing owns, reached through a MANIFEST rather than a
+       * hand-built module — which is the path materializeNativeCallbackContract
+       * takes and the one no test travelled. */
+      id: "scriptc.fixture.c-v1@0.0.0#notice_register",
+      declaration: { module: nativePackage, name: "noticeWith" },
+      entry: { symbol: "nts_notice_register" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      arguments: [
+        { name: "callback", type: TELL_SOURCE, callback: NOTICE_CONTRACT },
+      ],
+      parameters: [
+        {
+          name: "callback",
+          type: { kind: "nativeCallback", signature: TELL_CALLBACK },
+          passMode: "pointer",
+          ownership: { kind: "callback" },
+          projection: { kind: "callbackFunction", argument: 0 },
+        },
+        {
+          name: "context",
+          type: { kind: "nativeContext", addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "callback" },
+          projection: { kind: "callbackContext", argument: 0 },
+        },
+      ],
+      result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#notice_mark",
+      declaration: { module: nativePackage, name: "noticeMark" },
+      entry: { symbol: "nts_notice_mark" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([]),
+      result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#notice_fire",
+      declaration: { module: nativePackage, name: "noticeFire" },
+      entry: { symbol: "nts_notice_fire" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "seed", type: I32, passMode: "value", ownership: { kind: "value" } },
+      ]),
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
       id: "scriptc.fixture.c-v1@0.0.0#tell_mark",
       declaration: { module: nativePackage, name: "tellMark" },
       entry: { symbol: "nts_tell_mark" },
@@ -5502,6 +5563,45 @@ describe.each(["c", "llvm"] as const)("Native IR nullable handles, %s backend", 
     });
   });
 });
+
+/* A registration nothing owns, through every layer at once.
+ *
+ * The validator's case builds a module directly and the translator's builds a
+ * manifest, so materialization — the step between them — was exercised by
+ * neither, and a contract that passed both met an internal error there. Three
+ * layers on one contract, each with a passing test of its own arm. This is the
+ * program that travels all of them.
+ */
+describe.each(["c", "llvm"] as const)(
+  "Native IR process-owned registrations, %s backend",
+  (backend) => {
+    test("a registration nothing owns delivers, twice, and releases its payloads", async () => {
+      const outDir = join(scratch, `process-owned-${backend}`);
+      const result = await compile(
+        join(repoRoot, "tests/native-ir/process-owned.ts"),
+        {
+          outDir,
+          outPath: join(outDir, "program"),
+          backend,
+          emitIr: true,
+          sanitize,
+          externalTypes: nativeExternalTypes(),
+          native: frontendNativeInput(),
+          nativeLinkInputs: [fixtureObject(), supportObject(), retainedSupportObject()],
+        },
+      );
+      expect(result.ok ? [] : result.diagnostics).toEqual([]);
+      if (!result.ok || result.irPath === undefined) {
+        throw new Error("process-owned frontend compile did not emit IR");
+      }
+      expect(validateModule(deserializeModule(readFileSync(result.irPath, "utf8"))))
+        .toEqual([]);
+      const run = spawnSync(result.binaryPath);
+      expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() })
+        .toEqual({ status: 42, signal: null, stderr: "" });
+    });
+  },
+);
 
 /* A UTF-8 span result, which had no running program until now.
  *

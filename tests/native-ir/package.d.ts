@@ -193,6 +193,12 @@ export interface Teller {
 export declare function tellWith(callback: (subject: Counter) => void): Teller;
 export declare function tellMark(): void;
 
+/* A registration nothing owns — no handle comes back, and nothing can cancel
+ * it, because there is no receiver whose lifetime bounds it. */
+export declare function noticeWith(callback: (subject: Counter) => void): void;
+export declare function noticeMark(): void;
+export declare function noticeFire(seed: i32): i32;
+
 /* The `onKeyDown` shape: answers a boolean while holding both a scalar and an
  * object. */
 export interface Judge {
