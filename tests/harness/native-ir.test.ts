@@ -1208,6 +1208,71 @@ const localNativeInput: NativeFrontendInput = {
        * parameter the CALLER fills; the output's arrives in the compiler's
        * own slot, which nothing in the program supplies. Same word, two
        * mechanisms — which is why they are two projections. */
+      /* UTF-8 text arriving as a pointer and a length, in both nullabilities.
+       * The fixture's text contains a NUL, so a lowering that scanned for a
+       * terminator answers a shorter string that looks correct — which is the
+       * only way to tell the two apart. */
+      id: "scriptc.fixture.c-v1@0.0.0#span_label",
+      declaration: { module: nativePackage, name: "spanLabel" },
+      entry: { symbol: "nts_span_label" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      arguments: [],
+      parameters: [
+        {
+          name: "out_length",
+          type: { kind: "nativeBytesLengthOut", addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "value" },
+          projection: { kind: "bytesLengthOut" },
+        },
+      ],
+      result: {
+        type: { kind: "nativePointer", pointee: "i8", const: false, addressSpace: 0 },
+        passMode: "pointer",
+        ownership: { kind: "value" },
+        projection: {
+          kind: "utf8Span",
+          nullable: false,
+          release: { kind: "symbol", symbol: "nts_cstring_free" },
+        },
+      },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#span_label_maybe",
+      declaration: { module: nativePackage, name: "spanLabelMaybe" },
+      entry: { symbol: "nts_span_label_maybe" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      arguments: [{ name: "which", type: I32 }],
+      parameters: [
+        {
+          name: "which",
+          type: I32,
+          passMode: "value",
+          ownership: { kind: "value" },
+          projection: { kind: "argument", argument: 0 },
+        },
+        {
+          name: "out_length",
+          type: { kind: "nativeBytesLengthOut", addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "value" },
+          projection: { kind: "bytesLengthOut" },
+        },
+      ],
+      result: {
+        type: { kind: "nativePointer", pointee: "i8", const: false, addressSpace: 0 },
+        passMode: "pointer",
+        ownership: { kind: "value" },
+        projection: {
+          kind: "utf8Span",
+          nullable: true,
+          release: { kind: "symbol", symbol: "nts_cstring_free" },
+        },
+      },
+    },
+    {
       id: "scriptc.fixture.c-v1@0.0.0#bytes_reverse",
       declaration: { module: nativePackage, name: "bytesReverse" },
       entry: { symbol: "nts_bytes_reverse" },
@@ -5369,6 +5434,45 @@ describe.each(["c", "llvm"] as const)("Native IR nullable handles, %s backend", 
     });
   });
 });
+
+/* A UTF-8 span result, which had no running program until now.
+ *
+ * The arm shipped and was exercised only by `validateModule` here — its
+ * emission ran solely through the parent's lanes, so this fork refactored the
+ * family into a shared copy description with no program able to say the
+ * lowering still worked. That is the gap
+ * [0012](../../../../docs/records/0012-checks-that-cannot-fail.md) names,
+ * closed rather than recorded. */
+describe.each(["c", "llvm"] as const)(
+  "Native IR UTF-8 span results, %s backend",
+  (backend) => {
+    test("text containing NUL survives the copy in both nullabilities", async () => {
+      const outDir = join(scratch, `span-result-${backend}`);
+      const result = await compile(
+        join(repoRoot, "tests/native-ir/span-result.ts"),
+        {
+          outDir,
+          outPath: join(outDir, "program"),
+          backend,
+          emitIr: true,
+          sanitize,
+          externalTypes: nativeExternalTypes(),
+          native: frontendNativeInput(),
+          nativeLinkInputs: [fixtureObject(), supportObject()],
+        },
+      );
+      expect(result.ok ? [] : result.diagnostics).toEqual([]);
+      if (!result.ok || result.irPath === undefined) {
+        throw new Error("span result frontend compile did not emit IR");
+      }
+      expect(validateModule(deserializeModule(readFileSync(result.irPath, "utf8"))))
+        .toEqual([]);
+      const run = spawnSync(result.binaryPath);
+      expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() })
+        .toEqual({ status: 42, signal: null, stderr: "" });
+    });
+  },
+);
 
 /* Synchronous delivery holding an OBJECT, in both of its forms.
  *

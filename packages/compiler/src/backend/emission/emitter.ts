@@ -901,15 +901,20 @@ export class CEmitter {
             : []),
         );
       }
-      // Every copied result that names a release names a foreign symbol on the
-      // same footing, and its shape is fixed the same way: it takes the
-      // pointer and answers nothing. Listed by which projections CARRY a
-      // release rather than by name, so a fourth cannot be forgotten here.
+      /* Every copied result that names a release names a foreign symbol on the
+       * same footing, and its shape is fixed the same way: it takes the
+       * pointer and answers nothing.
+       *
+       * Asked of the projection rather than listed by name. The previous
+       * comment here claimed exactly that and the code did the opposite —
+       * three kinds spelled out, so `utf8Span` was forgotten when it arrived
+       * and its release went undeclared. The C backend alone was wrong,
+       * because LLVM declares each symbol at its use; and no program in this
+       * repository returned a span, so nothing said so. Testing membership in
+       * the TYPE is what makes the claim true: a fifth projection carrying a
+       * release is declared here without an edit. */
       const resultProjection = binding.result.projection;
-      const releaseCarrying = resultProjection.kind === "utf8CString" ||
-        resultProjection.kind === "utf8CStringArray" ||
-        resultProjection.kind === "bytes";
-      if (releaseCarrying && resultProjection.release.kind === "symbol") {
+      if ("release" in resultProjection && resultProjection.release.kind === "symbol") {
         out.push(`extern void ${resultProjection.release.symbol}(void *);`);
       }
     }

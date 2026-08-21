@@ -189,6 +189,30 @@ uint8_t *nts_bytes_reverse(const uint8_t *data, size_t length, size_t *out_lengt
   return copy;
 }
 
+/* UTF-8 text whose length comes back beside the pointer, and which CONTAINS a
+ * NUL — the entire reason this projection exists. A copy that scanned for a
+ * terminator would stop after two bytes and answer "na", which is a shorter
+ * string that looks perfectly correct. Only a program that reads past the
+ * embedded NUL can tell the two lowerings apart.
+ *
+ * The caller frees it, so the release is observable too. */
+char *nts_span_label(size_t *out_length) {
+  static const char text[] = "na\0me";
+  size_t length = sizeof text - 1;
+  char *copy = malloc(length);
+  memcpy(copy, text, length);
+  *out_length = length;
+  return copy;
+}
+
+/* The same span where absence is a VALUE rather than a failure: a negative
+ * request has no label, which is different from having an empty one. */
+char *nts_span_label_maybe(int32_t which, size_t *out_length) {
+  *out_length = 0;
+  if (which < 0) return NULL;
+  return nts_span_label(out_length);
+}
+
 /* The same shape with a WIDER element, which is what separates a length that
  * counts elements from one that counts bytes: four int32 values are four
  * elements and sixteen bytes, so a lowering that conflated them would build a

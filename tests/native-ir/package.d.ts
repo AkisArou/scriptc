@@ -154,6 +154,10 @@ export declare function callScoped(
   value: i32,
 ): i32;
 export declare function failErrno(errorNumber: i32): never;
+/* UTF-8 text arriving as a pointer and a length rather than a terminator, so
+ * the bytes may contain NUL. The fixture's label does. */
+export declare function spanLabel(): string;
+export declare function spanLabelMaybe(which: i32): string | null;
 export declare function createCounter(initialValue: i32): Counter;
 /* A callback the native side asks rather than tells: it runs during the
  * emitting call and the value it answers with is that call's result. */
