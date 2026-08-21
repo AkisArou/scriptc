@@ -74,24 +74,31 @@ describe.each(["c", "llvm"] as const)(
         linkInputs: ["object/platform"],
         output: "product/main",
       });
-      expect(external.plan.inputs).toEqual([
+      /* The link is the LAST command: everything before it compiles one
+       * runtime object, which is what separately-compiled runtime planning
+       * added. Reading it positionally rather than by count keeps this honest
+       * if the driver ever emits the objects in another order. */
+      const link = external.plans.at(-1)!;
+      expect(link.inputs).toEqual([
         "runtime/scriptc",
         "program/main",
         "object/platform",
       ]);
-      expect(external.plan.arguments).toContainEqual({
+      expect(link.arguments).toContainEqual({
         kind: "input-path",
         input: "object/platform",
       });
-      expect(external.plan.arguments).toContainEqual({
+      expect(link.arguments).toContainEqual({
         kind: "literal",
         value: "-lplatform",
       });
-      expect(external.plan.arguments.at(-1)).toEqual({
+      expect(link.arguments.at(-1)).toEqual({
         kind: "output-path",
         output: "product/main",
       });
-      expect(JSON.stringify(external.plan)).not.toContain("__scriptc_external__");
+      // Every command, not just the link: a physical path in any of them is
+      // the defect this asserts against.
+      expect(JSON.stringify(external.plans)).not.toContain("__scriptc_external__");
 
       let directBuild: Readonly<CcOptions> | null = null;
       const direct = await compile(entryPath, {

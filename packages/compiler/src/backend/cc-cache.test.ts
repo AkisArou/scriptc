@@ -10,6 +10,7 @@ import {
   ccVersionOnce,
   compileC,
   compileLibArchive,
+  executableNativeEnvironmentFingerprint,
   implicitDependencyProbeIncludes,
   parseLinkTraceFiles,
   resolveBuildCacheRoot,
@@ -128,6 +129,45 @@ test("the production cache root follows overrides, platform defaults, and the ha
     "/Users/tester/AppData/Local/scriptc/cache/build",
   );
 });
+
+test.skipIf(process.platform === "win32")(
+  "the early executable identity follows a compiler selected behind a stable driver",
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "scriptc-effective-compiler-"));
+    scratch.push(dir);
+    const binDir = join(dir, "bin");
+    const selector = join(dir, "selected");
+    const firstCompiler = join(dir, "clang-first");
+    const secondCompiler = join(dir, "clang-second");
+    await mkdir(binDir);
+    await Promise.all([
+      writeFile(firstCompiler, "#!/bin/sh\nexit 0\n"),
+      writeFile(secondCompiler, "#!/bin/sh\nexit 0\n"),
+      writeFile(
+        join(binDir, "clang"),
+        "#!/bin/sh\nselected=$(cat \"$SCRIPTC_TEST_EFFECTIVE_COMPILER\")\nprintf '\"%s\" \"-cc1\"\\n' \"$selected\" >&2\n",
+      ),
+      writeFile(selector, `${firstCompiler}\n`),
+    ]);
+    await Promise.all([
+      chmod(firstCompiler, 0o755),
+      chmod(secondCompiler, 0o755),
+      chmod(join(binDir, "clang"), 0o755),
+    ]);
+    const env = {
+      ...process.env,
+      PATH: `${binDir}${delimiter}${process.env["PATH"] ?? ""}`,
+      SCRIPTC_TEST_EFFECTIVE_COMPILER: selector,
+    };
+
+    const first = await executableNativeEnvironmentFingerprint(env);
+    expect(await executableNativeEnvironmentFingerprint(env)).toBe(first);
+    await writeFile(selector, `${secondCompiler}\n`);
+    const second = await executableNativeEnvironmentFingerprint(env);
+
+    expect(second).not.toBe(first);
+  },
+);
 
 test("native cache identities separate host architectures while cross targets remain explicit", () => {
   expect(cacheTargetIdentity({ target: null }, "darwin", "arm64")).toBe("native:darwin:arm64");
@@ -2552,6 +2592,40 @@ test("frontend-generated same-output builds no-op only while output and dependen
   }
 });
 
+test("artifact-ready callbacks expose native dependencies on builds and validated hits", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scriptc-artifact-ready-"));
+  scratch.push(dir);
+  const cacheRoot = join(dir, "cache");
+  const cPath = join(dir, "program.c");
+  const outPath = join(dir, "program");
+  const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
+  const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+  try {
+    process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+    delete process.env["SCRIPTC_NO_CACHE"];
+    await writeFile(cPath, "int main(void) { return 0; }\n");
+    const observations: string[][] = [];
+    const build = (): Promise<void> => compileC({
+      cPath,
+      outPath,
+      cacheIdentity: "scriptc-generated-v1",
+      onArtifactReady: async ({ dependencies }) => {
+        observations.push(dependencies.map((dependency) => dependency.path));
+      },
+    });
+    await build();
+    await build();
+    expect(observations).toHaveLength(2);
+    expect(observations[0]!.length).toBeGreaterThan(0);
+    expect(observations[1]).toEqual(observations[0]);
+  } finally {
+    if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+    else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
+    if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
+    else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
+  }
+});
+
 test.skipIf(process.platform === "win32")(
   "output-local hits follow symlinked header targets",
   async () => {
@@ -3097,6 +3171,161 @@ entry:
     }
   },
 );
+
+test.skipIf(!nativeShardMergeAvailable)(
+  "LLVM executable dev shards reuse unaffected program objects after a localized edit",
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "scriptc-exe-program-shards-"));
+    scratch.push(dir);
+    const cacheRoot = join(dir, "cache");
+    const cPath = join(dir, "program.ll");
+    const outPath = join(dir, "program");
+    const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
+    const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+    const source = (value: number): string => `@private_value = internal global i64 ${value}
+
+define internal i64 @left() {
+entry:
+  %v = load i64, ptr @private_value
+  ret i64 %v
+}
+
+define internal i64 @right() {
+entry:
+  %v = call i64 @left()
+  ret i64 %v
+}
+
+define i32 @main() {
+entry:
+  %v = call i64 @right()
+  %exit = trunc i64 %v to i32
+  ret i32 %exit
+}
+`;
+    try {
+      process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+      delete process.env["SCRIPTC_NO_CACHE"];
+      await mkdir(cacheRoot, { mode: 0o700 });
+      const build = async (value: number): Promise<void> => {
+        const programSource = source(value);
+        const split = splitLlvmProgram(programSource, { minimumBytes: 0, targetBytes: 64 * 1024 });
+        expect(split?.shards).toHaveLength(3);
+        await writeFile(cPath, programSource);
+        await compileC({
+          cPath,
+          programShards: split!.shards,
+          programPublicSymbols: split!.publicSymbols,
+          outPath,
+          cacheIdentity: TEST_CACHE_IDENTITY,
+          optimization: "dev",
+        });
+      };
+      await build(7);
+      const initial = (await readdir(join(cacheRoot, "program-shard")))
+        .filter((name) => !name.endsWith(".sha256"));
+      expect(initial).toHaveLength(3);
+      expect(spawnSync(outPath).status).toBe(7);
+
+      await build(9);
+      const after = (await readdir(join(cacheRoot, "program-shard")))
+        .filter((name) => !name.endsWith(".sha256"));
+      expect(after).toHaveLength(4);
+      expect(initial.filter((name) => after.includes(name))).toHaveLength(3);
+      expect(spawnSync(outPath).status).toBe(9);
+      const old = new Date("2000-01-01T00:00:00.000Z");
+      await Promise.all(after.map((name) => utimes(join(cacheRoot, "program-shard", name), old, old)));
+      await build(9);
+      for (const name of after) {
+        // The completed executable hit returns before shard lookup/merge.
+        expect((await stat(join(cacheRoot, "program-shard", name))).mtimeMs).toBe(old.getTime());
+      }
+    } finally {
+      if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+      else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
+      if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
+      else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
+    }
+  },
+);
+
+test.skipIf(
+  process.platform === "win32" || clangExecutable === undefined ||
+  ldExecutable === undefined || (process.platform === "linux" && objcopyExecutable === undefined),
+)("LLVM executable shards fall back without publishing a shard-derived binary", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scriptc-exe-program-shard-fallback-"));
+  scratch.push(dir);
+  const binDir = join(dir, "bin");
+  const cacheRoot = join(dir, "cache");
+  const cPath = join(dir, "program.ll");
+  const outPath = join(dir, "program");
+  const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
+  const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+  const oldPath = process.env["PATH"];
+  const oldRealLd = process.env["SCRIPTC_TEST_REAL_LD"];
+  const programSource = [
+    "define i32 @main() {",
+    "entry:",
+    "  ret i32 7",
+    "}",
+    "",
+    "define internal i64 @other_value() {",
+    "entry:",
+    "  ret i64 9",
+    "}",
+    "",
+  ].join("\n");
+  try {
+    await Promise.all([mkdir(binDir), mkdir(cacheRoot, { mode: 0o700 })]);
+    await Promise.all([
+      symlink(clangExecutable!, join(binDir, "clang")),
+      ...(process.platform === "linux"
+        ? [symlink(objcopyExecutable!, join(binDir, "objcopy"))]
+        : []),
+      writeFile(
+        join(binDir, "ld"),
+        "#!/bin/sh\nfor arg in \"$@\"; do if [ \"$arg\" = -r ]; then exit 1; fi; done\nexec \"$SCRIPTC_TEST_REAL_LD\" \"$@\"\n",
+      ),
+      writeFile(cPath, programSource),
+    ]);
+    await chmod(join(binDir, "ld"), 0o755);
+    process.env["PATH"] = binDir;
+    process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+    process.env["SCRIPTC_TEST_REAL_LD"] = ldExecutable!;
+    delete process.env["SCRIPTC_NO_CACHE"];
+    await compileC({
+      cPath,
+      programShards: [
+        {
+          name: "program-f000.ll",
+          source: "define i32 @main() {\nentry:\n  ret i32 7\n}\ndeclare hidden i64 @other_value()\n",
+        },
+        {
+          name: "program-f001.ll",
+          source: "declare i32 @main()\ndefine hidden i64 @other_value() {\nentry:\n  ret i64 9\n}\n",
+        },
+      ],
+      programPublicSymbols: ["main"],
+      outPath,
+      cacheIdentity: TEST_CACHE_IDENTITY,
+      optimization: "dev",
+    });
+    expect(spawnSync(outPath).status).toBe(7);
+    // The canonical retry is valid output, but cannot occupy a key describing
+    // a successful shard merge. Repairing the merge tool must retry the mode.
+    expect(await readdir(join(cacheRoot, "bin")).catch(() => [])).toEqual([]);
+    expect(await readdir(join(cacheRoot, "program-shard")).catch(() => [])).toEqual([]);
+  } finally {
+    if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+    else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
+    if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
+    else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
+    if (oldPath === undefined) delete process.env["PATH"];
+    else process.env["PATH"] = oldPath;
+    if (oldRealLd === undefined) delete process.env["SCRIPTC_TEST_REAL_LD"];
+    else process.env["SCRIPTC_TEST_REAL_LD"] = oldRealLd;
+  }
+});
 
 test.skipIf(!nativeShardMergeAvailable)(
   "LLVM merged-object and archive caches separate shard projections and public-symbol keep sets",

@@ -1,6 +1,6 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
-import { CcCompileError, buildCacheRoot, compileC, compileLibArchive, mobileLibraryTarget, mobileTargetRefusal, prepareBuildCacheRoot, pruneBuildCache, resolveCc, targetPlatform, type CcOptions } from "./backend/cc.js";
+import { buildCacheRoot, CcCompileError, compileC, compileLibArchive, executableNativeEnvironmentFingerprint, mobileLibraryTarget, mobileTargetRefusal, prepareBuildCacheRoot, pruneBuildCache, resolveCc, targetPlatform, type CcOptions } from "./backend/cc.js";
 import { emitModule } from "./backend/emission/emitter.js";
 import { emitLlvmModule, LlvmUnsupportedError } from "./backend/llvm/emitter.js";
 import { splitLlvmProgram } from "./backend/llvm/split.js";
@@ -8,22 +8,11 @@ import { checkerPanicDiag, ffiNativeBuildDiag, libAsyncExportDiag, libAsyncSurfa
 import { checkLibraryIntegerSlots, classSeed, hasIntSlots, numberBoundaryFacts, numberCarrierKind, type FnIntSlots, type IntSlotConfig } from "./ir/number-facts.js";
 import { loadLibraryProfile, profileRemediation, profileTeaching, type LibraryProfile } from "./library/profile.js";
 import {
-  libraryFrontendImplementationFingerprint,
-  publishEarlyLibraryCache,
-  readEarlyLibraryCache,
-  readSemanticLibraryCache,
-  type EarlyLibraryCacheOptions,
-  type EarlyLibraryNativeRecord,
-  type SemanticLibraryCacheHit,
-} from "./library/early-cache.js";
-import { FrontendInputTracker } from "./frontend/input-tracker.js";
-import {
   rebaseLibrarySourceComments,
   replaceLibraryIdentity,
   stripLibraryIdentity,
   stripLibrarySourceComments,
 } from "./backend/library-identity.js";
-import { createSourceLineRebaser } from "./library/semantic-source.js";
 import { decorateLibraryRefusals, evaluateLibraryFences } from "./library/fence-eval.js";
 import { assembleTrapTeaching } from "./library/trap-teaching.js";
 import {
@@ -62,6 +51,11 @@ import {
   type LibraryCompilationPlan,
   type LibraryNativeBuildPlan,
 } from "./library-plan.js";
+import { FrontendInputTracker, trackedReadFile } from "./frontend/input-tracker.js";
+import { libraryFrontendImplementationFingerprint, publishEarlyLibraryCache, readEarlyLibraryCache, readSemanticLibraryCache, type EarlyLibraryCacheOptions, type EarlyLibraryCachePublish, type EarlyLibraryNativeFeatures, type SemanticLibraryCacheHit } from "./library/early-cache.js";
+import { createSourceLineRebaser } from "./library/semantic-source.js";
+import { publishEarlyExecutableCache, publishEarlyExecutableRoute, readEarlyExecutableCache, type EarlyExecutableCacheOptions, type EarlyExecutableNativeFeatures } from "./executable/early-cache.js";
+import { compilerImplementationIdentity } from "./library/implementation-identity.js";
 
 export const VERSION = "0.0.1";
 
@@ -209,6 +203,9 @@ export interface CompileOptions {
    * wasm32-wasi is a production LLVM target and never takes the automatic
    * C fallback; a missing LLVM lowering there is SC3001. */
   backend?: "c" | "llvm";
+  /** Native optimization posture. Release is the shipped -O2 default; dev
+   * uses -O0 and stable multi-TU object caching for large LLVM programs. */
+  optimization?: "release" | "dev";
   /** --npm-static: package names whose shipped, unminified JS compiles
    * STATICALLY as program modules (inference types the bodies; statements
    * the lowering cannot prove become runtime fences). "auto" opts in every
@@ -1051,6 +1048,126 @@ export function analyze(entryPath: string, opts: AnalyzeOptions = {}): AnalyzeRe
   }
 }
 
+/** The whole pipeline: load → preflight → lower → validate → emit C → clang. */
+export async function compile(entryPath: string, opts: CompileOptions): Promise<CompileResult> {
+  const frontendInputs = new FrontendInputTracker();
+  return frontendInputs.run(() => compileTracked(entryPath, opts, frontendInputs));
+}
+
+function executableNativeFeatures(
+  mod: IrModule,
+  backend: "c" | "llvm",
+  dynamic: boolean,
+  optimization: "release" | "dev",
+  llvmRefusal?: string,
+): EarlyExecutableNativeFeatures {
+  return {
+    backend,
+    ...(optimization === "dev" ? { optimization: "dev" as const } : {}),
+    ...(llvmRefusal === undefined ? {} : { llvmRefusal }),
+    dynamic,
+    regex: moduleUsesRegex(mod),
+    copying: moduleUsesCopying(mod),
+    textDecoderLegacy: moduleUsesLegacyTextDecoder(mod),
+    fileHandle: moduleUsesFileHandle(mod),
+    fetch: moduleUsesFetch(mod),
+    netIsland:
+      moduleEmbedsBuiltin(mod, "node:http") ||
+      moduleEmbedsBuiltin(mod, "node:https") ||
+      moduleEmbedsBuiltin(mod, "node:net") ||
+      moduleEmbedsBuiltin(mod, "node:tls"),
+    zlib: moduleUsesZlib(mod) || moduleEmbedsCompressedNpm(mod),
+    assert: moduleUsesAssert(mod),
+    inspect: moduleUsesInspect(mod),
+    dynInvoke: moduleUsesDynInvoke(mod),
+    dc: moduleUsesDc(mod),
+    dynAsync: moduleUsesDynAsync(mod),
+    events: moduleUsesProcessEvents(mod),
+    emitter: moduleUsesEmitter(mod),
+    symbol: moduleUsesSymbol(mod),
+    searchParams: moduleUsesSearchParams(mod),
+    qs: moduleUsesQs(mod),
+    parseArgs: moduleUsesParseArgs(mod),
+    stream: moduleUsesStream(mod),
+    net: moduleUsesNet(mod),
+    http: moduleUsesHttpServer(mod),
+    http2: moduleUsesHttp2(mod),
+    dgram: moduleUsesDgram(mod),
+    watch: moduleUsesFsWatch(mod),
+    /* Constant here: this fork deleted the outbound FFI subsystem upstream
+     * computes this from (3894a462, "the profile no longer needs" it), so no
+     * module in this tree can carry a foreign callback. Kept in the record
+     * rather than removed from it — the field is part of upstream's cache key,
+     * and a key that stops naming a fact is a key that can collide with a tree
+     * where the fact varies. */
+    foreignFfi: false,
+    nodeTest: moduleUsesNodeTest(mod),
+    tls: moduleUsesTls(mod),
+    tlsCa: moduleUsesTlsCa(mod),
+  };
+}
+
+async function compileExecutableNative(
+  features: EarlyExecutableNativeFeatures,
+  cPath: string,
+  outPath: string,
+  sanitize: boolean,
+  ffi: FfiProfile | null,
+  programSplit: ReturnType<typeof splitLlvmProgram> = null,
+  onArtifactReady?: NonNullable<Parameters<typeof compileC>[0]["onArtifactReady"]>,
+): Promise<void> {
+  const effectiveProgramSplit =
+    programSplit ??
+    (features.optimization === "dev" && features.backend === "llvm" && !sanitize
+      ? splitLlvmProgram(await readFile(cPath, "utf8"))
+      : null);
+  await compileC({
+    cPath,
+    outPath,
+    cacheIdentity: "scriptc-generated-v1",
+    ...(features.optimization === "dev" ? { optimization: "dev" as const } : {}),
+    ...(effectiveProgramSplit === null
+      ? {}
+      : {
+          programShards: effectiveProgramSplit.shards,
+          programPublicSymbols: effectiveProgramSplit.publicSymbols,
+        }),
+    sanitize,
+    dynamic: features.dynamic,
+    regex: features.regex,
+    copying: features.copying,
+    textDecoderLegacy: features.textDecoderLegacy,
+    fileHandle: features.fileHandle,
+    fetch: features.fetch,
+    netIsland: features.netIsland,
+    zlib: features.zlib,
+    assert: features.assert,
+    inspect: features.inspect,
+    dynInvoke: features.dynInvoke,
+    dc: features.dc,
+    dynAsync: features.dynAsync,
+    events: features.events,
+    emitter: features.emitter,
+    symbol: features.symbol,
+    searchParams: features.searchParams,
+    qs: features.qs,
+    parseArgs: features.parseArgs,
+    stream: features.stream,
+    net: features.net,
+    http: features.http,
+    http2: features.http2,
+    dgram: features.dgram,
+    watch: features.watch,
+    nodeTest: features.nodeTest,
+    tls: features.tls,
+    tlsCa: features.tlsCa,
+    ...(onArtifactReady === undefined ? {} : { onArtifactReady }),
+    ...(ffi === null
+      ? {}
+      : { linkInputs: ffi.libraries, systemLibraries: ffi.systemLibraries }),
+  });
+}
+
 type ExecutableLoweringOptions = Pick<
   CompileOptions,
   | "backend"
@@ -1074,19 +1191,38 @@ type PreparedExecutableCompilation =
     }
   | Extract<CompileResult, { readonly ok: false }>;
 
-/** The semantic half shared by direct builds and artifact-graph planning. It
- * performs no output writes and releases the frontend before returning. */
-function prepareExecutableCompilation(
+/** The cheap half: profile load and target refusals, with no frontend work.
+ *
+ * Separated from lowering because upstream's early executable cache reads
+ * BETWEEN the two, and both sides of that ordering are load-bearing — a
+ * refused target must refuse before a cache hit can answer for it, and a hit
+ * must short-circuit before the frontend starts. Drawing our boundary at their
+ * seam is what keeps this file's divergence additive. */
+type ExecutablePreflight =
+  | {
+      readonly ok: true;
+      readonly ffi: FfiProfile | null;
+      readonly ffiProfileBytes: Uint8Array | null;
+      readonly buildPlatform: string;
+      readonly buildPointerBits: 32 | 64;
+    }
+  | Extract<CompileResult, { readonly ok: false }>;
+
+function preflightExecutable(
   entryPath: string,
   opts: ExecutableLoweringOptions,
-): PreparedExecutableCompilation {
+): ExecutablePreflight {
+
   let ffi: FfiProfile | null = null;
+  let ffiProfileBytes: Uint8Array | null = null;
   if (opts.ffiProfilePath !== undefined) {
-    const loaded = loadFfiProfile(opts.ffiProfilePath);
+    const ffiProfilePath = resolve(opts.ffiProfilePath);
+    const loaded = loadFfiProfile(ffiProfilePath);
     if (!loaded.ok) {
       return { ok: false, diagnostics: loaded.diagnostics, sourceTexts: new Map() };
     }
     ffi = loaded.profile;
+    ffiProfileBytes = loaded.profileBytes;
   }
   const buildPlatform = buildTargetPlatform();
   const buildPointerBits = buildTargetPointerBits(buildPlatform);
@@ -1128,6 +1264,16 @@ function prepareExecutableCompilation(
       };
     }
   }
+  return { ok: true, ffi, ffiProfileBytes, buildPlatform, buildPointerBits };
+}
+
+/** Frontend, lowering, validation and the refusals that need a module. */
+function lowerExecutable(
+  entryPath: string,
+  opts: ExecutableLoweringOptions,
+  preflight: Extract<ExecutablePreflight, { readonly ok: true }>,
+): PreparedExecutableCompilation {
+  const { ffi, buildPlatform, buildPointerBits } = preflight;
   const fe = runFrontend(entryPath, opts.npmStatic, opts.externalTypes, opts.native);
   let lowered: LowerResult;
   // The frontend (and its tsgo server) is released as soon as lowering
@@ -1218,6 +1364,17 @@ function prepareExecutableCompilation(
   } finally {
     fe.dispose();
   }
+}
+
+/** The semantic half shared by direct builds and artifact-graph planning. It
+ * performs no output writes and releases the frontend before returning. */
+function prepareExecutableCompilation(
+  entryPath: string,
+  opts: ExecutableLoweringOptions,
+): PreparedExecutableCompilation {
+  const preflight = preflightExecutable(entryPath, opts);
+  if (!preflight.ok) return preflight;
+  return lowerExecutable(entryPath, opts, preflight);
 }
 
 function executableNativeBuildPlan(
@@ -1401,18 +1558,124 @@ export function planExecutableCompilation(
   });
 }
 
-/** The whole pipeline: load → preflight → lower → validate → emit C → clang. */
-export async function compile(entryPath: string, opts: CompileOptions): Promise<CompileResult> {
-  const prepared = prepareExecutableCompilation(entryPath, opts);
+/** The whole pipeline: load → preflight → cache → lower → validate → emit C →
+ * clang. */
+async function compileTracked(
+  entryPath: string,
+  opts: CompileOptions,
+  frontendInputs: FrontendInputTracker,
+): Promise<CompileResult> {
+  entryPath = resolve(entryPath);
+  const preflight = preflightExecutable(entryPath, opts);
+  if (!preflight.ok) return preflight;
+  const { ffi, ffiProfileBytes, buildPlatform } = preflight;
+  /* THE EARLY EXECUTABLE CACHE IS UPSTREAM'S, AND SO IS ITS KEY. That key
+   * names everything an upstream build depends on; a build in this fork can
+   * additionally depend on a native manifest, linked object files, requested
+   * runtime services and system libraries, none of which the key models. A
+   * linked `.o` rebuilt in place would not move the key, so a hit could hand
+   * back a binary linked against the previous one.
+   *
+   * Rather than fake a key or weaken theirs, a build carrying any of those
+   * does not consult the cache at all — expressed as no cache root, which is
+   * the same null path upstream already takes under provenance. Widening the
+   * key to name these inputs is a deliberate change to their cache, and it
+   * needs a digest of the link inputs rather than their paths, so it waits for
+   * a reason better than "the flag exists". */
+  const nativeInputs = opts.native !== undefined ||
+    opts.nativeLinkInputs !== undefined ||
+    opts.nativeRuntimeRequires !== undefined ||
+    opts.nativeSystemLibraries !== undefined ||
+    opts.nativeBuildExecutor !== undefined;
+  const cacheRoot = provenanceSources() === null && !nativeInputs
+    ? await prepareBuildCacheRoot(buildCacheRoot())
+    : null;
+  const implementation = await compilerImplementationIdentity();
+  const earlyCacheOptions: EarlyExecutableCacheOptions = {
+    entryPath,
+    outDir: opts.outDir,
+    outPath: opts.outPath,
+    emitIr: opts.emitIr ?? false,
+    sanitize: opts.sanitize ?? false,
+    dynamic: opts.dynamic ?? false,
+    backend: opts.backend ?? "auto",
+    ...(opts.optimization === "dev" ? { optimization: "dev" as const } : {}),
+    npmStatic: opts.npmStatic ?? null,
+    ffiProfile:
+      opts.ffiProfilePath === undefined || ffiProfileBytes === null
+        ? null
+        : { path: opts.ffiProfilePath, bytes: ffiProfileBytes },
+    target: `${process.env["SCRIPTC_TARGET"] ?? "native"}:${buildPlatform}:${process.arch}`,
+    compiler: [process.env["SCRIPTC_CC"] ?? "clang"],
+    nativeEnvironment: await executableNativeEnvironmentFingerprint(),
+    nodeVersion: process.version,
+    implementation: implementation.digest,
+    implementationDependencies: implementation.dependencies,
+  };
+  const earlyHit = await readEarlyExecutableCache(cacheRoot, earlyCacheOptions);
+  if (earlyHit !== null) {
+    // Route/proof metadata is independently evictable. A full-compiler
+    // fallback that still finds the validated payload repairs that lightweight
+    // index so the next identical CLI invocation can avoid this module graph.
+    await publishEarlyExecutableRoute(cacheRoot, earlyCacheOptions).catch(() => undefined);
+    if (earlyHit.executableRestored) {
+      await pruneBuildCache(cacheRoot);
+      return {
+        ok: true,
+        binaryPath: opts.outPath,
+        cPath: earlyHit.cPath,
+        backend: earlyHit.native.backend,
+        ...(earlyHit.irPath === undefined ? {} : { irPath: earlyHit.irPath }),
+        ...(earlyHit.native.llvmRefusal === undefined
+          ? {}
+          : { llvmRefusal: earlyHit.native.llvmRefusal }),
+      };
+    }
+    try {
+      await compileExecutableNative(
+        earlyHit.native,
+        earlyHit.cPath,
+        opts.outPath,
+        opts.sanitize ?? false,
+        ffi,
+        null,
+        async ({ dependencies }) => {
+          await publishEarlyExecutableCache(cacheRoot, earlyCacheOptions, {
+            ...earlyHit,
+            executableRestored: true,
+            nativeDependencies: dependencies,
+            frontend: earlyHit.frontend,
+          });
+        },
+      );
+    } catch (err) {
+      if (ffi !== null && err instanceof CcCompileError) {
+        return {
+          ok: false,
+          diagnostics: [ffiNativeBuildDiag(
+            ffiNativeBuildDetail(err),
+            opts.ffiProfilePath ?? entryPath,
+          )],
+          sourceTexts: new Map(),
+        };
+      }
+      throw err;
+    }
+    await pruneBuildCache(cacheRoot);
+    return {
+      ok: true,
+      binaryPath: opts.outPath,
+      cPath: earlyHit.cPath,
+      backend: earlyHit.native.backend,
+      ...(earlyHit.irPath === undefined ? {} : { irPath: earlyHit.irPath }),
+      ...(earlyHit.native.llvmRefusal === undefined
+        ? {}
+        : { llvmRefusal: earlyHit.native.llvmRefusal }),
+    };
+  }
+  const prepared = lowerExecutable(entryPath, opts, preflight);
   if (!prepared.ok) return prepared;
-  const {
-    module,
-    entryText,
-    sourceTexts,
-    ffi,
-    buildPlatform,
-    buildPointerBits,
-  } = prepared;
+  const { module, entryText, sourceTexts, buildPointerBits } = prepared;
 
   await mkdir(opts.outDir, { recursive: true });
   const stem = basename(entryPath).replace(/\.(ts|js|mjs|cjs)$/, "");
@@ -1423,6 +1686,7 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
   // (the frontend ran once, the IR is backend-agnostic — nothing recompiles).
   let cPath = join(opts.outDir, `${stem}.c`);
   let backend: "c" | "llvm" = "c";
+  let llvmSource: string | null = null;
   let llvmRefusal: string | undefined;
   if (opts.backend !== "c") {
     try {
@@ -1436,6 +1700,7 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
       });
       cPath = join(opts.outDir, `${stem}.ll`);
       await writeFile(cPath, ll);
+      llvmSource = ll;
       backend = "llvm";
     } catch (err) {
       if (!(err instanceof LlvmUnsupportedError)) throw err;
@@ -1470,16 +1735,74 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
   }
 
   let binaryPath = opts.outPath;
+  const nativeFeatures = executableNativeFeatures(
+    module,
+    backend,
+    opts.dynamic ?? false,
+    opts.optimization ?? "release",
+    llvmRefusal,
+  );
+  const programSplit =
+    backend === "llvm" && (opts.optimization ?? "release") === "dev" &&
+      !(opts.sanitize ?? false) && llvmSource !== null
+      ? splitLlvmProgram(llvmSource)
+      : null;
   await mkdir(dirname(opts.outPath), { recursive: true });
+  let publishedExecutable = false;
   try {
-    const nativeBuild: CcOptions = Object.freeze({
-      cPath,
-      outPath: opts.outPath,
-      ...executableNativeBuildPlan(module, opts, ffi),
-    });
     if (opts.nativeBuildExecutor === undefined) {
-      await compileC(nativeBuild);
+      /* NOT `compileExecutableNative`, and the difference is load-bearing.
+       * That helper derives its options from the cache-key feature record,
+       * which by construction names only the surface an upstream build has.
+       * A build here can additionally carry linked objects, system libraries,
+       * requested runtime services and native handles, none of which that
+       * record models — routing through it drops them and the link fails on
+       * the fixture's own symbols.
+       *
+       * So the options come from `executableNativeBuildPlan`, which is
+       * already this fork's single description of a native build and is a
+       * superset: it merges the FFI profile's inputs with the embedder's.
+       * Upstream's additions ride along — the dev posture, the program
+       * shards, and the hook their early cache publishes from.
+       *
+       * The two descriptions therefore meet only where they agree: a build
+       * carrying any of those extra inputs does not consult the cache at all
+       * (see the cache root above), so on every cacheable build the plan's
+       * extra fields are empty and upstream's key names everything. */
+      await compileC({
+        ...executableNativeBuildPlan(module, opts, ffi),
+        cPath,
+        outPath: opts.outPath,
+        ...(opts.optimization === "dev" ? { optimization: "dev" as const } : {}),
+        ...(programSplit === null
+          ? {}
+          : {
+              programShards: programSplit.shards,
+              programPublicSymbols: programSplit.publicSymbols,
+            }),
+        onArtifactReady: async ({ dependencies }) => {
+          await publishEarlyExecutableCache(cacheRoot, earlyCacheOptions, {
+            cPath,
+            native: nativeFeatures,
+            executableRestored: true,
+            nativeDependencies: dependencies,
+            frontend: frontendInputs.snapshot(),
+            ...(irPath === undefined ? {} : { irPath }),
+          });
+          publishedExecutable = true;
+        },
+      });
     } else {
+      /* An embedder that supplies its own build executor owns materialization
+       * and may place the binary elsewhere, so nothing here may cache it: the
+       * artifact this process would publish is not the artifact that exists.
+       * The same reason `commandExecutor` disables the native artifact caches
+       * one layer down. */
+      const nativeBuild: CcOptions = Object.freeze({
+        cPath,
+        outPath: opts.outPath,
+        ...executableNativeBuildPlan(module, opts, ffi),
+      });
       ({ binaryPath } = await opts.nativeBuildExecutor(nativeBuild));
       if (binaryPath.length === 0) {
         throw new Error("nativeBuildExecutor returned an empty binary path");
@@ -1507,6 +1830,16 @@ export async function compile(entryPath: string, opts: CompileOptions): Promise<
     }
     throw err;
   }
+  if (!publishedExecutable) {
+    await publishEarlyExecutableCache(cacheRoot, earlyCacheOptions, {
+      cPath,
+      native: nativeFeatures,
+      executableRestored: false,
+      frontend: frontendInputs.snapshot(),
+      ...(irPath === undefined ? {} : { irPath }),
+    }).catch(() => undefined);
+  }
+  await pruneBuildCache(cacheRoot);
   return {
     ok: true,
     binaryPath,
@@ -2651,7 +2984,7 @@ async function compileLibraryNative(
   profile: LibraryProfile,
   cPath: string,
   archivePath: string,
-  native: EarlyLibraryNativeRecord,
+  native: EarlyLibraryNativeFeatures,
 ): Promise<void> {
   let programSource: string | undefined;
   let identityCSource: string | undefined;
@@ -2941,7 +3274,7 @@ async function compileLibraryTracked(
     await writeFile(irPath, serializeModule(mod));
   }
 
-  const record: EarlyLibraryNativeRecord = {
+  const record: EarlyLibraryNativeFeatures = {
     backend: profile.emission,
     ...(prepared.librarySection.identity !== undefined
       ? { buildId: prepared.librarySection.identity.buildId }

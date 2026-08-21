@@ -15,6 +15,7 @@
   "exports": {
     ".": "./dist/index.js",
     "./native-manifest.d.ts": "./src/native-manifest.d.ts",
+    "./startup-cache": "./dist/startup-cache.js",
     "./scriptc.d.ts": "./ambient/scriptc.d.ts",
     "./scriptc-overrides.d.ts": "./ambient/scriptc-overrides.d.ts",
     "./scriptc-node-fallback.d.ts": "./ambient/scriptc-node-fallback.d.ts",
