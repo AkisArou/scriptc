@@ -417,6 +417,23 @@ const NOTICE_CONTRACT = {
   ],
 } as const satisfies IrNativeCallbackContract;
 
+/* The same telling delivery whose payload the emitter may WITHHOLD. Only the
+ * SOURCE type differs from `TELL_SOURCE`: the physical slot is the same handle
+ * pointer, because nullability is a fact about the value a program receives
+ * rather than about the ABI that carries it. */
+const MAYBE_SOURCE = {
+  ...nativeCallbackArgumentType(TELL_CALLBACK),
+  params: [{ kind: "nullableNativeHandle", typeId: COUNTER_ID }],
+} as const;
+const MAYBE_CONTRACT = {
+  owner: { kind: "process" },
+  allowedInvocationExecutors: ["same-as-caller"],
+  synchronousReturn: true,
+  sourceArguments: [
+    { kind: "callback-parameter", parameter: 0, destructor: COUNTER_DESTROY },
+  ],
+} as const satisfies IrNativeCallbackContract;
+
 const TELLER_DEFINITION = {
   kind: "handle",
   id: TELLER_ID,
@@ -1676,6 +1693,53 @@ const localNativeInput: NativeFrontendInput = {
         },
       ],
       result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#maybe_register",
+      declaration: { module: nativePackage, name: "maybeWith" },
+      entry: { symbol: "nts_maybe_register" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      arguments: [
+        { name: "callback", type: MAYBE_SOURCE, callback: MAYBE_CONTRACT },
+      ],
+      parameters: [
+        {
+          name: "callback",
+          type: { kind: "nativeCallback", signature: TELL_CALLBACK },
+          passMode: "pointer",
+          ownership: { kind: "callback" },
+          projection: { kind: "callbackFunction", argument: 0 },
+        },
+        {
+          name: "context",
+          type: { kind: "nativeContext", addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "callback" },
+          projection: { kind: "callbackContext", argument: 0 },
+        },
+      ],
+      result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#maybe_mark",
+      declaration: { module: nativePackage, name: "maybeMark" },
+      entry: { symbol: "nts_maybe_mark" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([]),
+      result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#maybe_fire",
+      declaration: { module: nativePackage, name: "maybeFire" },
+      entry: { symbol: "nts_maybe_fire" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "seed", type: I32, passMode: "value", ownership: { kind: "value" } },
+      ]),
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
       id: "scriptc.fixture.c-v1@0.0.0#notice_mark",
@@ -5579,6 +5643,40 @@ describe.each(["c", "llvm"] as const)(
       expect(validateModule(module)).toEqual([]);
       expect((module.nativeTypes ?? []).map(({ id }) => id))
         .toContain(COUNTER_ID);
+      const run = spawnSync(result.binaryPath);
+      expect({
+        status: run.status,
+        signal: run.signal,
+        stderr: run.stderr.toString(),
+      }).toEqual({ status: 42, signal: null, stderr: "" });
+    });
+  },
+);
+
+describe.each(["c", "llvm"] as const)(
+  "Native IR withheld handle payloads, %s backend",
+  (backend) => {
+    test("hands the handler null and an object through one registration", async () => {
+      const outDir = join(scratch, `payload-absent-${backend}`);
+      const result = await compile(
+        join(repoRoot, "tests/native-ir/payload-absent.ts"),
+        {
+          outDir,
+          outPath: join(outDir, "program"),
+          backend,
+          emitIr: true,
+          sanitize,
+          externalTypes: nativeExternalTypes(),
+          native: frontendNativeInput(),
+          nativeLinkInputs: [fixtureObject(), supportObject(), retainedSupportObject()],
+        },
+      );
+      expect(result.ok ? [] : result.diagnostics).toEqual([]);
+      if (!result.ok || result.irPath === undefined) {
+        throw new Error("withheld payload compile did not emit IR");
+      }
+      const module = deserializeModule(readFileSync(result.irPath, "utf8"));
+      expect(validateModule(module)).toEqual([]);
       const run = spawnSync(result.binaryPath);
       expect({
         status: run.status,

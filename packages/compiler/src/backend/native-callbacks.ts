@@ -154,6 +154,16 @@ export function allocateNativeCallbackAdapters(
  * which is the argument for putting the choice in one place rather than
  * asking two places to agree.
  */
+/** The union a nullable payload's handler receives, and which tag each arm
+ * is. Resolved by the caller because a union's identity belongs to the module
+ * being emitted, which this layer does not hold — the same division
+ * `resolveDestructor` lives under. */
+export interface NativeCallbackAbsentPayload {
+  readonly unionId: string;
+  readonly presentTag: number;
+  readonly nullTag: number;
+}
+
 export type NativeCallbackPayload =
   /** The physical slot IS the script value, which `scriptType` names so a
    * backend does not re-derive it and risk disagreeing. */
@@ -193,6 +203,17 @@ export type NativeCallbackPayload =
       readonly typeId: string;
       readonly free: string;
       readonly scriptType: IrType;
+      /** Present when the emitter may hand the slot over as NULL, naming the
+       * two-arm union the handler receives and which tag each arm is.
+       *
+       * The same field a nullable handle RESULT carries, spelled the same
+       * way, because it is the same question in the other direction: a
+       * pointer that may be absent becomes a value the program can test. What
+       * differs is only who tests it — a call site there, a trampoline here.
+       *
+       * `null` means the payload is always an object, which is the only thing
+       * a delivery could assume before this existed. */
+      readonly absent: NativeCallbackAbsentPayload | null;
     }
   /** The registration's owner, injected rather than read from a slot. */
   | { readonly kind: "registrationOwner" };
@@ -204,6 +225,7 @@ export type NativeCallbackPayload =
 export function nativeCallbackPayloads(
   adapter: NativeCallbackAdapter,
   resolveDestructor: (bindingId: string) => string,
+  resolveNullableUnion: (typeId: string) => NativeCallbackAbsentPayload,
 ): readonly NativeCallbackPayload[] {
   const physical = adapter.callback.signature.parameters;
   return adapter.contract.sourceArguments.map((argument, sourceIndex) => {
@@ -222,13 +244,22 @@ export function nativeCallbackPayloads(
     }
     const slot = argument.parameter;
     if (source.kind === "cstring") return { kind: "cstring", slot };
-    if (source.kind === "nativeHandle" && argument.destructor !== undefined) {
+    if (
+      (source.kind === "nativeHandle" || source.kind === "nullableNativeHandle") &&
+      argument.destructor !== undefined
+    ) {
+      const absent = source.kind === "nullableNativeHandle"
+        ? resolveNullableUnion(source.typeId)
+        : null;
       return {
         kind: "ownedHandle",
         slot,
         typeId: source.typeId,
         free: resolveDestructor(argument.destructor),
-        scriptType: nativeCallbackSourceScriptType(source),
+        scriptType: absent === null
+          ? { kind: "nativeHandle", typeId: source.typeId }
+          : { kind: "union", unionId: absent.unionId },
+        absent,
       };
     }
     const carrier = physical[slot];
@@ -247,7 +278,18 @@ export function nativeCallbackPayloads(
     ) {
       return { kind: "widenedNumber", slot, physical: carrier };
     }
-    return { kind: "direct", slot, scriptType: nativeCallbackSourceScriptType(source) };
+    /* A payload that crosses as itself. A nullable handle reaches here only
+     * when the contract names no destructor for it — a payload the handler
+     * borrows rather than owns — and it still receives the union, because
+     * what the handler is handed does not depend on who releases it. */
+    return {
+      kind: "direct",
+      slot,
+      scriptType: nativeCallbackSourceScriptType(
+        source,
+        (typeId) => resolveNullableUnion(typeId).unionId,
+      ),
+    };
   });
 }
 

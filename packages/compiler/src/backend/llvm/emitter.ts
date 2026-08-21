@@ -87,10 +87,10 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, islandPromisePayloadTag, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, moduleHasProcessScopedRegistration, nativeCallbackSourceScriptType, nativeDestructorBindingIds, nativeIntegerInfo, nativeIntegerOpTraps, nativeScalarWidensToNumber, NPM_COMPRESS_MIN, provenNumberLiteral, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID, isFfiReleaseParam } from "../../ir/nodes.js";
+import { nullableNativeHandleUnion, canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, islandPromisePayloadTag, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, moduleHasProcessScopedRegistration, nativeCallbackSourceScriptType, nativeDestructorBindingIds, nativeIntegerInfo, nativeIntegerOpTraps, nativeScalarWidensToNumber, NPM_COMPRESS_MIN, provenNumberLiteral, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID, isFfiReleaseParam } from "../../ir/nodes.js";
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
-import { NATIVE_CALLBACK_INVOCATION_BASE_FIELDS, allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, nativeCallLifecycle, nativeCallbackPayloads, nativeQueuedPayloadCleanup, nativeTrampolineForm, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
+import { NATIVE_CALLBACK_INVOCATION_BASE_FIELDS, allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, nativeCallLifecycle, nativeCallbackPayloads, nativeQueuedPayloadCleanup, nativeTrampolineForm, type NativeCallbackAbsentPayload, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
 import { nativeArgumentBorrow, nativeArgumentHandle, nativeArgumentForm, nativeCallDisposal, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultCopy, nativeResultForm, nativeResultHandle, type NativeArgumentFormExhausted } from "../native-call-plan.js";
 import { computeMayThrow } from "../emission/may-throw.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleNativeHandleTag, mangleNativeStruct, mangleRecordClone, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
@@ -1083,6 +1083,35 @@ class LlEmitter {
   private readonly liveDynUnionRefAdapters = new Map<string, string>();
   private readonly dynPromiseAdapters = new Map<string, string>();
   readonly unionsById = new Map<string, IrUnionDef>();
+
+  /* The union a nullable payload's handler receives, from the module being
+   * emitted. `validateModule` refuses a module whose table lacks it, so
+   * absence here is a backend reached with IR nobody validated. */
+  /* One release-if-present function per destructor, because a bail is a flat
+   * instruction list spliced into several places and a branch inside it would
+   * need labels unique to each. A call is not, so the branch moves here.
+   *
+   * The guard is the contract's, not the library's: a destructor that happens
+   * to tolerate NULL is a property of one implementation, and a trampoline
+   * that relied on it would be correct until the next library. */
+  private readonly nullableReleaseHelpers = new Map<string, string>();
+
+  private nullableReleaseHelper(free: string): string {
+    let symbol = this.nullableReleaseHelpers.get(free);
+    if (symbol === undefined) {
+      symbol = `sc_release_maybe_${this.nullableReleaseHelpers.size}`;
+      this.nullableReleaseHelpers.set(free, symbol);
+    }
+    return symbol;
+  }
+
+  nullableUnionOf(typeId: string): NativeCallbackAbsentPayload {
+    const found = nullableNativeHandleUnion([...this.unionsById.values()], typeId);
+    if (found === null) {
+      throw new Error(`llvm emitter bug: no "T | null" union for payload ${typeId}`);
+    }
+    return { unionId: found.unionId, presentTag: found.handleTag, nullTag: found.nullTag };
+  }
   readonly recordsById = new Map<string, IrRecordShape>();
   readonly recordCloneShapes = new Set<string>();
   readonly tracedShapes: Set<string>;
@@ -1750,7 +1779,7 @@ class LlEmitter {
         this.declare("declare ptr @scr_native_handle_prepare(ptr, ptr, ptr)");
         this.declare("declare void @scr_native_handle_commit(ptr, ptr)");
         this.declare(`declare void @${payload.free}(ptr)`);
-        prepare.push(
+        const cellLines = [
           `  %existing${slot} = call ptr @scr_native_handle_interned(ptr @${tag}, ptr %a${slot})`,
           `  %existing${slot}.found = icmp ne ptr %existing${slot}, null`,
           `  br i1 %existing${slot}.found, label %${reuse}, label %${fresh}`,
@@ -1764,8 +1793,37 @@ class LlEmitter {
           `  br label %${done}`,
           `${done}:`,
           `  %cell${slot} = phi ptr [ %existing${slot}, %${reuse} ], [ %prepared${slot}, %${fresh} ]`,
+        ];
+        if (payload.absent === null) {
+          prepare.push(...cellLines);
+          return `ptr %cell${slot}`;
+        }
+        /* A payload the emitter may withhold. The handler receives the union
+         * rather than the object, and the cell is built only on the present
+         * arm: interning a NULL pointer would hand back whatever cell a
+         * previous NULL prepared, which is the one way this could silently
+         * produce an object where the library said there was none. */
+        const arm: IrType = { kind: "nativeHandle", typeId: payload.typeId };
+        const rc = vAdapters(this, arm);
+        const absent = `arg${slot}.absent`;
+        const present = `arg${slot}.present`;
+        const joined = `arg${slot}.done`;
+        this.declare(`declare ptr @scr_union_new_ref(i32, ptr, ptr, ptr, ptr)`);
+        prepare.push(
+          `  %a${slot}.isnull = icmp eq ptr %a${slot}, null`,
+          `  br i1 %a${slot}.isnull, label %${absent}, label %${present}`,
+          `${present}:`,
+          ...cellLines,
+          `  %union${slot} = call ptr @scr_union_new_ref(i32 ${payload.absent.presentTag}, ` +
+            `ptr %cell${slot}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${traceArg(this, arm)})`,
+          `  br label %${joined}`,
+          `${absent}:`,
+          `  br label %${joined}`,
+          `${joined}:`,
+          `  %arg${slot} = phi ptr [ %union${slot}, %${done} ], ` +
+            `[ ${this.unitInstanceRef(payload.absent.unionId, payload.absent.nullTag)}, %${absent} ]`,
         );
-        return `ptr %cell${slot}`;
+        return `ptr %arg${slot}`;
       }
       case "direct":
         return `${this.llType(payload.scriptType)} %a${payload.slot}`;
@@ -1790,7 +1848,7 @@ class LlEmitter {
           throw new Error(`llvm emitter bug: unknown payload destructor ${bindingId}`);
         }
         return free.entry.symbol;
-      });
+      }, (typeId) => this.nullableUnionOf(typeId));
       const signature = adapter.callback.signature;
       /* The context slot sits at its declared position rather than being
        * appended: a C API may take userdata first, last, or not at all, and
@@ -1823,7 +1881,12 @@ class LlEmitter {
         const bailReleases = payloads.flatMap((payload) => {
           if (payload.kind !== "ownedHandle") return [];
           this.declare(`declare void @${payload.free}(ptr)`);
-          return [`  call void @${payload.free}(ptr %a${payload.slot})`];
+          /* A withheld payload handed over no reference, so there is nothing
+           * to give back — and the destructor must not see the NULL. */
+          const release = payload.absent === null
+            ? payload.free
+            : this.nullableReleaseHelper(payload.free);
+          return [`  call void @${release}(ptr %a${payload.slot})`];
         });
         const bail = [
           ...bailReleases,
@@ -2017,7 +2080,7 @@ class LlEmitter {
               ? "ptr"
               : widensNumber
                 ? this.llType(physical)
-                : this.llType(nativeCallbackSourceScriptType(sourceType));
+                : this.llType(nativeCallbackSourceScriptType(sourceType, (typeId) => this.nullableUnionOf(typeId).unionId));
             defs.push(
               `  %source${sourceIndex}.ptr = getelementptr inbounds ${invocationType}, ptr %base, i64 0, i32 ${physicalFieldBase + argument.parameter}`,
               `  %source${sourceIndex} = load ${loadType}, ptr %source${sourceIndex}.ptr`,
@@ -2094,7 +2157,7 @@ class LlEmitter {
             (signature.parameters[argument.parameter] as IrNativeScalarType)
                 .scalar !== "f64";
           callArgs.push(
-            `${this.llType(nativeCallbackSourceScriptType(sourceType))} %source${sourceIndex}${
+            `${this.llType(nativeCallbackSourceScriptType(sourceType, (typeId) => this.nullableUnionOf(typeId).unionId))} %source${sourceIndex}${
               retained ? ".retained" : widened ? ".wide" : ""
             }`,
           );
@@ -2293,6 +2356,22 @@ class LlEmitter {
           ...this.nativeCallbackAnswerLl(answer, signature.result, "%result"),
         );
       }
+    }
+    for (const [free, symbol] of this.nullableReleaseHelpers) {
+      this.declare(`declare void @${free}(ptr)`);
+      defs.push(
+        ``,
+        `define internal void @${symbol}(ptr %p) ${FN_ATTRS} {`,
+        `entry:`,
+        `  %absent = icmp eq ptr %p, null`,
+        `  br i1 %absent, label %done, label %present`,
+        `present:`,
+        `  call void @${free}(ptr %p)`,
+        `  br label %done`,
+        `done:`,
+        `  ret void`,
+        `}`,
+      );
     }
     return defs;
   }

@@ -199,6 +199,14 @@ export declare function noticeWith(callback: (subject: Counter) => void): void;
 export declare function noticeMark(): void;
 export declare function noticeFire(seed: i32): i32;
 
+/* The same telling registration where the payload may be ABSENT: the handler
+ * receives `Counter | null` and tests it, because a framework that hands a
+ * lifecycle an object on one call and nothing on another is describing a
+ * value rather than a failure. */
+export declare function maybeWith(callback: (subject: Counter | null) => void): void;
+export declare function maybeMark(): void;
+export declare function maybeFire(seed: i32): i32;
+
 /* The `onKeyDown` shape: answers a boolean while holding both a scalar and an
  * object. */
 export interface Judge {

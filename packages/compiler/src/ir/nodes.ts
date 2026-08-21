@@ -257,12 +257,47 @@ export function moduleHasProcessScopedRegistration(mod: IrModule): boolean {
  */
 export function nativeCallbackSourceSignature(
   source: IrNativeCallbackArgumentType,
+  nullableUnionId: NullableHandleUnionId,
 ): IrType & { kind: "func" } {
   return {
     kind: "func",
-    params: source.params.map(nativeCallbackSourceScriptType),
+    params: source.params.map((parameter) =>
+      nativeCallbackSourceScriptType(parameter, nullableUnionId)
+    ),
     ret: source.ret.kind === "bool" ? BOOL : source.ret,
   };
+}
+
+/** Where the identity of a nullable payload's union comes from.
+ *
+ * The arm names the handle and stops there, so both readers supply the rest
+ * from what they own: the lowerer INTERNS `T | null` while materializing the
+ * handler's signature, and a backend LOOKS IT UP in the module it is
+ * emitting. Neither could be written into the arm — the input has no union
+ * table, and a module's ids are its own — which is the same division a
+ * nullable handle result already lives under. */
+export type NullableHandleUnionId = (typeId: string) => string;
+
+/** The tags of a two-arm `T | null`, by the arms rather than by an id.
+ *
+ * A union table interns by structure, so at most one union has these arms and
+ * finding it is a definition rather than a search heuristic. Returns null when
+ * the module carries no such union, which is a defect in whoever built the
+ * module rather than a case to paper over. */
+export function nullableNativeHandleUnion(
+  unions: readonly IrUnionDef[],
+  typeId: string,
+): { unionId: string; handleTag: number; nullTag: number } | null {
+  for (const union of unions) {
+    if (union.arms.length !== 2) continue;
+    const handleTag = union.arms.findIndex(
+      (arm) => arm.kind === "nativeHandle" && arm.typeId === typeId,
+    );
+    const nullTag = union.arms.findIndex((arm) => arm.kind === "nullT");
+    if (handleTag < 0 || nullTag < 0) continue;
+    return { unionId: union.id, handleTag, nullTag };
+  }
+  return null;
 }
 
 /** The script type a whole argument declaration describes — for a callback
@@ -270,11 +305,18 @@ export function nativeCallbackSourceSignature(
  * script type, which is why this was long left implicit; a callback argument
  * never did, and now says so.
  *
- * The nullable forms are excluded rather than handled: what they admit is a
- * two-arm union whose identity lives in the module's union table, so the
- * answer is not a type this function could name. Every caller matches them
- * against that table first, and the signature says so instead of returning
- * something almost right. */
+ * The nullable ARGUMENT forms are excluded rather than handled: what they
+ * admit is a two-arm union whose identity lives in the module's union table,
+ * so the answer is not a type this function could name from its input alone.
+ * Every caller matches them against that table first, and the signature says
+ * so instead of returning something almost right.
+ *
+ * A nullable PAYLOAD is the same union and is not excluded, because it is
+ * reached one level down — inside a callback's own signature, where returning
+ * "almost right" is not an option either: the trampoline casts the closure to
+ * this type. So the identity is supplied instead of refused, and `nullableUnionId`
+ * is where it comes from. The asymmetry is the callers': an argument has one
+ * at hand to match against, a payload has none. */
 export function nativeArgumentScriptType(
   argument: Exclude<
     IrNativeArgumentType,
@@ -282,16 +324,22 @@ export function nativeArgumentScriptType(
     | { kind: "nullableStringArray" }
     | { kind: "nullableNativeHandle" }
   >,
+  nullableUnionId: NullableHandleUnionId,
 ): IrType {
-  return argument.kind === "func" ? nativeCallbackSourceSignature(argument) : argument;
+  return argument.kind === "func"
+    ? nativeCallbackSourceSignature(argument, nullableUnionId)
+    : argument;
 }
 
 /** One payload's script type: what the handler's parameter actually is, once
  * the physical arrangement the source form names has been read. */
 export function nativeCallbackSourceScriptType(
   parameter: IrNativeCallbackArgumentType["params"][number],
+  nullableUnionId: NullableHandleUnionId,
 ): IrType {
-  return parameter.kind === "cstring" || parameter.kind === "utf8Span"
+  return parameter.kind === "nullableNativeHandle"
+    ? { kind: "union", unionId: nullableUnionId(parameter.typeId) }
+    : parameter.kind === "cstring" || parameter.kind === "utf8Span"
     ? STRING
     : parameter.kind === "byteSpan"
       ? BYTES_U8

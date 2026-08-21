@@ -19,6 +19,7 @@ import type {
   IrNativePhysicalAbiValue,
   IrNativeScalarType,
   IrNativeStructDef,
+  NullableHandleUnionId,
   IrRecordShape,
   IrRegexIntrinsicMethod,
   IrStmt,
@@ -27,7 +28,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "./nodes.js";
-import { arrayOf, BIGINT, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, ffiClassType, ffiSourceParamTypes, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, isFfiCallbackParam, isFfiContextParam, isFfiReleaseParam, isJsonSafeType, islandPromisePayloadTag, isRefCounted, isSupportedArrayElem, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, nativeArgumentScriptType, nativeCallbackIsOwnerScoped, nativeFailureReadsResult, nativeIntegerInfo, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, shapeHasAccessorSlots, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
+import { nullableNativeHandleUnion, arrayOf, BIGINT, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, ffiClassType, ffiSourceParamTypes, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, isFfiCallbackParam, isFfiContextParam, isFfiReleaseParam, isJsonSafeType, islandPromisePayloadTag, isRefCounted, isSupportedArrayElem, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, nativeArgumentScriptType, nativeCallbackIsOwnerScoped, nativeFailureReadsResult, nativeIntegerInfo, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, shapeHasAccessorSlots, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
 
 /**
  * A published union as it arrives from OUTSIDE, with every payload field
@@ -1220,6 +1221,13 @@ function callSiteReturnType(fn: IrFunction): IrType {
 
 export function validateModule(mod: IrModule): IrValidationError[] {
   const errors: IrValidationError[] = [];
+  /* A nullable payload's union, by its arms. The rule that admits such a
+   * payload proves the union exists first, so an empty id here can only be
+   * reached through a module that rule already refused — where a script type
+   * that fails to match is the right outcome rather than a second complaint
+   * about the same defect. */
+  const moduleNullableUnionId: NullableHandleUnionId = (typeId) =>
+    nullableNativeHandleUnion(mod.unions ?? [], typeId)?.unionId ?? "";
   const functionsByName = new Map<string, IrFunction>();
   for (const fn of mod.functions) {
     if (functionsByName.has(fn.name)) {
@@ -1630,6 +1638,14 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         (typeof parameter === "object" && parameter !== null &&
           ((parameter.kind === "nativeHandle" &&
             nativeTypesById.get(parameter.typeId)?.kind === "handle") ||
+            /* The same payload where the emitter may withhold it. The type
+             * table has to carry the handle for the same reason — the arm the
+             * handler receives when there IS one is that object. What absence
+             * additionally requires is the union, and that is checked where
+             * the payload meets its physical slot, because it is a fact about
+             * this delivery rather than about the type. */
+            (parameter.kind === "nullableNativeHandle" &&
+              nativeTypesById.get(parameter.typeId)?.kind === "handle") ||
             parameter.kind === "cstring" ||
             parameter.kind === "utf8Span" ||
             parameter.kind === "byteSpan" ||
@@ -1706,9 +1722,13 @@ export function validateModule(mod: IrModule): IrValidationError[] {
        * key is meaningful on exactly one source shape and must be absent
        * everywhere else rather than ignored. */
       const destructor = source["destructor"];
-      if (destructor === undefined) return type.params[index]?.kind !== "nativeHandle";
-      return type.params[index]?.kind === "nativeHandle" &&
-        typeof destructor === "string" && destructor !== "";
+      /* Both handle payload arms, because who releases the reference does not
+       * depend on whether the emitter may withhold it: when there IS an
+       * object, it arrived owned either way. */
+      const payload = type.params[index]?.kind;
+      const owns = payload === "nativeHandle" || payload === "nullableNativeHandle";
+      if (destructor === undefined) return !owns;
+      return owns && typeof destructor === "string" && destructor !== "";
     });
     if (
       typeof owner !== "object" || owner === null ||
@@ -2558,6 +2578,34 @@ export function validateModule(mod: IrModule): IrValidationError[] {
               /* A C-string source over a const byte pointer is the copy the
                * runtime makes when it decodes the payload. Everything else
                * must be the physical type itself. */
+              /* A payload that may be ABSENT. The physical slot is the same
+               * handle pointer a required payload arrives through —
+               * nullability is a fact about the SOURCE value, not about the
+               * ABI — so what has to hold beyond the type matching is that
+               * the module carries the two-arm union the handler receives.
+               * Both backends resolve the delivery's tags from that union,
+               * and a module missing it describes a payload nothing can
+               * construct. */
+              if (source.kind === "nullableNativeHandle") {
+                if (
+                  expected.kind !== "nativeHandle" ||
+                  expected.typeId !== source.typeId ||
+                  nullableNativeHandleUnion(mod.unions ?? [], source.typeId) === null ||
+                  /* SYNCHRONOUS DELIVERY ONLY, refused by name rather than
+                   * emitted untested. A queued delivery stores the payload's
+                   * raw pointer in an invocation record and builds the cell
+                   * when the delivery runs, so absence there is a state of
+                   * the RECORD rather than a branch in one trampoline — the
+                   * cleanup that releases stored payloads at shutdown reads
+                   * the same slot and would call a destructor on a pointer
+                   * the library never gave. That is a real shape, and it can
+                   * have this arm when a program needs it; today none does,
+                   * and a framework lifecycle is delivered in the caller's
+                   * frame. */
+                  !callbackContract.synchronousReturn
+                ) return false;
+                continue;
+              }
               if (source.kind === "utf8Span" || source.kind === "byteSpan") {
                 /* A span form is two slots by construction, so a single-slot
                  * projection can never carry one. */
@@ -2695,8 +2743,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             registered.callback?.owner.kind !== "process" ||
             sourceArgument.type.kind !== "func" ||
             !typeEquals(
-              nativeArgumentScriptType(sourceArgument.type),
-              nativeArgumentScriptType(registered.type),
+              nativeArgumentScriptType(sourceArgument.type, moduleNullableUnionId),
+              nativeArgumentScriptType(registered.type, moduleNullableUnionId),
             ) ||
             parameter.type.kind !== "nativeCallback" ||
             !validNativeCallback(parameter.type) ||
@@ -3761,6 +3809,11 @@ function validateFunction(
   const locals = new Map(fn.locals.map((l) => [l.id, l]));
   const err = (message: string, loc: SrcLoc) =>
     errors.push({ message: `in ${fn.name}: ${message}`, loc });
+  /* The same resolution the module-level rules use, over the table this
+   * function was handed. The binding rule proved the union exists before any
+   * call to it could be validated here. */
+  const moduleNullableUnionId: NullableHandleUnionId = (typeId) =>
+    nullableNativeHandleUnion([...unions.values()], typeId)?.unionId ?? "";
 
   const asyncCaches = [
     ["asyncCacheGlobal", fn.asyncCacheGlobal],
@@ -5085,7 +5138,7 @@ function validateFunction(
             ) {
               expectType(
                 arg,
-                nativeArgumentScriptType(argument.type),
+                nativeArgumentScriptType(argument.type, moduleNullableUnionId),
                 `Native IR call ${e.binding} arg ${i}`,
               );
             }

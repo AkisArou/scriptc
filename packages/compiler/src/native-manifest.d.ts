@@ -183,6 +183,22 @@ export type IrNativeCallbackArgumentType = {
   params: readonly (
     | IrNativeScalarType
     | IrNativeHandleType
+    /** A handle payload the emitter may hand over as NULL. The handler
+     * receives the two-arm union `T | null` rather than an object, so absence
+     * is a value it can test instead of a pointer it must not read.
+     *
+     * A framework lifecycle is what needs it. `onCreate(Bundle)` is called
+     * with null on first launch and with saved state afterwards, and there is
+     * no ordering in which a program avoids the null arm — declaring the
+     * payload non-null would be a claim the platform disproves on the first
+     * run.
+     *
+     * The union's identity is NOT named here, for the same reason a nullable
+     * handle RESULT does not name one: a union id belongs to a module's own
+     * table, and this declaration is also the embedder-supplied input, which
+     * has no table to name. Both resolve it the same way — by the arms, from
+     * the module the backend is emitting. */
+    | { kind: "nullableNativeHandle"; typeId: string }
     /** A NUL-terminated `const char *` payload, decoded into a script string
      * the way every other foreign byte sequence is — maximal-subpart U+FFFD
      * replacement. It is named for the C shape rather than for `string`

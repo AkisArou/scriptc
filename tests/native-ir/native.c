@@ -826,3 +826,31 @@ int32_t nts_counter_value_or(NtsCounter *counter, int32_t fallback) {
 int32_t nts_counter_base_value_or(NtsCounter *counter, int32_t fallback) {
   return counter == NULL ? fallback : nts_counter_value(counter);
 }
+
+/* The same registration where the payload MAY BE ABSENT. A framework hands a
+ * lifecycle handler an object on one call and nothing on another — Android's
+ * `onCreate(Bundle)` is called with null on first launch and with saved state
+ * afterwards — so a contract that declared the payload non-null would be a
+ * claim the platform disproves on the first run.
+ *
+ * A negative seed withholds the subject, which is a VALUE the handler tests
+ * rather than a failure: absence is what the platform is reporting. */
+typedef void (*NtsMaybeCallback)(NtsCounter *subject, void *context);
+
+static NtsMaybeCallback nts_maybe_cb = NULL;
+static void *nts_maybe_ctx = NULL;
+static int32_t nts_maybe_marks = 0;
+
+void nts_maybe_register(NtsMaybeCallback callback, void *context) {
+  nts_maybe_cb = callback;
+  nts_maybe_ctx = context;
+}
+
+void nts_maybe_mark(void) { nts_maybe_marks++; }
+
+int32_t nts_maybe_fire(int32_t seed) {
+  nts_maybe_marks = 0;
+  NtsCounter *subject = seed < 0 ? NULL : nts_counter_create(seed);
+  nts_maybe_cb(subject, nts_maybe_ctx);
+  return nts_maybe_marks;
+}

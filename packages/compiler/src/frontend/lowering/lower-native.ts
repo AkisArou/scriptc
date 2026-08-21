@@ -14,9 +14,10 @@ import type {
   IrNativeTypeDef,
   IrNativeValueType,
   IrType,
+  NullableHandleUnionId,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { nativeArgumentScriptType, nativeCallbackIsOwnerScoped, nativeIntegerInfo, provenNumberLiteral, typeEquals } from "../../ir/nodes.js";
+import { nativeArgumentScriptType, nativeCallbackIsOwnerScoped, nativeIntegerInfo, provenNumberLiteral, typeEquals, typeKey } from "../../ir/nodes.js";
 import type { NativeFrontendInput } from "../native.js";
 import { locOf } from "../program.js";
 import { tsgoPath } from "../shared.js";
@@ -291,6 +292,26 @@ function nativeResultMismatchReason(
   return "the validated declaration lost its source result type";
 }
 
+/* The union a nullable payload's handler receives, interned rather than looked
+ * up. The program's own `T | null` annotation interns the same arms in the
+ * same order, so this either finds that union or creates the one the program
+ * would have created — and a handler that never writes the type still leaves
+ * the module carrying it.
+ *
+ * Order is not incidental: a union's identity is its ORDERED arms, so arms
+ * sorted differently would intern a SECOND union with the same members and
+ * different tags. The sort here is the type mapper's, for that reason. */
+function nullableUnionIdOf(L: Lowerer): NullableHandleUnionId {
+  return (typeId) => {
+    const arms: IrType[] = [
+      { kind: "nativeHandle", typeId },
+      { kind: "nullT" },
+    ];
+    arms.sort((left, right) => (typeKey(left) < typeKey(right) ? -1 : 1));
+    return L.unions.intern(arms);
+  };
+}
+
 function matchesNativeArgumentSource(
   L: Lowerer,
   expected: NativeInputBinding["arguments"][number]["type"],
@@ -316,7 +337,7 @@ function matchesNativeArgumentSource(
       vectorArms.some((arm) => arm.kind === "nullT");
   }
   if (expected.kind !== "nullableString") {
-    return typeEquals(mapped, nativeArgumentScriptType(expected));
+    return typeEquals(mapped, nativeArgumentScriptType(expected, nullableUnionIdOf(L)));
   }
   if (mapped.kind === "string" || mapped.kind === "nullT") return true;
   if (mapped.kind !== "union") return false;
@@ -335,7 +356,7 @@ function formatNativeArgumentType(
   if (type.kind === "nullableNativeHandle") {
     return `${L.fmt({ kind: "nativeHandle", typeId: type.typeId })} | null`;
   }
-  return L.fmt(nativeArgumentScriptType(type));
+  return L.fmt(nativeArgumentScriptType(type, nullableUnionIdOf(L)));
 }
 
 function validateDeclaration(
@@ -642,7 +663,7 @@ function lowerNativeInvocation(
       expected.kind !== "nullableStringArray" &&
       expected.kind !== "nullableNativeHandle"
     ) {
-      return L.lowerExprExpecting(argument, nativeArgumentScriptType(expected));
+      return L.lowerExprExpecting(argument, nativeArgumentScriptType(expected, nullableUnionIdOf(L)));
     }
     const mapped = L.mapTypeOf(
       L.checker.getContextualType(argument) ?? L.typeOf(argument),
@@ -728,7 +749,12 @@ function useNativeArgumentType(L: Lowerer, type: IrNativeArgumentType): void {
       return;
     case "func":
       for (const parameter of type.params) {
-        if (parameter.kind === "nativeHandle") L.useNativeType(parameter.typeId);
+        if (
+          parameter.kind === "nativeHandle" ||
+          parameter.kind === "nullableNativeHandle"
+        ) {
+          L.useNativeType(parameter.typeId);
+        }
       }
       return;
     case "nativeScalar":
