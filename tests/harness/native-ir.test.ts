@@ -5514,6 +5514,81 @@ describe.each(["c", "llvm"] as const)(
   },
 );
 
+describe.each(["c", "llvm"] as const)(
+  "Native IR nullable handle arguments reached by nothing else, %s backend",
+  (backend) => {
+    test("keeps the nominal type a null-only slot is the sole mention of", async () => {
+      const outDir = join(scratch, `nullable-handle-only-${backend}`);
+      const result = await compile(
+        join(repoRoot, "tests/native-ir/nullable-handle-only.ts"),
+        {
+          outDir,
+          outPath: join(outDir, "program"),
+          backend,
+          emitIr: true,
+          sanitize,
+          externalTypes: nativeExternalTypes(),
+          native: frontendNativeInput(),
+          nativeLinkInputs: [fixtureObject(), supportObject()],
+        },
+      );
+      expect(result.ok ? [] : result.diagnostics).toEqual([]);
+      if (!result.ok || result.irPath === undefined) {
+        throw new Error("null-only handle compile did not emit IR");
+      }
+      /* The module has to CARRY the type, not merely compile. A strip that
+       * dropped it left the binding pointing at a type the table no longer
+       * had, which is an internal error rather than a wrong answer. */
+      const module = deserializeModule(readFileSync(result.irPath, "utf8"));
+      expect(validateModule(module)).toEqual([]);
+      expect((module.nativeTypes ?? []).map(({ id }) => id))
+        .toContain(COUNTER_ID);
+      const run = spawnSync(result.binaryPath);
+      expect({
+        status: run.status,
+        signal: run.signal,
+        stderr: run.stderr.toString(),
+      }).toEqual({ status: 42, signal: null, stderr: "" });
+    });
+  },
+);
+
+describe.each(["c", "llvm"] as const)(
+  "Native IR untouched handle payloads, %s backend",
+  (backend) => {
+    test("keeps the payload's nominal type when the handler never reads it", async () => {
+      const outDir = join(scratch, `payload-untouched-${backend}`);
+      const result = await compile(
+        join(repoRoot, "tests/native-ir/payload-untouched.ts"),
+        {
+          outDir,
+          outPath: join(outDir, "program"),
+          backend,
+          emitIr: true,
+          sanitize,
+          externalTypes: nativeExternalTypes(),
+          native: frontendNativeInput(),
+          nativeLinkInputs: [fixtureObject(), supportObject(), retainedSupportObject()],
+        },
+      );
+      expect(result.ok ? [] : result.diagnostics).toEqual([]);
+      if (!result.ok || result.irPath === undefined) {
+        throw new Error("untouched payload compile did not emit IR");
+      }
+      const module = deserializeModule(readFileSync(result.irPath, "utf8"));
+      expect(validateModule(module)).toEqual([]);
+      expect((module.nativeTypes ?? []).map(({ id }) => id))
+        .toContain(COUNTER_ID);
+      const run = spawnSync(result.binaryPath);
+      expect({
+        status: run.status,
+        signal: run.signal,
+        stderr: run.stderr.toString(),
+      }).toEqual({ status: 42, signal: null, stderr: "" });
+    });
+  },
+);
+
 describe.each(["c", "llvm"] as const)("Native IR errno errors, %s backend", (backend) => {
   test("snapshots errno and throws a catchable operation-qualified Error", async () => {
     const outDir = join(scratch, `errno-${backend}`);

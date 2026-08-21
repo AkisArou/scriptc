@@ -3,6 +3,7 @@ import { nativeBindingDiag, nativeConversionDiag, nativeSignatureDiag } from "..
 import type {
   IrExpr,
   IrNativeBinding,
+  IrNativeArgumentType,
   IrNativeCallbackContract,
   IrNativeHandleDef,
   IrNativeHandleType,
@@ -673,11 +674,7 @@ function lowerNativeInvocation(
       }
     }
   }
-  for (const argument of binding.arguments) {
-    if (argument.type.kind === "nativeStruct" || argument.type.kind === "nativeHandle") {
-      L.useNativeType(argument.type.typeId);
-    }
-  }
+  for (const argument of binding.arguments) useNativeArgumentType(L, argument.type);
   if (binding.result.type.kind === "nativeStruct" || binding.result.type.kind === "nativeHandle") {
     L.useNativeType(binding.result.type.typeId);
   }
@@ -705,6 +702,51 @@ function lowerNativeInvocation(
 }
 
 /** Lower one direct call of an exact checker-owned native declaration. */
+/* Every nominal type an ARGUMENT names, which is not the same as every type a
+ * program mentions. Two arms name one without the program ever holding a value
+ * of it: a slot that admits absence, where passing null can be the whole use,
+ * and a callback payload the handler receives and hands straight back. Walking
+ * only the required-value arms dropped both, and the module then carried a
+ * binding pointing at a type its own table no longer had — an internal error
+ * rather than a wrong answer, and one that surfaces at the PARAMETER, far from
+ * the argument that failed to name it.
+ *
+ * Neither gap was reachable from a program that also created such a value: the
+ * neighbouring nullable test constructs a counter and reads it, which marks the
+ * type through an ordinary expression and left this path correct by accident. A
+ * framework binding is where they separate — a lifecycle handler receives an
+ * optional object it never touches.
+ *
+ * Exhaustive so that a new argument arm carrying a typeId has to answer this
+ * question rather than inherit "no" by omission. */
+function useNativeArgumentType(L: Lowerer, type: IrNativeArgumentType): void {
+  switch (type.kind) {
+    case "nativeStruct":
+    case "nativeHandle":
+    case "nullableNativeHandle":
+      L.useNativeType(type.typeId);
+      return;
+    case "func":
+      for (const parameter of type.params) {
+        if (parameter.kind === "nativeHandle") L.useNativeType(parameter.typeId);
+      }
+      return;
+    case "nativeScalar":
+    case "f64":
+    case "bool":
+    case "string":
+    case "nullableString":
+    case "bytes":
+    case "array":
+    case "nullableStringArray":
+      return;
+    default: {
+      const remaining: never = type;
+      return remaining;
+    }
+  }
+}
+
 export function lowerNativeCall(L: Lowerer, expr: ts.CallExpression): IrExpr | null {
   const callee = expr.expression;
   const symbol = nativeExpressionSymbol(L, callee);
