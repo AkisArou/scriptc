@@ -211,10 +211,18 @@ export declare function maybeFire(seed: i32): i32;
  * object. */
 export interface Judge {
   ask(code: i32, seed: i32): i32;
+  /* The same question where the subject may be absent. */
+  askMaybe(code: i32, seed: i32): i32;
   dispose(): void;
 }
 export declare function judgeWith(
   callback: (code: i32, subject: Counter) => boolean,
+): Judge;
+
+/* The owner-scoped withheld payload: answers while holding a subject that may
+ * not be there, and the receiver's disposal is what cancels it. */
+export declare function maybeJudgeWith(
+  callback: (code: i32, subject: Counter | null) => boolean,
 ): Judge;
 
 export declare function subscribe(

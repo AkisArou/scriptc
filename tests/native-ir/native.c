@@ -784,6 +784,16 @@ int32_t nts_judge_ask(NtsJudge *judge, int32_t code, int32_t seed) {
 
 void nts_judge_destroy(NtsJudge *judge) { free(judge); }
 
+/* The OWNER-SCOPED mirror of the withheld payload: a handler that ANSWERS
+ * while holding a subject the emitter may withhold, anchored to a receiver
+ * whose disposal cancels it. Same C callback as `nts_judge_ask` — nullability
+ * is a fact about the value the handler receives, not about the slot carrying
+ * it — so the only difference is that a negative seed hands over nothing. */
+int32_t nts_judge_ask_maybe(NtsJudge *judge, int32_t code, int32_t seed) {
+  NtsCounter *subject = seed < 0 ? NULL : nts_counter_create(seed);
+  return judge->callback(code, subject, judge->context);
+}
+
 /* A registration NOTHING owns: stored in a global, fired by a later call, and
  * never cancelled — the shape a framework dispatch takes when the platform
  * constructs the receiver, so there is no instance to anchor to at the moment

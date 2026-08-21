@@ -1219,6 +1219,27 @@ function callSiteReturnType(fn: IrFunction): IrType {
   return fn.returnType;
 }
 
+/* The payload arms that carry an OBJECT, whether or not the emitter may
+ * withhold it.
+ *
+ * Three rules ask this — what a callback type may DECLARE, which arm carries a
+ * DESTRUCTOR, and what a synchronous delivery ADMITS — and it is one fact about
+ * the payload rather than three about the rules. Spelled separately, the
+ * withheld arm reached the first two and not the third, so an answered
+ * receiver-anchored handler with a withheld payload was refused as an invalid
+ * contract while the identical process-owned one was accepted. The arm was
+ * added to the branch written for it and not to the branch beside it, which is
+ * the same shape as the strip that dropped the type it names. */
+function handlePayloadArm(
+  parameter: IrNativeCallbackArgumentType["params"][number],
+): parameter is Extract<
+  IrNativeCallbackArgumentType["params"][number],
+  { kind: "nativeHandle" | "nullableNativeHandle" }
+> {
+  return parameter.kind === "nativeHandle" ||
+    parameter.kind === "nullableNativeHandle";
+}
+
 export function validateModule(mod: IrModule): IrValidationError[] {
   const errors: IrValidationError[] = [];
   /* A nullable payload's union, by its arms. The rule that admits such a
@@ -1636,16 +1657,13 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       candidate.params.every((parameter) =>
         validNativeScalar(parameter) ||
         (typeof parameter === "object" && parameter !== null &&
-          ((parameter.kind === "nativeHandle" &&
+          /* Both handle arms need the type table to carry the handle: the arm
+           * a handler receives when there IS one is that object. What absence
+           * additionally requires is the union, checked where the payload
+           * meets its physical slot, because it is a fact about this delivery
+           * rather than about the type. */
+          ((handlePayloadArm(parameter) &&
             nativeTypesById.get(parameter.typeId)?.kind === "handle") ||
-            /* The same payload where the emitter may withhold it. The type
-             * table has to carry the handle for the same reason — the arm the
-             * handler receives when there IS one is that object. What absence
-             * additionally requires is the union, and that is checked where
-             * the payload meets its physical slot, because it is a fact about
-             * this delivery rather than about the type. */
-            (parameter.kind === "nullableNativeHandle" &&
-              nativeTypesById.get(parameter.typeId)?.kind === "handle") ||
             parameter.kind === "cstring" ||
             parameter.kind === "utf8Span" ||
             parameter.kind === "byteSpan" ||
@@ -1722,11 +1740,10 @@ export function validateModule(mod: IrModule): IrValidationError[] {
        * key is meaningful on exactly one source shape and must be absent
        * everywhere else rather than ignored. */
       const destructor = source["destructor"];
-      /* Both handle payload arms, because who releases the reference does not
-       * depend on whether the emitter may withhold it: when there IS an
-       * object, it arrived owned either way. */
-      const payload = type.params[index]?.kind;
-      const owns = payload === "nativeHandle" || payload === "nullableNativeHandle";
+      /* Who releases the reference does not depend on whether the emitter may
+       * withhold it: when there IS an object, it arrived owned either way. */
+      const payload = type.params[index];
+      const owns = payload !== undefined && handlePayloadArm(payload);
       if (destructor === undefined) return !owns;
       return owns && typeof destructor === "string" && destructor !== "";
     });
@@ -1831,7 +1848,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
          * bytes, and a borrowed C string is already expressible as a value. */
         if (
           !type.params.every((parameter) =>
-            parameter.kind === "f64" || parameter.kind === "nativeHandle" ||
+            parameter.kind === "f64" || handlePayloadArm(parameter) ||
             validNativeScalar(parameter)
           )
         ) {

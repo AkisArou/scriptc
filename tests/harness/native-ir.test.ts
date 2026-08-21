@@ -434,6 +434,25 @@ const MAYBE_CONTRACT = {
   ],
 } as const satisfies IrNativeCallbackContract;
 
+/* The owner-scoped mirror of `MAYBE_SOURCE`: an ANSWERING handler holding a
+ * scalar and a subject the emitter may withhold, anchored to a receiver whose
+ * disposal cancels it. Same physical signature as the judge above — only the
+ * payload's source arm differs. */
+const MAYBE_JUDGE_SOURCE = {
+  ...JUDGE_SOURCE,
+  params: [I32, { kind: "nullableNativeHandle", typeId: COUNTER_ID }],
+} as const;
+const MAYBE_JUDGE_CONTRACT = {
+  owner: { kind: "result" },
+  cancellationBinding: "scriptc.fixture.c-v1@0.0.0#judge_destroy",
+  allowedInvocationExecutors: ["same-as-caller"],
+  synchronousReturn: true,
+  sourceArguments: [
+    { kind: "callback-parameter", parameter: 0 },
+    { kind: "callback-parameter", parameter: 1, destructor: COUNTER_DESTROY },
+  ],
+} as const satisfies IrNativeCallbackContract;
+
 const TELLER_DEFINITION = {
   kind: "handle",
   id: TELLER_ID,
@@ -1720,6 +1739,59 @@ const localNativeInput: NativeFrontendInput = {
         },
       ],
       result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      /* A second registration over the same C constructor, differing only in
+       * what its handler is handed. Two bindings may name one symbol: the
+       * contract is what a binding declares, and these declare different
+       * ones. */
+      id: "scriptc.fixture.c-v1@0.0.0#maybe_judge_create",
+      declaration: { module: nativePackage, name: "maybeJudgeWith" },
+      entry: { symbol: "nts_judge_create" },
+      sourceCall: { kind: "function" },
+      error: NULL_IS_FAILURE,
+      arguments: [
+        { name: "callback", type: MAYBE_JUDGE_SOURCE, callback: MAYBE_JUDGE_CONTRACT },
+      ],
+      parameters: [
+        {
+          name: "callback",
+          type: { kind: "nativeCallback", signature: JUDGE_CALLBACK },
+          passMode: "pointer",
+          ownership: { kind: "callback" },
+          projection: { kind: "callbackFunction", argument: 0 },
+        },
+        {
+          name: "context",
+          type: { kind: "nativeContext", addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "callback" },
+          projection: { kind: "callbackContext", argument: 0 },
+        },
+      ],
+      result: {
+        type: JUDGE,
+        passMode: "pointer",
+        ownership: {
+          kind: "owned",
+          transfer: "to-runtime",
+          destructor: "scriptc.fixture.c-v1@0.0.0#judge_destroy",
+        },
+        projection: DIRECT_RESULT,
+      },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#judge_ask_maybe",
+      declaration: { module: nativePackage, name: "Judge.askMaybe" },
+      entry: { symbol: "nts_judge_ask_maybe" },
+      sourceCall: { kind: "method", receiverArgument: 0 },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "judge", type: JUDGE, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
+        { name: "code", type: I32, passMode: "value", ownership: { kind: "value" } },
+        { name: "seed", type: I32, passMode: "value", ownership: { kind: "value" } },
+      ]),
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
       id: "scriptc.fixture.c-v1@0.0.0#maybe_mark",
@@ -5677,6 +5749,40 @@ describe.each(["c", "llvm"] as const)(
       }
       const module = deserializeModule(readFileSync(result.irPath, "utf8"));
       expect(validateModule(module)).toEqual([]);
+      const run = spawnSync(result.binaryPath);
+      expect({
+        status: run.status,
+        signal: run.signal,
+        stderr: run.stderr.toString(),
+      }).toEqual({ status: 42, signal: null, stderr: "" });
+    });
+  },
+);
+
+describe.each(["c", "llvm"] as const)(
+  "Native IR withheld payloads an owner anchors, %s backend",
+  (backend) => {
+    test("answers while holding a subject that may not be there", async () => {
+      const outDir = join(scratch, `payload-absent-answered-${backend}`);
+      const result = await compile(
+        join(repoRoot, "tests/native-ir/payload-absent-answered.ts"),
+        {
+          outDir,
+          outPath: join(outDir, "program"),
+          backend,
+          emitIr: true,
+          sanitize,
+          externalTypes: nativeExternalTypes(),
+          native: frontendNativeInput(),
+          nativeLinkInputs: [fixtureObject(), supportObject(), retainedSupportObject()],
+        },
+      );
+      expect(result.ok ? [] : result.diagnostics).toEqual([]);
+      if (!result.ok || result.irPath === undefined) {
+        throw new Error("owner-anchored withheld payload compile did not emit IR");
+      }
+      expect(validateModule(deserializeModule(readFileSync(result.irPath, "utf8"))))
+        .toEqual([]);
       const run = spawnSync(result.binaryPath);
       expect({
         status: run.status,
