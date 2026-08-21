@@ -799,3 +799,166 @@ export function nativeCallIsThrowCheckpoint(
   return moduleHasRetainedRegistration ||
     binding.arguments.some((argument) => argument.type.kind === "func");
 }
+
+/**
+ * How a projection that COPIES gets its managed value.
+ *
+ * The copy call differs per family and the differences are real: a byte span
+ * needs its element kind and the compiler's length slot, UTF-8 text needs the
+ * length in BYTES rather than elements, and the two C-string forms need
+ * neither. Naming them as arms keeps that honest while letting everything
+ * around the call be decided once.
+ */
+export type NativeResultAdopt =
+  | {
+      readonly kind: "bytes";
+      readonly elem: IrNativeSpanElem;
+      readonly lengthParameter: number;
+    }
+  | { readonly kind: "cstring" }
+  | { readonly kind: "cstringVector" }
+  | { readonly kind: "utf8Span"; readonly lengthParameter: number };
+
+/**
+ * The projections that copy foreign storage into managed storage, described
+ * once rather than laddered twice.
+ *
+ * Eight of the result arms are this shape — four families, each with and
+ * without an absence arm — and both backends wrote all eight out. The order
+ * they share is the whole contract: COPY FIRST, THEN FREE, so nothing the
+ * program keeps points into storage the release is about to reclaim. Getting
+ * that backwards is a use-after-free that the C backend and the LLVM backend
+ * would have to get wrong independently to be caught.
+ *
+ * What varies is smaller than the ladders suggested, and one of the variations
+ * is easy to miss. `requireNonNull` says WHERE the contract's non-null
+ * requirement is discharged, not merely whether there is one:
+ *
+ *   - `"raw"` checks the foreign pointer BEFORE the copy, because the copy
+ *     would otherwise read a length slot that describes nothing.
+ *   - `"managed"` checks the copied value AFTER the release, because the copy
+ *     call answers null for a null input and the foreign pointer still has to
+ *     be freed on the way out.
+ *
+ * A description that assumed one position would silently produce the other
+ * family's semantics. That is the kind of difference a decision layer exists
+ * to state rather than to leave in two ladders that happen to agree.
+ */
+export interface NativeResultCopy {
+  readonly adopt: NativeResultAdopt;
+  readonly requireNonNull: "raw" | "managed" | null;
+  /** Whether the copy call must be skipped for a null pointer rather than
+   * handed one. The C-string forms answer null for null; the UTF-8 decoder
+   * would trap, and its projection is the one that admits absence. */
+  readonly adoptSkipsNull: boolean;
+  /** What the foreign pointer needs once the copy is made, or null when the
+   * callee keeps the storage. Always guarded on non-null. */
+  readonly release: string | null;
+  /** The union arms when absence is a value, or null when it is not. */
+  readonly absent: {
+    readonly unionId: string;
+    readonly presentTag: number;
+    readonly nullTag: number;
+  } | null;
+}
+
+/**
+ * The result forms that copy, as a type.
+ *
+ * Naming the subset is what keeps the description from costing the
+ * exhaustiveness this project relies on. A data-driven driver that asked
+ * "is this a copy?" and got back a description-or-null would leave the
+ * backend unable to narrow, and its residual guard — the line that makes a new
+ * result arm a build failure — would stop compiling. Narrowing to this type at
+ * the call site instead keeps both: a form the driver claims and does not
+ * handle fails here, and a form nobody claims falls through to the guard.
+ */
+export type NativeResultCopyForm = Extract<
+  NativeResultForm,
+  {
+    kind:
+      | "bytesResult"
+      | "utf8SpanResult"
+      | "utf8SpanResultOrNull"
+      | "utf8CString"
+      | "utf8CStringOrNull"
+      | "utf8CStringArray"
+      | "utf8CStringArrayOrNull";
+  }
+>;
+
+/** The copy description for a form already narrowed to the copying families. */
+export function nativeResultCopy(form: NativeResultCopyForm): NativeResultCopy {
+  switch (form.kind) {
+    case "bytesResult":
+      return {
+        adopt: { kind: "bytes", elem: form.elem, lengthParameter: form.lengthParameter },
+        /* Before the copy: the length slot describes this pointer, and reading
+         * it for a null one describes nothing. */
+        requireNonNull: "raw",
+        adoptSkipsNull: false,
+        release: form.release,
+        absent: null,
+      };
+    case "utf8SpanResult":
+      return {
+        adopt: { kind: "utf8Span", lengthParameter: form.lengthParameter },
+        requireNonNull: "raw",
+        adoptSkipsNull: true,
+        release: form.release,
+        absent: null,
+      };
+    case "utf8SpanResultOrNull":
+      return {
+        adopt: { kind: "utf8Span", lengthParameter: form.lengthParameter },
+        requireNonNull: null,
+        adoptSkipsNull: true,
+        release: form.release,
+        absent: { unionId: form.unionId, presentTag: form.stringTag, nullTag: form.nullTag },
+      };
+    case "utf8CString":
+      return {
+        adopt: { kind: "cstring" },
+        /* After the copy and the release: the copy answers null for null, and
+         * the foreign pointer still has to be freed before the throw. */
+        requireNonNull: "managed",
+        adoptSkipsNull: false,
+        release: form.release,
+        absent: null,
+      };
+    case "utf8CStringOrNull":
+      return {
+        adopt: { kind: "cstring" },
+        requireNonNull: null,
+        adoptSkipsNull: false,
+        release: form.release,
+        absent: { unionId: form.unionId, presentTag: form.stringTag, nullTag: form.nullTag },
+      };
+    case "utf8CStringArray":
+      return {
+        adopt: { kind: "cstringVector" },
+        requireNonNull: "managed",
+        adoptSkipsNull: false,
+        release: form.release,
+        absent: null,
+      };
+    case "utf8CStringArrayOrNull":
+      return {
+        adopt: { kind: "cstringVector" },
+        requireNonNull: null,
+        adoptSkipsNull: false,
+        release: form.release,
+        absent: { unionId: form.unionId, presentTag: form.arrayTag, nullTag: form.nullTag },
+      };
+    default: {
+      /* Exhaustive over the narrowed union, so widening
+       * `NativeResultCopyForm` without describing the new family stops this
+       * file compiling rather than silently answering for it. */
+      const unhandled: never = form;
+      throw new NativeCallPlanError(
+        (unhandled as { kind: string }).kind,
+        "result projection claimed as a copy but not described",
+      );
+    }
+  }
+}

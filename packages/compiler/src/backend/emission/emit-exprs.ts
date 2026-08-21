@@ -10,7 +10,7 @@ import { dynDestrCheckHelper, dynIterNHelper, dynKeyGetHelper } from "./emit-wal
 import { genResultThunkFor } from "./emit-async.js";
 import { nativeCallbackCancellationArgument } from "../native-callbacks.js";
 import { nativeCallLifecycle } from "../native-callbacks.js";
-import { nativeArgumentForm, nativeCallDisposal, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultForm, type NativeArgumentFormExhausted } from "../native-call-plan.js";
+import { nativeArgumentForm, nativeCallDisposal, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultCopy, nativeResultForm, type NativeArgumentFormExhausted } from "../native-call-plan.js";
 
 function streamTypedRefCommitAdapter(
   E: CEmitter,
@@ -2728,105 +2728,91 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           releaseArguments();
           return { name: "", type: e.type };
         }
-        if (resultForm.kind === "bytesResult") {
-          /* Copied first, then freed: the managed span owns its own bytes by
-           * the time the release runs, so nothing that survives points into
-           * storage the release reclaims. The length is read from the slot
-           * the compiler passed, not from the pointer. */
-          const raw = `sc_t${E.tempCounter++}`;
-          E.line(`const void *${raw} = ${call};${E.srcComment(e.loc)}`);
-          /* The contract says the span is there. A callee that answers NULL
-           * has violated it, and this is where that becomes a catchable
-           * error rather than either of the two things it would otherwise
-           * be: a trap, because the runtime aborts on a NULL span with a
-           * nonzero length, or a silent empty span, which would conflate
-           * absent with empty — the distinction this whole family is careful
-           * about. */
-          E.line(`if (${raw} == NULL) scr_native_throw_null(${operation});`);
-          E.emitPendingCheck();
-          /* The length slot counts ELEMENTS, which is what a typed array is
-           * made of and what the producing API answers. For u8 that equals a
-           * byte count and this is the same call the u8-only helper made;
-           * for a wider element it is not, which is why the element kind
-           * travels with it. */
-          const managed = E.newTemp(
-            e.type,
-            `scr_bytes_from_elements(${bytesElemKindC(resultForm.elem)}, ` +
-              `${raw}, ${bytesLengthSlot})`,
-          );
-          if (resultForm.release !== null) {
-            E.line(`if (${raw} != NULL) ${resultForm.release}((void *)${raw});`);
-          }
-          if (callbacksMayThrow) E.emitPendingCheck();
-          releaseArguments();
-          return managed;
-        }
+        /* The four projections that COPY foreign storage into managed storage,
+         * driven from one description instead of four ladders.
+         *
+         * The order below IS the contract, and it is the reason this is worth
+         * having in one place: copy first, then free, so nothing the program
+         * keeps points into storage the release is about to reclaim. Where the
+         * non-null requirement sits is part of that order rather than a detail
+         * — see `nativeResultCopy`, which states why a byte span is checked
+         * before the copy and a C string after the release. */
         if (
+          resultForm.kind === "bytesResult" ||
+          resultForm.kind === "utf8SpanResult" ||
+          resultForm.kind === "utf8SpanResultOrNull" ||
+          resultForm.kind === "utf8CString" ||
+          resultForm.kind === "utf8CStringOrNull" ||
           resultForm.kind === "utf8CStringArray" ||
           resultForm.kind === "utf8CStringArrayOrNull"
         ) {
-          /* The vector is read before it is disposed of, and disposed of
-           * whatever the read produced: the elements are copied into managed
-           * strings first, so nothing the program keeps points into storage
-           * the release is about to reclaim. */
+          const copy = nativeResultCopy(resultForm);
+          const rawCType = copy.adopt.kind === "cstring"
+            ? "const char *"
+            : copy.adopt.kind === "cstringVector"
+              ? "const char *const *"
+              : "const void *";
           const raw = `sc_t${E.tempCounter++}`;
-          const managed = `sc_t${E.tempCounter++}`;
-          E.line(`const char *const *${raw} = ${call};${E.srcComment(e.loc)}`);
-          E.line(`ScrArr *${managed} = scr_native_cstring_array_adopt(${raw});`);
-          if (resultForm.release !== null) {
-            E.line(`if (${raw} != NULL) ${resultForm.release}((void *)${raw});`);
+          E.line(`${rawCType}${raw} = ${call};${E.srcComment(e.loc)}`);
+          if (copy.requireNonNull === "raw") {
+            E.line(`if (${raw} == NULL) scr_native_throw_null(${operation});`);
+            E.emitPendingCheck();
           }
-          if (resultForm.kind === "utf8CStringArrayOrNull") {
-            const { arrayTag, nullTag } = resultForm;
-            const elem = { kind: "array", elem: STRING } as const;
+          const adoptCall = copy.adopt.kind === "bytes"
+            ? `scr_bytes_from_elements(${bytesElemKindC(copy.adopt.elem)}, ${raw}, ${bytesLengthSlot})`
+            : copy.adopt.kind === "cstring"
+              ? `scr_str_from_c_data(${raw})`
+              : copy.adopt.kind === "cstringVector"
+                ? `scr_native_cstring_array_adopt(${raw})`
+                /* Length in BYTES, not elements: UTF-8 is a byte encoding and
+                 * the decoder is handed exactly what the callee produced,
+                 * never scanned for a terminator — which is the entire point
+                 * of a projection for text that may contain one. */
+                : `scr_str_from_utf8_lossy((const uint8_t *)${raw}, ${bytesLengthSlot})`;
+          const managedCType = copy.adopt.kind === "bytes"
+            ? "ScrBytes *"
+            : copy.adopt.kind === "cstringVector"
+              ? "ScrArr *"
+              : "ScrStr *";
+          const managed = `sc_t${E.tempCounter++}`;
+          /* Skipped rather than guarded inside the runtime: the decoder would
+           * be handed a pointer that is not there, where the C-string copies
+           * answer null for null themselves. */
+          E.line(
+            `${managedCType}${managed} = ${
+              copy.adoptSkipsNull ? `${raw} != NULL ? ${adoptCall} : NULL` : adoptCall
+            };`,
+          );
+          if (copy.release !== null) {
+            E.line(`if (${raw} != NULL) ${copy.release}((void *)${raw});`);
+          }
+          if (copy.absent !== null) {
+            const elem = copy.adopt.kind === "cstringVector"
+              ? ({ kind: "array", elem: STRING } as const)
+              : STRING;
             const adapters = vAdapters(elem);
             const present =
-              `scr_union_new_ref(${arrayTag}, ${managed}, ` +
+              `scr_union_new_ref(${copy.absent.presentTag}, ${managed}, ` +
               `&${adapters.retain}, &${adapters.release}, ${E.traceArgC(elem)})`;
-            const absent = E.unitInstanceRef(resultForm.unionId, nullTag);
+            const nothing = E.unitInstanceRef(copy.absent.unionId, copy.absent.nullTag);
             const result = E.newTemp(
               e.type,
-              `${raw} != NULL ? ${present} : scr_union_retain(${absent})`,
+              `${raw} != NULL ? ${present} : scr_union_retain(${nothing})`,
             );
             if (callbacksMayThrow) E.emitPendingCheck();
             releaseArguments();
             return result;
           }
           const result = E.newTemp(e.type, managed);
-          E.line(`if (${result.name} == NULL) scr_native_throw_null(${operation});`);
-          E.emitPendingCheck();
-          releaseArguments();
-          return result;
-        }
-        if (resultForm.kind === "utf8CString" || resultForm.kind === "utf8CStringOrNull") {
-          const raw = `sc_t${E.tempCounter++}`;
-          const managed = `sc_t${E.tempCounter++}`;
-          E.line(`const char *${raw} = ${call};${E.srcComment(e.loc)}`);
-          E.line(`ScrStr *${managed} = scr_str_from_c_data(${raw});`);
-          if (resultForm.release !== null) {
-            /* Copied first, then freed: the managed string owns its own bytes
-             * by now, so nothing that survives points into storage the
-             * release is about to reclaim. */
-            E.line(`if (${raw} != NULL) ${resultForm.release}((void *)${raw});`);
+          if (copy.requireNonNull === "managed") {
+            /* The checkpoint here is unconditional and subsumes the callback
+             * case: it has to run for the throw above, and a pending exception
+             * from a callback is discharged by the same check. */
+            E.line(`if (${result.name} == NULL) scr_native_throw_null(${operation});`);
+            E.emitPendingCheck();
+          } else if (callbacksMayThrow) {
+            E.emitPendingCheck();
           }
-          if (resultForm.kind === "utf8CStringOrNull") {
-            const { stringTag, nullTag } = resultForm;
-            const adapters = vAdapters(STRING);
-            const present =
-              `scr_union_new_ref(${stringTag}, ${managed}, ` +
-              `&${adapters.retain}, &${adapters.release}, ${E.traceArgC(STRING)})`;
-            const absent = E.unitInstanceRef(resultForm.unionId, nullTag);
-            const result = E.newTemp(
-              e.type,
-              `${raw} != NULL ? ${present} : scr_union_retain(${absent})`,
-            );
-            if (callbacksMayThrow) E.emitPendingCheck();
-            releaseArguments();
-            return result;
-          }
-          const result = E.newTemp(e.type, managed);
-          E.line(`if (${result.name} == NULL) scr_native_throw_null(${operation});`);
-          E.emitPendingCheck();
           releaseArguments();
           return result;
         }
@@ -2991,61 +2977,6 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           E.emitPendingCheck();
           releaseArguments();
           return result;
-        }
-        if (
-          resultForm.kind === "utf8SpanResult" ||
-          resultForm.kind === "utf8SpanResultOrNull"
-        ) {
-          /* The byte-span result with a decode on the end, and deliberately
-           * the same order: copy into managed storage first, then free, so
-           * nothing that survives points into storage the release reclaims. */
-          const raw = `sc_t${E.tempCounter++}`;
-          E.line(`const void *${raw} = ${call};${E.srcComment(e.loc)}`);
-          /* The contract says the text is there. A callee answering NULL has
-           * violated it, and this is where that becomes catchable rather
-           * than a trap or a silently empty string — the same distinction
-           * between absent and empty the span family is careful about. */
-          if (resultForm.kind === "utf8SpanResult") {
-            /* The contract says the text is there. A callee answering NULL
-             * has violated it — but only where the projection did not admit
-             * absence, which is exactly what the nullable arm is for. */
-            E.line(`if (${raw} == NULL) scr_native_throw_null(${operation});`);
-            E.emitPendingCheck();
-          }
-          /* Length in BYTES here, not elements: UTF-8 is a byte encoding, and
-           * the decoder is handed exactly the bytes the callee produced —
-           * never scanned for a terminator, because the whole point of this
-           * projection is text that may contain one. */
-          const decoded = `sc_t${E.tempCounter++}`;
-          /* Decoded only when there is something to decode: the length slot
-           * describes a pointer, and handing the decoder a null one would
-           * trap where absence is supposed to be a value. */
-          E.line(
-            `ScrStr *${decoded} = ${raw} != NULL ? ` +
-              `scr_str_from_utf8_lossy((const uint8_t *)${raw}, ${bytesLengthSlot}) : NULL;`,
-          );
-          if (resultForm.release !== null) {
-            E.line(`if (${raw} != NULL) ${resultForm.release}((void *)${raw});`);
-          }
-          if (resultForm.kind === "utf8SpanResultOrNull") {
-            const { stringTag, nullTag } = resultForm;
-            const adapters = vAdapters(STRING);
-            const present =
-              `scr_union_new_ref(${stringTag}, ${decoded}, ` +
-              `&${adapters.retain}, &${adapters.release}, ${E.traceArgC(STRING)})`;
-            const absent = E.unitInstanceRef(resultForm.unionId, nullTag);
-            const result = E.newTemp(
-              e.type,
-              `${raw} != NULL ? ${present} : scr_union_retain(${absent})`,
-            );
-            if (callbacksMayThrow) E.emitPendingCheck();
-            releaseArguments();
-            return result;
-          }
-          const managed = E.newTemp(e.type, decoded);
-          if (callbacksMayThrow) E.emitPendingCheck();
-          releaseArguments();
-          return managed;
         }
         /* Everything except a direct crossing was handled above. Naming the
          * remainder is what makes the compiler check that: add an arm to

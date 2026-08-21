@@ -2265,7 +2265,7 @@ function nativeExternalTypes(): Record<string, string> {
   };
 }
 
-afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+afterAll(() => { if (process.env["AB_KEEP"] !== "1") rmSync(scratch, { recursive: true, force: true }); });
 
 describe.each(["llvm", "c"] as const)("exact Native IR library exports, %s emission", (emission) => {
   test("exports an exact i32 TypeScript function to a C host", async () => {

@@ -12,7 +12,8 @@
  * above a comment promising the backends shared their decisions.
  */
 import { expect, test } from "vitest";
-import { nativeCallIsThrowCheckpoint } from "../src/backend/native-call-plan.js";
+import { nativeCallIsThrowCheckpoint, nativeResultCopy } from "../src/backend/native-call-plan.js";
+import type { NativeResultCopyForm } from "../src/backend/native-call-plan.js";
 import type { IrNativeBinding } from "../src/ir/nodes.js";
 
 type CallbackOwnerKind = "call" | "result" | "argument" | "process";
@@ -65,4 +66,74 @@ test("a module holding a retained registration makes every call a checkpoint", (
   /* A retained profile callback defers its throw to whichever native call
    * checks next, so every call has to be willing to be that one. */
   expect(nativeCallIsThrowCheckpoint(bindingWithoutCallback(), true)).toBe(true);
+});
+
+/* The copy families, and specifically the axis that is easy to get wrong.
+ *
+ * Both backends laddered these eight arms out by hand, and the ladders agreed
+ * — but agreeing is not the same as being stated. The non-null requirement
+ * sits at a DIFFERENT POINT for two of the families, for a reason that is
+ * invisible unless someone says it: a byte span must be checked before the
+ * copy because the copy reads a length slot describing that pointer, while a
+ * C string is checked after the release because the copy answers null for null
+ * and the foreign pointer still has to be freed on the way out.
+ *
+ * A legalizer that picked one position would produce the other family's
+ * semantics: either a length slot read for a pointer that is not there, or a
+ * leak on the throwing path. Neither is visible in a passing suite until a
+ * program meets it.
+ */
+test("a byte span is checked before the copy, a C string after it", () => {
+  const bytes = nativeResultCopy({
+    kind: "bytesResult", elem: "u8", release: "g_free", lengthParameter: 1,
+  } as NativeResultCopyForm);
+  expect(bytes?.requireNonNull).toBe("raw");
+
+  const cstring = nativeResultCopy({
+    kind: "utf8CString", release: "g_free",
+  } as NativeResultCopyForm);
+  expect(cstring?.requireNonNull).toBe("managed");
+
+  const vector = nativeResultCopy({
+    kind: "utf8CStringArray", release: "g_strfreev",
+  } as NativeResultCopyForm);
+  expect(vector?.requireNonNull).toBe("managed");
+});
+
+test("a projection admitting absence requires nothing and carries its arms", () => {
+  const copy = nativeResultCopy({
+    kind: "utf8CStringOrNull", release: null, unionId: "u", stringTag: 1, nullTag: 0,
+  } as NativeResultCopyForm);
+  expect(copy?.requireNonNull).toBeNull();
+  expect(copy?.absent).toEqual({ unionId: "u", presentTag: 1, nullTag: 0 });
+});
+
+test("only the UTF-8 decoder is skipped for a null pointer", () => {
+  /* The C-string copies answer null for null; the decoder would be handed a
+   * pointer that is not there, and its nullable arm is exactly where that
+   * happens. */
+  const span = nativeResultCopy({
+    kind: "utf8SpanResultOrNull", release: null, lengthParameter: 1,
+    unionId: "u", stringTag: 1, nullTag: 0,
+  } as NativeResultCopyForm);
+  expect(span?.adoptSkipsNull).toBe(true);
+  const cstring = nativeResultCopy({ kind: "utf8CString", release: null } as NativeResultCopyForm);
+  expect(cstring?.adoptSkipsNull).toBe(false);
+});
+
+test("every copying form is described, none throws", () => {
+  /* The driver's default arm binds `never`, so a form named by
+   * `NativeResultCopyForm` and not described stops the build. This asserts the
+   * runtime half of the same claim: each of the seven answers a description
+   * rather than the diagnostic that arm would raise. */
+  const forms: NativeResultCopyForm[] = [
+    { kind: "bytesResult", elem: "u8", release: null, lengthParameter: 1 },
+    { kind: "utf8SpanResult", release: null, lengthParameter: 1 },
+    { kind: "utf8SpanResultOrNull", release: null, lengthParameter: 1, unionId: "u", stringTag: 1, nullTag: 0 },
+    { kind: "utf8CString", release: null },
+    { kind: "utf8CStringOrNull", release: null, unionId: "u", stringTag: 1, nullTag: 0 },
+    { kind: "utf8CStringArray", release: null },
+    { kind: "utf8CStringArrayOrNull", release: null, unionId: "u", arrayTag: 1, nullTag: 0 },
+  ];
+  for (const form of forms) expect(nativeResultCopy(form).adopt).toBeDefined();
 });
