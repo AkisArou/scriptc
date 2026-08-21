@@ -10,7 +10,7 @@ import { dynDestrCheckHelper, dynIterNHelper, dynKeyGetHelper } from "./emit-wal
 import { genResultThunkFor } from "./emit-async.js";
 import { nativeCallbackCancellationArgument } from "../native-callbacks.js";
 import { nativeCallLifecycle } from "../native-callbacks.js";
-import { nativeArgumentForm, nativeCallDisposal, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultCopy, nativeResultForm, nativeResultHandle, type NativeArgumentFormExhausted } from "../native-call-plan.js";
+import { nativeArgumentBorrow, nativeArgumentForm, nativeCallDisposal, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultCopy, nativeResultForm, nativeResultHandle, type NativeArgumentFormExhausted } from "../native-call-plan.js";
 
 function streamTypedRefCommitAdapter(
   E: CEmitter,
@@ -2471,57 +2471,41 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               emitConversionPendingCheck();
               return raw;
             }
+            /* The six borrowing arms: two families crossed with three
+             * nullabilities, driven from one description. What is C's here is
+             * only the spelling — a ternary where LLVM needs a diamond. */
             case "cStringNull":
-              return "NULL";
-            case "cStringOrNull": {
-              const arg = args[form.argument]!;
-              const raw = `sc_t${E.tempCounter++}`;
-              E.line(
-                `const char *${raw} = ${arg.name}->tag == ${form.stringTag} ` +
-                  `? scr_str_c_data((ScrStr *)scr_union_peek(${arg.name})) : NULL;`,
-              );
-              emitConversionPendingCheck();
-              return raw;
-            }
-            case "cString": {
-              const raw = `sc_t${E.tempCounter++}`;
-              E.line(`const char *${raw} = scr_str_c_data(${args[form.argument]!.name});`);
-              emitConversionPendingCheck();
-              return raw;
-            }
+            case "cStringOrNull":
+            case "cString":
             case "cStringArrayNull":
-              /* Nothing to build and nothing to release: the absent vector is
-               * NULL, which is what a C API distinguishing "no list" from "an
-               * empty list" is asking for. */
-              return "NULL";
-            case "cStringArrayOrNull": {
-              const arg = args[form.argument]!;
-              const raw = `sc_t${E.tempCounter++}`;
-              E.line(
-                `const char **${raw} = ${arg.name}->tag == ${form.arrayTag} ` +
-                  `? scr_native_cstring_array_borrow(` +
-                  `(ScrArr *)scr_union_peek(${arg.name}), ${operation}) : NULL;`,
-              );
-              emitConversionPendingCheck();
-              /* Recorded even when the arm was null, because the release is
-               * `free` and takes NULL — one unconditional call instead of a
-               * branch the teardown would otherwise have to carry. */
-              borrowedArrays.set(form.argument, raw);
-              return raw;
-            }
+            case "cStringArrayOrNull":
             case "cStringArray": {
-              /* The vector is this call's, not the program's: the strings
-               * belong to the managed array and outlive the call, so what is
-               * built here is the pointers alone and what is released after
-               * the call is the same. Recorded so the teardown can find it,
-               * because the release has to happen on the throwing path too. */
+              const borrow = nativeArgumentBorrow(form);
+              /* Absent by construction: nothing to build, nothing to give
+               * back, and NULL is what a C API distinguishing "no list" from
+               * "an empty list" is asking for. */
+              if (borrow.source === null) return "NULL";
+              const arg = args[borrow.source.argument]!;
+              const cType = borrow.of === "cstring" ? "const char *" : "const char **";
+              const peek = borrow.of === "cstring"
+                ? `scr_str_c_data((ScrStr *)scr_union_peek(${arg.name}))`
+                : `scr_native_cstring_array_borrow((ScrArr *)scr_union_peek(${arg.name}), ${operation})`;
+              const direct = borrow.of === "cstring"
+                ? `scr_str_c_data(${arg.name})`
+                : `scr_native_cstring_array_borrow(${arg.name}, ${operation})`;
               const raw = `sc_t${E.tempCounter++}`;
+              const tag = borrow.source.unionTag;
               E.line(
-                `const char **${raw} = scr_native_cstring_array_borrow(` +
-                  `${args[form.argument]!.name}, ${operation});`,
+                tag !== null
+                  ? `${cType}${raw} = ${arg.name}->tag == ${tag} ? ${peek} : NULL;`
+                  : `${cType}${raw} = ${direct};`,
               );
               emitConversionPendingCheck();
-              borrowedArrays.set(form.argument, raw);
+              /* Recorded rather than released inline, and recorded even where
+               * the runtime arm was null: the release is `free`, which takes
+               * NULL, so the teardown carries one unconditional call instead
+               * of a branch — and it has to run on the throwing path too. */
+              if (borrow.releasedAfterCall) borrowedArrays.set(borrow.source.argument, raw);
               return raw;
             }
             case "utf8Data":

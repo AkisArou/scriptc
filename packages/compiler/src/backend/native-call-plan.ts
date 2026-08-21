@@ -1036,3 +1036,94 @@ export function nativeResultHandle(
     absent: null,
   };
 }
+
+/** The argument forms that BORROW managed storage for the extent of one call. */
+export type NativeArgumentBorrowForm = Extract<
+  NativeArgumentForm,
+  {
+    kind:
+      | "cString"
+      | "cStringNull"
+      | "cStringOrNull"
+      | "cStringArray"
+      | "cStringArrayNull"
+      | "cStringArrayOrNull";
+  }
+>;
+
+/**
+ * A managed value lent to the callee for the extent of one call.
+ *
+ * Six argument arms are two families crossed with three nullabilities, and
+ * both backends wrote all six. The three nullabilities are one question with
+ * three answers rather than three shapes: absent by construction is the null
+ * pointer and emits nothing, absent at runtime reads the union's arm, and
+ * present reads the value. Naming it that way is what lets a third borrowed
+ * family arrive as a row rather than as six more arms.
+ *
+ * `releasedAfterCall` is the only place the two families genuinely part. A
+ * borrowed C string points into storage the managed string already owns, so
+ * there is nothing to give back. A borrowed vector is BUILT for the call —
+ * the pointers are new even though the strings are not — so it has to be
+ * released afterwards, and on the throwing path too, which is why the borrow
+ * is recorded rather than released inline.
+ */
+export interface NativeArgumentBorrow {
+  readonly of: "cstring" | "cstringVector";
+  /**
+   * Where the borrow reads from, or null when the argument is statically
+   * absent and the borrow is the null pointer itself.
+   *
+   * `unionTag` is set when absence is a RUNTIME question: the value is a union
+   * and the borrow happens only for that arm. Null means the value is already
+   * the borrowed type.
+   */
+  readonly source: {
+    readonly argument: number;
+    readonly unionTag: number | null;
+  } | null;
+  readonly releasedAfterCall: boolean;
+}
+
+/** The borrow description for a form already narrowed to the borrowing arms. */
+export function nativeArgumentBorrow(
+  form: NativeArgumentBorrowForm,
+): NativeArgumentBorrow {
+  switch (form.kind) {
+    case "cStringNull":
+      return { of: "cstring", source: null, releasedAfterCall: false };
+    case "cStringOrNull":
+      return {
+        of: "cstring",
+        source: { argument: form.argument, unionTag: form.stringTag },
+        releasedAfterCall: false,
+      };
+    case "cString":
+      return {
+        of: "cstring",
+        source: { argument: form.argument, unionTag: null },
+        releasedAfterCall: false,
+      };
+    case "cStringArrayNull":
+      return { of: "cstringVector", source: null, releasedAfterCall: false };
+    case "cStringArrayOrNull":
+      return {
+        of: "cstringVector",
+        source: { argument: form.argument, unionTag: form.arrayTag },
+        releasedAfterCall: true,
+      };
+    case "cStringArray":
+      return {
+        of: "cstringVector",
+        source: { argument: form.argument, unionTag: null },
+        releasedAfterCall: true,
+      };
+    default: {
+      const unhandled: never = form;
+      throw new NativeCallPlanError(
+        (unhandled as { kind: string }).kind,
+        "argument projection claimed as a borrow but not described",
+      );
+    }
+  }
+}

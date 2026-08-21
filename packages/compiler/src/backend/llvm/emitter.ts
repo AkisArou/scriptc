@@ -91,7 +91,7 @@ import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, islandPr
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
 import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, nativeCallLifecycle, nativeCallbackPayloads, nativeTrampolineForm, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
-import { nativeArgumentForm, nativeCallDisposal, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultCopy, nativeResultForm, nativeResultHandle, type NativeArgumentFormExhausted } from "../native-call-plan.js";
+import { nativeArgumentBorrow, nativeArgumentForm, nativeCallDisposal, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultCopy, nativeResultForm, nativeResultHandle, type NativeArgumentFormExhausted } from "../native-call-plan.js";
 import { computeMayThrow } from "../emission/may-throw.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleNativeHandleTag, mangleNativeStruct, mangleRecordClone, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
@@ -7527,92 +7527,67 @@ class LlEmitter {
               callArgs.push(`${parameterType} ${value}`);
               return;
             }
+            /* The six borrowing arms, from the same description the C backend
+             * reads. What is LLVM's is the diamond: a ternary is a branch to
+             * two blocks and a phi, and the absent edge carries the null. */
             case "cStringNull":
-              callArgs.push(`${parameterType} null`);
-              return;
-            case "cStringOrNull": {
-              const arg = args[form.argument]!;
-              const tag = this.unionTag(arg.name);
-              const present = B.newLabel("native.cstr.present");
-              const absent = B.newLabel("native.cstr.absent");
-              const done = B.newLabel("native.cstr.done");
-              const isString = B.tmp();
-              B.line(`${isString} = icmp eq i32 ${tag}, ${form.stringTag}`);
-              B.condBr(isString, present, absent);
-              B.startBlock(present);
-              const payload = this.unionPeek(arg.name);
-              this.declare("declare ptr @scr_str_c_data(ptr)");
-              const presentData = B.tmp();
-              B.line(`${presentData} = call ptr @scr_str_c_data(ptr ${payload})`);
-              B.br(done);
-              B.startBlock(absent);
-              B.br(done);
-              B.startBlock(done);
-              const data = B.tmp();
-              B.line(`${data} = phi ptr [ ${presentData}, %${present} ], [ null, %${absent} ]`);
-              emitConversionPendingCheck();
-              callArgs.push(`${parameterType} ${data}`);
-              return;
-            }
-            case "cString": {
-              const data = B.tmp();
-              this.declare("declare ptr @scr_str_c_data(ptr)");
-              B.line(`${data} = call ptr @scr_str_c_data(ptr ${valueOf(form.argument)})`);
-              emitConversionPendingCheck();
-              callArgs.push(`${parameterType} ${data}`);
-              return;
-            }
+            case "cStringOrNull":
+            case "cString":
             case "cStringArrayNull":
-              /* Nothing to build and nothing to release: the absent vector is
-               * NULL, which is what a C API distinguishing "no list" from "an
-               * empty list" is asking for. */
-              callArgs.push(`${parameterType} null`);
-              return;
-            case "cStringArrayOrNull": {
-              const arg = args[form.argument]!;
-              const tag = this.unionTag(arg.name);
-              const present = B.newLabel("native.cstrv.present");
-              const absent = B.newLabel("native.cstrv.absent");
-              const done = B.newLabel("native.cstrv.done");
-              const isArray = B.tmp();
-              B.line(`${isArray} = icmp eq i32 ${tag}, ${form.arrayTag}`);
-              B.condBr(isArray, present, absent);
-              B.startBlock(present);
-              const payload = this.unionPeek(arg.name);
-              this.declare("declare ptr @scr_native_cstring_array_borrow(ptr, ptr)");
-              const built = B.tmp();
-              B.line(
-                `${built} = call ptr @scr_native_cstring_array_borrow(` +
-                  `ptr ${payload}, ptr ${operation})`,
-              );
-              B.br(done);
-              B.startBlock(absent);
-              B.br(done);
-              B.startBlock(done);
-              const vector = B.tmp();
-              B.line(`${vector} = phi ptr [ ${built}, %${present} ], [ null, %${absent} ]`);
-              emitConversionPendingCheck();
-              /* Recorded even when the arm was null, because the release is
-               * `free` and takes NULL — one unconditional call instead of a
-               * branch the teardown would otherwise have to carry. */
-              borrowedArrays.set(form.argument, vector);
-              callArgs.push(`${parameterType} ${vector}`);
-              return;
-            }
+            case "cStringArrayOrNull":
             case "cStringArray": {
-              /* The vector is this call's, not the program's: the strings
-               * belong to the managed array and outlive the call, so what is
-               * built here is the pointers alone. Recorded so the release
-               * after the call can find it, including on the throwing path. */
-              this.declare("declare ptr @scr_native_cstring_array_borrow(ptr, ptr)");
-              const vector = B.tmp();
-              B.line(
-                `${vector} = call ptr @scr_native_cstring_array_borrow(` +
-                  `ptr ${valueOf(form.argument)}, ptr ${operation})`,
-              );
+              const borrow = nativeArgumentBorrow(form);
+              if (borrow.source === null) {
+                callArgs.push(`${parameterType} null`);
+                return;
+              }
+              const stem = borrow.of === "cstring" ? "cstr" : "cstrv";
+              const symbol = borrow.of === "cstring"
+                ? "scr_str_c_data"
+                : "scr_native_cstring_array_borrow";
+              const declaration = borrow.of === "cstring"
+                ? "declare ptr @scr_str_c_data(ptr)"
+                : "declare ptr @scr_native_cstring_array_borrow(ptr, ptr)";
+              const trailing = borrow.of === "cstring" ? "" : `, ptr ${operation}`;
+              const arg = args[borrow.source.argument]!;
+              let value: string;
+              if (borrow.source.unionTag !== null) {
+                const tag = this.unionTag(arg.name);
+                const present = B.newLabel(`native.${stem}.present`);
+                const absent = B.newLabel(`native.${stem}.absent`);
+                const done = B.newLabel(`native.${stem}.done`);
+                const matches = B.tmp();
+                B.line(`${matches} = icmp eq i32 ${tag}, ${borrow.source.unionTag}`);
+                B.condBr(matches, present, absent);
+                B.startBlock(present);
+                const payload = this.unionPeek(arg.name);
+                this.declare(declaration);
+                const built = B.tmp();
+                B.line(`${built} = call ptr @${symbol}(ptr ${payload}${trailing})`);
+                B.br(done);
+                B.startBlock(absent);
+                B.br(done);
+                B.startBlock(done);
+                value = B.tmp();
+                B.line(`${value} = phi ptr [ ${built}, %${present} ], [ null, %${absent} ]`);
+              } else {
+                this.declare(declaration);
+                value = B.tmp();
+                B.line(
+                  `${value} = call ptr @${symbol}(ptr ${
+                    valueOf(borrow.source.argument)
+                  }${trailing})`,
+                );
+              }
               emitConversionPendingCheck();
-              borrowedArrays.set(form.argument, vector);
-              callArgs.push(`${parameterType} ${vector}`);
+              /* Recorded even where the runtime arm was null: the release is
+               * `free`, which takes NULL, so the teardown carries one
+               * unconditional call rather than a branch — and it has to run on
+               * the throwing path too. */
+              if (borrow.releasedAfterCall) {
+                borrowedArrays.set(borrow.source.argument, value);
+              }
+              callArgs.push(`${parameterType} ${value}`);
               return;
             }
             case "utf8Data": {
