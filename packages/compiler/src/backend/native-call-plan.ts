@@ -1068,20 +1068,26 @@ export type NativeArgumentBorrowForm = Extract<
  * released afterwards, and on the throwing path too, which is why the borrow
  * is recorded rather than released inline.
  */
+/**
+ * Where an argument projection reads its managed value.
+ *
+ * The three nullabilities every value family crosses, said once. Absent by
+ * CONSTRUCTION is `null` here — the projection emits the null pointer and
+ * reads nothing. Absent at RUNTIME sets `unionTag`, because the value is a
+ * union and only that arm carries something to read. Present leaves the tag
+ * null, because the value already is what the slot wants.
+ *
+ * Two families cross it today, borrowed storage and native handles, and they
+ * spelled the same three cases independently. A third crosses it as a row.
+ */
+export interface NativeArgumentSource {
+  readonly argument: number;
+  readonly unionTag: number | null;
+}
+
 export interface NativeArgumentBorrow {
   readonly of: "cstring" | "cstringVector";
-  /**
-   * Where the borrow reads from, or null when the argument is statically
-   * absent and the borrow is the null pointer itself.
-   *
-   * `unionTag` is set when absence is a RUNTIME question: the value is a union
-   * and the borrow happens only for that arm. Null means the value is already
-   * the borrowed type.
-   */
-  readonly source: {
-    readonly argument: number;
-    readonly unionTag: number | null;
-  } | null;
+  readonly source: NativeArgumentSource | null;
   readonly releasedAfterCall: boolean;
 }
 
@@ -1123,6 +1129,71 @@ export function nativeArgumentBorrow(
       throw new NativeCallPlanError(
         (unhandled as { kind: string }).kind,
         "argument projection claimed as a borrow but not described",
+      );
+    }
+  }
+}
+
+/** The argument forms that pass a native handle to the callee. */
+export type NativeArgumentHandleForm = Extract<
+  NativeArgumentForm,
+  { kind: "handleNull" | "handleOrNull" | "handleRequire" | "handleSurrender" }
+>;
+
+/**
+ * A native handle handed to the callee.
+ *
+ * The same three nullabilities the borrowed families cross, plus the one axis
+ * that is this family's own: whether the callee TAKES the reference. It does
+ * not, ordinarily — the cell keeps its reference and validates that the handle
+ * is live. Where the contract says the callee takes it, the cell gives it up
+ * instead, which is everything an explicit disposal does except freeing the
+ * object, and makes a later use of that handle a use-after-dispose for exactly
+ * the reason it is after `dispose()`.
+ *
+ * Surrender has no nullable arm, and that is the contract rather than an
+ * omission: a call that may be handed nothing cannot also be the call that
+ * takes ownership of it.
+ */
+export interface NativeArgumentHandle {
+  /** Null exactly when the argument is statically absent: there is no handle,
+   * so there is no type, and an empty string would be a placeholder standing
+   * where a fact should be. */
+  readonly typeId: string | null;
+  readonly source: NativeArgumentSource | null;
+  readonly surrenders: boolean;
+}
+
+/** The handle description for a form already narrowed to the handle arms. */
+export function nativeArgumentHandle(
+  form: NativeArgumentHandleForm,
+): NativeArgumentHandle {
+  switch (form.kind) {
+    case "handleNull":
+      return { typeId: null, source: null, surrenders: false };
+    case "handleOrNull":
+      return {
+        typeId: form.typeId,
+        source: { argument: form.argument, unionTag: form.handleTag },
+        surrenders: false,
+      };
+    case "handleRequire":
+      return {
+        typeId: form.typeId,
+        source: { argument: form.argument, unionTag: null },
+        surrenders: false,
+      };
+    case "handleSurrender":
+      return {
+        typeId: form.typeId,
+        source: { argument: form.argument, unionTag: null },
+        surrenders: true,
+      };
+    default: {
+      const unhandled: never = form;
+      throw new NativeCallPlanError(
+        (unhandled as { kind: string }).kind,
+        "argument projection claimed as a handle but not described",
       );
     }
   }

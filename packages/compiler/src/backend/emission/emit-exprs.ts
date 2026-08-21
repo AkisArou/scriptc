@@ -10,7 +10,7 @@ import { dynDestrCheckHelper, dynIterNHelper, dynKeyGetHelper } from "./emit-wal
 import { genResultThunkFor } from "./emit-async.js";
 import { nativeCallbackCancellationArgument } from "../native-callbacks.js";
 import { nativeCallLifecycle } from "../native-callbacks.js";
-import { nativeArgumentBorrow, nativeArgumentForm, nativeCallDisposal, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultCopy, nativeResultForm, nativeResultHandle, type NativeArgumentFormExhausted } from "../native-call-plan.js";
+import { nativeArgumentBorrow, nativeArgumentHandle, nativeArgumentForm, nativeCallDisposal, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultCopy, nativeResultForm, nativeResultHandle, type NativeArgumentFormExhausted } from "../native-call-plan.js";
 
 function streamTypedRefCommitAdapter(
   E: CEmitter,
@@ -2537,42 +2537,33 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               return `(void *)${
                 retainedTokens.get(form.argument) ?? args[form.argument]!.name
               }`;
-            case "handleSurrender": {
-              /* The callee takes the reference, so the cell gives it up here
-               * rather than holding one nobody owns. Everything an explicit
-               * disposal does happens, except freeing the object: that is the
-               * callee's now, and using the handle afterwards is a
-               * use-after-dispose for the same reason it is after
-               * `dispose()`. */
-              const moved = `sc_t${E.tempCounter++}`;
-              E.line(
-                `void *${moved} = scr_native_handle_surrender(${args[form.argument]!.name}, ` +
-                  `&${mangleNativeHandleTag(form.typeId)}, ${operation});`,
-              );
-              emitConversionPendingCheck();
-              return moved;
-            }
-            // The null arm passes NULL without consulting the handle table; a
-            // present handle is validated exactly as a required one is.
+            /* The four handle arms: the three nullabilities every value family
+             * crosses, plus whether the callee takes the reference. */
             case "handleNull":
-              return "NULL";
-            case "handleOrNull": {
-              const arg = args[form.argument]!;
+            case "handleOrNull":
+            case "handleRequire":
+            case "handleSurrender": {
+              const handle = nativeArgumentHandle(form);
+              /* The null arm passes NULL without consulting the handle table;
+               * a present handle is validated exactly as a required one is. */
+              if (handle.source === null) return "NULL";
+              const arg = args[handle.source.argument]!;
+              const tagRef = `&${mangleNativeHandleTag(handle.typeId!)}`;
+              /* Surrender is everything an explicit disposal does except
+               * freeing the object: that is the callee's now, and using the
+               * handle afterwards is a use-after-dispose for the same reason
+               * it is after `dispose()`. */
+              const symbol = handle.surrenders
+                ? "scr_native_handle_surrender"
+                : "scr_native_handle_require";
               const raw = `sc_t${E.tempCounter++}`;
+              const tag = handle.source.unionTag;
               E.line(
-                `void *${raw} = ${arg.name}->tag == ${form.handleTag} ` +
-                  `? scr_native_handle_require(scr_union_peek(${arg.name}), ` +
-                  `&${mangleNativeHandleTag(form.typeId)}, ${operation}) ` +
-                  ": NULL;",
-              );
-              emitConversionPendingCheck();
-              return raw;
-            }
-            case "handleRequire": {
-              const raw = `sc_t${E.tempCounter++}`;
-              E.line(
-                `void *${raw} = scr_native_handle_require(${args[form.argument]!.name}, ` +
-                  `&${mangleNativeHandleTag(form.typeId)}, ${operation});`,
+                tag !== null
+                  ? `void *${raw} = ${arg.name}->tag == ${tag} ` +
+                    `? ${symbol}(scr_union_peek(${arg.name}), ${tagRef}, ${operation}) ` +
+                    ": NULL;"
+                  : `void *${raw} = ${symbol}(${arg.name}, ${tagRef}, ${operation});`,
               );
               emitConversionPendingCheck();
               return raw;

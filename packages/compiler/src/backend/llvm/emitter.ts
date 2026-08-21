@@ -91,7 +91,7 @@ import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, islandPr
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
 import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, nativeCallLifecycle, nativeCallbackPayloads, nativeTrampolineForm, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
-import { nativeArgumentBorrow, nativeArgumentForm, nativeCallDisposal, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultCopy, nativeResultForm, nativeResultHandle, type NativeArgumentFormExhausted } from "../native-call-plan.js";
+import { nativeArgumentBorrow, nativeArgumentHandle, nativeArgumentForm, nativeCallDisposal, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultCopy, nativeResultForm, nativeResultHandle, type NativeArgumentFormExhausted } from "../native-call-plan.js";
 import { computeMayThrow } from "../emission/may-throw.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleNativeHandleTag, mangleNativeStruct, mangleRecordClone, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
@@ -7649,64 +7649,59 @@ class LlEmitter {
                 `${parameterType} ${retainedTokens.get(form.argument) ?? valueOf(form.argument)}`,
               );
               return;
+            /* The four handle arms, from the same description the C backend
+             * reads: three nullabilities and whether the callee takes the
+             * reference. The diamond is LLVM's alone. */
             case "handleNull":
-              callArgs.push(`${parameterType} null`);
-              return;
-            case "handleOrNull": {
-              // The null arm passes null without consulting the handle table;
-              // a present handle is validated as a required one is.
-              this.declare(`declare ptr @scr_native_handle_require(ptr, ptr, ptr)`);
-              const arg = args[form.argument]!;
-              const tag = mangleNativeHandleTag(form.typeId);
-              const tagValue = this.unionTag(arg.name);
-              const isHandle = B.tmp();
-              const present = B.newLabel("native.handle.present");
-              const absent = B.newLabel("native.handle.absent");
-              const joined = B.newLabel("native.handle.join");
-              B.line(`${isHandle} = icmp eq i32 ${tagValue}, ${form.handleTag}`);
-              B.condBr(isHandle, present, absent);
-              B.startBlock(present);
-              const peeked = this.unionPeek(arg.name);
-              const required = B.tmp();
-              B.line(
-                `${required} = call ptr @scr_native_handle_require(ptr ${peeked}, ` +
-                  `ptr @${tag}, ptr ${operation})`,
-              );
-              B.br(joined);
-              B.startBlock(absent);
-              B.br(joined);
-              B.startBlock(joined);
-              const selected = B.tmp();
-              B.line(
-                `${selected} = phi ptr [ ${required}, %${present} ], [ null, %${absent} ]`,
-              );
-              emitConversionPendingCheck();
-              callArgs.push(`${parameterType} ${selected}`);
-              return;
-            }
+            case "handleOrNull":
+            case "handleRequire":
             case "handleSurrender": {
-              /* The callee takes the reference, so the cell gives it up here
-               * rather than holding one nobody owns: the disposal's teardown
-               * minus freeing the object, which is the callee's now. */
-              this.declare(`declare ptr @scr_native_handle_surrender(ptr, ptr, ptr)`);
-              const raw = B.tmp();
-              B.line(
-                `${raw} = call ptr @scr_native_handle_surrender(ptr ${valueOf(form.argument)}, ` +
-                  `ptr @${mangleNativeHandleTag(form.typeId)}, ptr ${operation})`,
-              );
+              const handle = nativeArgumentHandle(form);
+              if (handle.source === null) {
+                callArgs.push(`${parameterType} null`);
+                return;
+              }
+              /* Surrender is the disposal's teardown minus freeing the object,
+               * which is the callee's now. */
+              const symbol = handle.surrenders
+                ? "scr_native_handle_surrender"
+                : "scr_native_handle_require";
+              this.declare(`declare ptr @${symbol}(ptr, ptr, ptr)`);
+              const tag = mangleNativeHandleTag(handle.typeId!);
+              const arg = args[handle.source.argument]!;
+              let value: string;
+              if (handle.source.unionTag !== null) {
+                const tagValue = this.unionTag(arg.name);
+                const matches = B.tmp();
+                const present = B.newLabel("native.handle.present");
+                const absent = B.newLabel("native.handle.absent");
+                const joined = B.newLabel("native.handle.join");
+                B.line(`${matches} = icmp eq i32 ${tagValue}, ${handle.source.unionTag}`);
+                B.condBr(matches, present, absent);
+                B.startBlock(present);
+                const peeked = this.unionPeek(arg.name);
+                const required = B.tmp();
+                B.line(
+                  `${required} = call ptr @${symbol}(ptr ${peeked}, ` +
+                    `ptr @${tag}, ptr ${operation})`,
+                );
+                B.br(joined);
+                B.startBlock(absent);
+                B.br(joined);
+                B.startBlock(joined);
+                value = B.tmp();
+                B.line(
+                  `${value} = phi ptr [ ${required}, %${present} ], [ null, %${absent} ]`,
+                );
+              } else {
+                value = B.tmp();
+                B.line(
+                  `${value} = call ptr @${symbol}(ptr ${valueOf(handle.source.argument)}, ` +
+                    `ptr @${tag}, ptr ${operation})`,
+                );
+              }
               emitConversionPendingCheck();
-              callArgs.push(`${parameterType} ${raw}`);
-              return;
-            }
-            case "handleRequire": {
-              this.declare(`declare ptr @scr_native_handle_require(ptr, ptr, ptr)`);
-              const raw = B.tmp();
-              B.line(
-                `${raw} = call ptr @scr_native_handle_require(ptr ${valueOf(form.argument)}, ` +
-                  `ptr @${mangleNativeHandleTag(form.typeId)}, ptr ${operation})`,
-              );
-              emitConversionPendingCheck();
-              callArgs.push(`${parameterType} ${raw}`);
+              callArgs.push(`${parameterType} ${value}`);
               return;
             }
             case "direct": {
