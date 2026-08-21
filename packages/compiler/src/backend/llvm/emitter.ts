@@ -91,7 +91,7 @@ import { canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, islandPr
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
 import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, nativeCallLifecycle, nativeCallbackPayloads, nativeTrampolineForm, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
-import { nativeArgumentForm, nativeCallDisposal, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultForm, type NativeArgumentFormExhausted } from "../native-call-plan.js";
+import { nativeArgumentForm, nativeCallDisposal, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultCopy, nativeResultForm, type NativeArgumentFormExhausted } from "../native-call-plan.js";
 import { computeMayThrow } from "../emission/may-throw.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleNativeHandleTag, mangleNativeStruct, mangleRecordClone, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
@@ -8021,72 +8021,37 @@ class LlEmitter {
           releaseArguments();
           return { name: "", type: e.type };
         }
-        if (resultForm.kind === "bytesResult") {
-          /* Copied first, then freed: the managed span owns its own bytes by
-           * the time the release runs. The length comes from the slot the
-           * compiler passed, not from the pointer. */
-          const raw = B.tmp();
-          B.line(`${raw} = ${call}`);
-          /* The contract says the span is there; a callee answering NULL has
-           * violated it, and this makes that catchable rather than a trap in
-           * the runtime or a silent empty span. */
-          {
-            const absent = B.tmp();
-            const missing = B.newLabel("native.bytes.null");
-            const present = B.newLabel("native.bytes.ok");
-            B.line(`${absent} = icmp eq ptr ${raw}, null`);
-            B.condBr(absent, missing, present);
-            B.startBlock(missing);
-            this.declare("declare void @scr_native_throw_null(ptr)");
-            B.line(`call void @scr_native_throw_null(ptr ${operation})`);
-            B.br(present);
-            B.startBlock(present);
-            this.emitPendingCheck();
-          }
-          const length = B.tmp();
-          B.line(`${length} = load i64, ptr ${bytesLengthSlot}`);
-          /* The length slot counts ELEMENTS, so the element kind travels with
-           * it — the two coincide only for u8. */
-          this.declare("declare ptr @scr_bytes_from_elements(i32, ptr, i64)");
-          const elemTag = BYTES_ELEM_NUM[resultForm.elem];
-          const managed = B.tmp();
-          B.line(
-            `${managed} = call ptr @scr_bytes_from_elements(i32 ${elemTag}, ` +
-              `ptr ${raw}, i64 ${length})`,
-          );
-          if (resultForm.release !== null) {
-            this.declare(`declare void @${resultForm.release}(ptr)`);
-            const present = B.newLabel("native.bytes.free");
-            const freed = B.newLabel("native.bytes.freed");
-            const wasNull = B.tmp();
-            B.line(`${wasNull} = icmp eq ptr ${raw}, null`);
-            B.condBr(wasNull, freed, present);
-            B.startBlock(present);
-            B.line(`call void @${resultForm.release}(ptr ${raw})`);
-            B.br(freed);
-            B.startBlock(freed);
-          }
-          const value = this.own({ name: managed, type: e.type });
-          if (callbacksMayThrow) this.emitPendingCheck();
-          releaseArguments();
-          return value;
-        }
+        /* The four copying projections, driven from the same description the C
+         * backend uses. What is LLVM's here is only materialization: a null
+         * test is a diamond rather than an `if`, the conditional decode needs
+         * a slot to join through, and ownership is taken explicitly. The
+         * ORDER, and where the non-null requirement sits inside it, is not
+         * decided here — see `nativeResultCopy`. */
         if (
+          resultForm.kind === "bytesResult" ||
           resultForm.kind === "utf8SpanResult" ||
-          resultForm.kind === "utf8SpanResultOrNull"
+          resultForm.kind === "utf8SpanResultOrNull" ||
+          resultForm.kind === "utf8CString" ||
+          resultForm.kind === "utf8CStringOrNull" ||
+          resultForm.kind === "utf8CStringArray" ||
+          resultForm.kind === "utf8CStringArrayOrNull"
         ) {
-          /* The byte-span result with a decode on the end, in the same order:
-           * copy into managed storage, then free, so nothing that survives
-           * points into storage the release reclaims. */
+          const copy = nativeResultCopy(resultForm);
+          /* Label stems, so a reader of the IR still sees which family a block
+           * belongs to now that one emitter serves all four. */
+          const stem = copy.adopt.kind === "bytes"
+            ? "bytes"
+            : copy.adopt.kind === "utf8Span"
+              ? "utf8span"
+              : copy.adopt.kind === "cstring"
+                ? "cstr"
+                : "cstrv";
           const raw = B.tmp();
           B.line(`${raw} = ${call}`);
-          if (resultForm.kind === "utf8SpanResult") {
-            /* The contract says the text is there. A callee answering NULL
-             * has violated it — but only where the projection did not admit
-             * absence, which is what the nullable arm is for. */
+          if (copy.requireNonNull === "raw") {
             const absent = B.tmp();
-            const missing = B.newLabel("native.utf8span.null");
-            const present = B.newLabel("native.utf8span.ok");
+            const missing = B.newLabel(`native.${stem}.null`);
+            const present = B.newLabel(`native.${stem}.ok`);
             B.line(`${absent} = icmp eq ptr ${raw}, null`);
             B.condBr(absent, missing, present);
             B.startBlock(missing);
@@ -8096,17 +8061,13 @@ class LlEmitter {
             B.startBlock(present);
             this.emitPendingCheck();
           }
-          /* BYTES, not elements: UTF-8 is a byte encoding, and the decoder
-           * receives exactly what the callee produced — never scanned for a
-           * terminator, since text that may contain one is the point.
-           *
-           * Decoded only when there is something to decode. Handing the
-           * decoder a null pointer would either trap or build a string
-           * nothing keeps, and absence is supposed to be a value. */
-          this.declare("declare ptr @scr_str_from_utf8_lossy(ptr, i64)");
-          const decoded = B.slot();
-          B.entryAllocas.push(`${decoded} = alloca ptr`);
-          {
+          let managed: string;
+          if (copy.adopt.kind === "utf8Span") {
+            /* Decoded only where there is something to decode, so the two
+             * arms join through a slot. */
+            this.declare("declare ptr @scr_str_from_utf8_lossy(ptr, i64)");
+            const decoded = B.slot();
+            B.entryAllocas.push(`${decoded} = alloca ptr`);
             const absent = B.tmp();
             const has = B.newLabel("native.utf8span.decode");
             const none = B.newLabel("native.utf8span.absent");
@@ -8117,151 +8078,79 @@ class LlEmitter {
             const length = B.tmp();
             B.line(`${length} = load i64, ptr ${bytesLengthSlot}`);
             const text = B.tmp();
-            B.line(
-              `${text} = call ptr @scr_str_from_utf8_lossy(ptr ${raw}, i64 ${length})`,
-            );
+            B.line(`${text} = call ptr @scr_str_from_utf8_lossy(ptr ${raw}, i64 ${length})`);
             B.line(`store ptr ${text}, ptr ${decoded}`);
             B.br(join);
             B.startBlock(none);
             B.line(`store ptr null, ptr ${decoded}`);
             B.br(join);
             B.startBlock(join);
-          }
-          const managed = B.tmp();
-          B.line(`${managed} = load ptr, ptr ${decoded}`);
-          if (resultForm.release !== null) {
-            this.declare(`declare void @${resultForm.release}(ptr)`);
-            const present = B.newLabel("native.utf8span.free");
-            const freed = B.newLabel("native.utf8span.freed");
-            const wasNull = B.tmp();
-            B.line(`${wasNull} = icmp eq ptr ${raw}, null`);
-            B.condBr(wasNull, freed, present);
-            B.startBlock(present);
-            B.line(`call void @${resultForm.release}(ptr ${raw})`);
-            B.br(freed);
-            B.startBlock(freed);
-          }
-          if (resultForm.kind === "utf8SpanResultOrNull") {
-            const { stringTag, nullTag, unionId } = resultForm;
-            const value = this.wrapNullable(
-              raw,
-              managed,
-              STRING,
-              stringTag,
-              { kind: "union", unionId },
-              nullTag,
+            managed = B.tmp();
+            B.line(`${managed} = load ptr, ptr ${decoded}`);
+          } else if (copy.adopt.kind === "bytes") {
+            const length = B.tmp();
+            B.line(`${length} = load i64, ptr ${bytesLengthSlot}`);
+            this.declare("declare ptr @scr_bytes_from_elements(i32, ptr, i64)");
+            managed = B.tmp();
+            B.line(
+              `${managed} = call ptr @scr_bytes_from_elements(i32 ${
+                BYTES_ELEM_NUM[copy.adopt.elem]
+              }, ptr ${raw}, i64 ${length})`,
             );
-            if (callbacksMayThrow) this.emitPendingCheck();
-            releaseArguments();
-            return value;
+          } else {
+            const symbol = copy.adopt.kind === "cstring"
+              ? "scr_str_from_c_data"
+              : "scr_native_cstring_array_adopt";
+            this.declare(`declare ptr @${symbol}(ptr)`);
+            managed = B.tmp();
+            B.line(`${managed} = call ptr @${symbol}(ptr ${raw})`);
           }
-          const value = this.own({ name: managed, type: e.type });
-          if (callbacksMayThrow) this.emitPendingCheck();
-          releaseArguments();
-          return value;
-        }
-        if (
-          resultForm.kind === "utf8CStringArray" ||
-          resultForm.kind === "utf8CStringArrayOrNull"
-        ) {
-          /* The vector is read before it is disposed of, and disposed of
-           * whatever the read produced: the elements are copied into managed
-           * strings first, so nothing the program keeps points into storage
-           * the release is about to reclaim. */
-          const raw = B.tmp();
-          B.line(`${raw} = ${call}`);
-          this.declare("declare ptr @scr_native_cstring_array_adopt(ptr)");
-          const managed = B.tmp();
-          B.line(`${managed} = call ptr @scr_native_cstring_array_adopt(ptr ${raw})`);
-          if (resultForm.release !== null) {
-            this.declare(`declare void @${resultForm.release}(ptr)`);
-            const present = B.newLabel("native.cstrv.free");
-            const freed = B.newLabel("native.cstrv.freed");
-            const isNull = B.tmp();
-            B.line(`${isNull} = icmp eq ptr ${raw}, null`);
-            B.condBr(isNull, freed, present);
-            B.startBlock(present);
-            B.line(`call void @${resultForm.release}(ptr ${raw})`);
-            B.br(freed);
-            B.startBlock(freed);
-          }
-          const elem = { kind: "array", elem: STRING } as const;
-          if (resultForm.kind === "utf8CStringArrayOrNull") {
-            const { arrayTag, nullTag, unionId } = resultForm;
-            const value = this.wrapNullable(
-              raw,
-              managed,
-              elem,
-              arrayTag,
-              { kind: "union", unionId },
-              nullTag,
-            );
-            if (callbacksMayThrow) this.emitPendingCheck();
-            releaseArguments();
-            return value;
-          }
-          const value = this.own({ name: managed, type: e.type });
-          const isNull = B.tmp();
-          const throwBlock = B.newLabel("native.cstrv.throw");
-          const continuation = B.newLabel("native.cstrv.ok");
-          B.line(`${isNull} = icmp eq ptr ${managed}, null`);
-          B.condBr(isNull, throwBlock, continuation);
-          B.startBlock(throwBlock);
-          this.declare("declare void @scr_native_throw_null(ptr)");
-          B.line(`call void @scr_native_throw_null(ptr ${operation})`);
-          B.br(continuation);
-          B.startBlock(continuation);
-          this.emitPendingCheck();
-          releaseArguments();
-          return value;
-        }
-        if (resultForm.kind === "utf8CString" || resultForm.kind === "utf8CStringOrNull") {
-          const raw = B.tmp();
-          B.line(`${raw} = ${call}`);
-          this.declare("declare ptr @scr_str_from_c_data(ptr)");
-          const managed = B.tmp();
-          B.line(`${managed} = call ptr @scr_str_from_c_data(ptr ${raw})`);
-          if (resultForm.release !== null) {
-            /* Copied first, then freed: the managed string owns its own bytes
-             * by now, so nothing that survives points into storage the
-             * release is about to reclaim. */
-            this.declare(`declare void @${resultForm.release}(ptr)`);
-            const owned = B.newLabel("native.cstr.free");
-            const freed = B.newLabel("native.cstr.freed");
+          if (copy.release !== null) {
+            this.declare(`declare void @${copy.release}(ptr)`);
+            const owned = B.newLabel(`native.${stem}.free`);
+            const freed = B.newLabel(`native.${stem}.freed`);
             const wasNull = B.tmp();
             B.line(`${wasNull} = icmp eq ptr ${raw}, null`);
             B.condBr(wasNull, freed, owned);
             B.startBlock(owned);
-            B.line(`call void @${resultForm.release}(ptr ${raw})`);
+            B.line(`call void @${copy.release}(ptr ${raw})`);
             B.br(freed);
             B.startBlock(freed);
           }
-          if (resultForm.kind === "utf8CStringOrNull") {
-            const { stringTag, nullTag, unionId } = resultForm;
+          const elem = copy.adopt.kind === "cstringVector"
+            ? ({ kind: "array", elem: STRING } as const)
+            : STRING;
+          if (copy.absent !== null) {
             const value = this.wrapNullable(
               raw,
               managed,
-              STRING,
-              stringTag,
-              { kind: "union", unionId },
-              nullTag,
+              elem,
+              copy.absent.presentTag,
+              { kind: "union", unionId: copy.absent.unionId },
+              copy.absent.nullTag,
             );
             if (callbacksMayThrow) this.emitPendingCheck();
             releaseArguments();
             return value;
           }
           const value = this.own({ name: managed, type: e.type });
-          const isNull = B.tmp();
-          const throwBlock = B.newLabel("native.cstr.throw");
-          const continuation = B.newLabel("native.cstr.ok");
-          B.line(`${isNull} = icmp eq ptr ${managed}, null`);
-          B.condBr(isNull, throwBlock, continuation);
-          B.startBlock(throwBlock);
-          this.declare("declare void @scr_native_throw_null(ptr)");
-          B.line(`call void @scr_native_throw_null(ptr ${operation})`);
-          B.br(continuation);
-          B.startBlock(continuation);
-          this.emitPendingCheck();
+          if (copy.requireNonNull === "managed") {
+            const isNull = B.tmp();
+            const throwBlock = B.newLabel(`native.${stem}.throw`);
+            const continuation = B.newLabel(`native.${stem}.ok`);
+            B.line(`${isNull} = icmp eq ptr ${managed}, null`);
+            B.condBr(isNull, throwBlock, continuation);
+            B.startBlock(throwBlock);
+            this.declare("declare void @scr_native_throw_null(ptr)");
+            B.line(`call void @scr_native_throw_null(ptr ${operation})`);
+            B.br(continuation);
+            B.startBlock(continuation);
+            /* Unconditional, and it subsumes the callback case: it has to run
+             * for the throw above either way. */
+            this.emitPendingCheck();
+          } else if (callbacksMayThrow) {
+            this.emitPendingCheck();
+          }
           releaseArguments();
           return value;
         }
