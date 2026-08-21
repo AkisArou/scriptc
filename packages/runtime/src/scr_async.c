@@ -296,6 +296,22 @@ void scr_promise_trace_v(void *p, ScrTraceVisit visit, void *ctx) {
 typedef void *ScrCtx;
 #elif defined(__wasi__)
 typedef unsigned char ScrCtx;
+#elif defined(__ANDROID__)
+/* Bionic declares ucontext_t for signal handlers and ships none of
+ * getcontext, makecontext or swapcontext — they exist in no Android libc
+ * version. Nothing here needs them, because a fiber cannot be reached on
+ * Android at all, and that is guaranteed twice over rather than assumed:
+ * the executable lane refuses every mobile target by name, so the only
+ * Android product is a library archive; and library emission requires an
+ * async-free module graph, so no library reaches a fiber either.
+ *
+ * So this arm carries no saved context and every switch traps, which is the
+ * spelling WASI already uses for the same reason — there the compiler's
+ * stackless coroutines mean a native stack switch never happens, here the
+ * product shape means a fiber never exists. A trap is the honest form for
+ * code that cannot run: it names the impossibility instead of quietly
+ * linking assembly nobody can exercise. */
+typedef unsigned char ScrCtx;
 #else
 typedef ucontext_t ScrCtx;
 #endif
@@ -910,6 +926,10 @@ static void scr_switch(ScrCtx *from, ScrCtx *to, ScrFiber *to_fiber) {
   (void)from;
   (void)to;
   scr_trap("scriptc: internal error: native stack switch reached on WASI\n");
+#elif defined(__ANDROID__)
+  (void)from;
+  (void)to;
+  scr_trap("scriptc: internal error: native stack switch reached on Android\n");
 #elif defined(SCR_ASAN_FIBERS)
   void **save = from_fiber ? &from_fiber->fake_stack : &scr_main_fake_stack;
   const void *bottom = to_fiber ? to_fiber->stack : NULL;
@@ -1224,6 +1244,11 @@ ScrPromise *scr_async_spawn(void (*entry)(ScrFiber *, void *), void *argpack) {
   ScrCtx here = scr_win_self();
   f->ctx = CreateFiber(SCR_FIBER_STACK, scr_trampoline, NULL);
   if (f->ctx == NULL) scr_oom();
+#elif defined(__ANDROID__)
+  /* Reached only if an async-free guarantee were broken upstream; trapping
+   * here names which one rather than corrupting a stack. */
+  (void)f;
+  scr_trap("scriptc: internal error: fiber spawned on Android\n");
 #elif defined(__wasi__)
   ScrFiber *spawner = scr_current;
   scr_current = f;
@@ -1251,7 +1276,9 @@ ScrPromise *scr_async_spawn(void (*entry)(ScrFiber *, void *), void *argpack) {
 
   ucontext_t here;
 #endif
-#ifndef __wasi__
+/* Android joins WASI here: neither has a saved outgoing context to name, so
+ * neither reaches the resume-and-return-to-spawner dance below. */
+#if !defined(__wasi__) && !defined(__ANDROID__)
   f->return_to = &here;
   ScrFiber *spawner = scr_current;
   scr_switch(&here, &f->ctx, f);
@@ -3063,6 +3090,8 @@ ScrGen *scr_gen_new(void (*entry)(ScrFiber *, void *), void *argpack,
 #ifdef _WIN32
   f->ctx = CreateFiber(SCR_FIBER_STACK, scr_trampoline, NULL);
   if (f->ctx == NULL) scr_oom();
+#elif defined(__ANDROID__)
+  scr_trap("scriptc: internal error: generator fiber spawned on Android\n");
 #elif defined(__wasi__)
   f->ctx = 0;
 #else
