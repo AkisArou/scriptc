@@ -3331,7 +3331,8 @@ test("Native IR validates explicit identity handle upcast graphs", () => {
   if (incompatibleBase.kind !== "handle") throw new Error("test fixture lost its handle type");
   incompatibleBase.identity = "platform";
   expect(validateModule(incompatible).map(({ message }) => message)).toContain(
-    `Native IR handle type "${COUNTER_ID}" has an invalid identity upcast to "${base.id}"`,
+    `Native IR handle type "${COUNTER_ID}" has an invalid identity upcast to "${base.id}": ` +
+      `identity differs ("pointer" upcasting to "platform")`,
   );
 
   const incompatibleCollection = structuredClone(mod);
@@ -3339,8 +3340,53 @@ test("Native IR validates explicit identity handle upcast graphs", () => {
   if (collectionBase.kind !== "handle") throw new Error("test fixture lost its handle type");
   collectionBase.cycleCollection = "traceable";
   expect(validateModule(incompatibleCollection).map(({ message }) => message)).toContain(
-    `Native IR handle type "${COUNTER_ID}" has an invalid identity upcast to "${base.id}"`,
+    `Native IR handle type "${COUNTER_ID}" has an invalid identity upcast to "${base.id}": ` +
+      `cycle collection differs ("none" upcasting to "traceable")`,
   );
+
+  /* Every remaining rule on the edge, each asserted through the reason it
+   * gives. A generated hierarchy breaks these — not the hand-written ones
+   * above — and until each named itself, all six failures read alike.
+   */
+  function upcastErrors(mutate: (module: IrModule) => void): string[] {
+    const mutated = structuredClone(mod);
+    mutate(mutated);
+    const prefix = `Native IR handle type "${COUNTER_ID}" has an invalid identity upcast to `;
+    return validateModule(mutated).map(({ message }) => message)
+      .filter((message) => message.startsWith(prefix))
+      .map((message) => message.slice(prefix.length));
+  }
+  function setUpcasts(module: IrModule, targets: string[]): void {
+    const handle = module.nativeTypes![1]!;
+    if (handle.kind !== "handle") throw new Error("test fixture lost its handle type");
+    handle.upcasts = targets.map((target) => ({ kind: "identity", target }));
+  }
+  expect(upcastErrors((module) => setUpcasts(module, [COUNTER_ID]))).toEqual([
+    `"${COUNTER_ID}": a handle cannot upcast to itself`,
+  ]);
+  expect(upcastErrors((module) => setUpcasts(module, [base.id, base.id]))).toEqual([
+    `"${base.id}": the target is named twice`,
+  ]);
+  expect(upcastErrors((module) => setUpcasts(module, [`${base.id}z`, base.id]))).toEqual([
+    `"${`${base.id}z`}": the target is not a Native IR type in this module`,
+    `"${base.id}": targets must ascend, and this one follows "${`${base.id}z`}"`,
+  ]);
+  expect(upcastErrors((module) => {
+    const target = module.nativeTypes![0]!;
+    if (target.kind !== "handle") throw new Error("test fixture lost its handle type");
+    target.threadSafety = "shared";
+  })).toEqual([
+    `"${base.id}": thread safety differs ("confined" upcasting to "shared")`,
+  ]);
+  expect(upcastErrors((module) => {
+    module.nativeTypes!.push({
+      ...PADDED_DEFINITION,
+      fields: PADDED_DEFINITION.fields.map((field) => ({ ...field, type: { ...field.type } })),
+    });
+    setUpcasts(module, [PADDED_ID]);
+  })).toEqual([
+    `"${PADDED_ID}": the target is a struct, and only handles carry identity`,
+  ]);
 
   const cyclic = structuredClone(mod);
   const cyclicBase = cyclic.nativeTypes![0]!;

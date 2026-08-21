@@ -12,6 +12,7 @@ import type {
   IrModule,
   IrNativeCallbackArgumentType,
   IrNativeCallbackSignature,
+  IrNativeHandleDef,
   IrNativePointerType,
   IrNativeResultProjection,
   IrNativePhysicalAbiType,
@@ -1516,9 +1517,41 @@ export function validateModule(mod: IrModule): IrValidationError[] {
   for (const definition of nativeTypesById.values()) {
     if (definition.kind === "struct") nativeStructLayout(definition, new Set());
   }
+  /* The six constraints on an identity upcast used to share one message, so a
+   * generated hierarchy — where nobody hand-wrote the edge that failed — could
+   * only be repaired by testing each rule against the manifest in turn. The
+   * edge is not the diagnosis; the rule it broke is. Ascending order is also
+   * what rejects a duplicate, so there is no separate seen-set to keep.
+   */
+  function invalidIdentityUpcastReason(
+    definition: IrNativeHandleDef,
+    targetId: string,
+    previous: string,
+  ): string | null {
+    if (targetId === definition.id) return "a handle cannot upcast to itself";
+    if (previous >= targetId) {
+      return previous === targetId
+        ? "the target is named twice"
+        : `targets must ascend, and this one follows "${previous}"`;
+    }
+    const target = nativeTypesById.get(targetId);
+    if (target === undefined) return "the target is not a Native IR type in this module";
+    if (target.kind !== "handle") return "the target is a struct, and only handles carry identity";
+    if (target.threadSafety !== definition.threadSafety) {
+      return `thread safety differs ("${definition.threadSafety}" upcasting to "${target.threadSafety}")`;
+    }
+    if (target.identity !== definition.identity) {
+      return `identity differs ("${definition.identity}" upcasting to "${target.identity}")`;
+    }
+    /* Both ends share one managed cell, so one end alone cannot carry a
+     * collector header: the tracer would read a field the other end lacks. */
+    if (target.cycleCollection !== definition.cycleCollection) {
+      return `cycle collection differs ("${definition.cycleCollection}" upcasting to "${target.cycleCollection}")`;
+    }
+    return null;
+  }
   for (const definition of nativeTypesById.values()) {
     if (definition.kind !== "handle" || !Array.isArray(definition.upcasts)) continue;
-    const targets = new Set<string>();
     let previous = "";
     for (const upcast of definition.upcasts) {
       const validShape =
@@ -1534,20 +1567,13 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         });
         continue;
       }
-      const target = nativeTypesById.get(upcast.target);
-      if (
-        targets.has(upcast.target) || previous >= upcast.target ||
-        upcast.target === definition.id || target?.kind !== "handle" ||
-        target.threadSafety !== definition.threadSafety ||
-        target.identity !== definition.identity ||
-        target.cycleCollection !== definition.cycleCollection
-      ) {
+      const reason = invalidIdentityUpcastReason(definition, upcast.target, previous);
+      if (reason !== null) {
         errors.push({
-          message: `Native IR handle type "${definition.id}" has an invalid identity upcast to "${upcast.target}"`,
+          message: `Native IR handle type "${definition.id}" has an invalid identity upcast to "${upcast.target}": ${reason}`,
           loc: moduleLoc,
         });
       }
-      targets.add(upcast.target);
       previous = upcast.target;
     }
   }
