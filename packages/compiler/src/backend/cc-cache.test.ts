@@ -10,6 +10,7 @@ import {
   ccVersionOnce,
   compileC,
   compileLibArchive,
+  executableNativeEnvironmentFingerprint,
   implicitDependencyProbeIncludes,
   parseLinkTraceFiles,
   resolveBuildCacheRoot,
@@ -128,6 +129,45 @@ test("the production cache root follows overrides, platform defaults, and the ha
     "/Users/tester/AppData/Local/scriptc/cache/build",
   );
 });
+
+test.skipIf(process.platform === "win32")(
+  "the early executable identity follows a compiler selected behind a stable driver",
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "scriptc-effective-compiler-"));
+    scratch.push(dir);
+    const binDir = join(dir, "bin");
+    const selector = join(dir, "selected");
+    const firstCompiler = join(dir, "clang-first");
+    const secondCompiler = join(dir, "clang-second");
+    await mkdir(binDir);
+    await Promise.all([
+      writeFile(firstCompiler, "#!/bin/sh\nexit 0\n"),
+      writeFile(secondCompiler, "#!/bin/sh\nexit 0\n"),
+      writeFile(
+        join(binDir, "clang"),
+        "#!/bin/sh\nselected=$(cat \"$SCRIPTC_TEST_EFFECTIVE_COMPILER\")\nprintf '\"%s\" \"-cc1\"\\n' \"$selected\" >&2\n",
+      ),
+      writeFile(selector, `${firstCompiler}\n`),
+    ]);
+    await Promise.all([
+      chmod(firstCompiler, 0o755),
+      chmod(secondCompiler, 0o755),
+      chmod(join(binDir, "clang"), 0o755),
+    ]);
+    const env = {
+      ...process.env,
+      PATH: `${binDir}${delimiter}${process.env["PATH"] ?? ""}`,
+      SCRIPTC_TEST_EFFECTIVE_COMPILER: selector,
+    };
+
+    const first = await executableNativeEnvironmentFingerprint(env);
+    expect(await executableNativeEnvironmentFingerprint(env)).toBe(first);
+    await writeFile(selector, `${secondCompiler}\n`);
+    const second = await executableNativeEnvironmentFingerprint(env);
+
+    expect(second).not.toBe(first);
+  },
+);
 
 test("native cache identities separate host architectures while cross targets remain explicit", () => {
   expect(cacheTargetIdentity({ target: null }, "darwin", "arm64")).toBe("native:darwin:arm64");
@@ -2549,6 +2589,40 @@ test("frontend-generated same-output builds no-op only while output and dependen
     if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
     else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
     process.umask(oldUmask);
+  }
+});
+
+test("artifact-ready callbacks expose native dependencies on builds and validated hits", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scriptc-artifact-ready-"));
+  scratch.push(dir);
+  const cacheRoot = join(dir, "cache");
+  const cPath = join(dir, "program.c");
+  const outPath = join(dir, "program");
+  const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
+  const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+  try {
+    process.env["SCRIPTC_CACHE_DIR"] = cacheRoot;
+    delete process.env["SCRIPTC_NO_CACHE"];
+    await writeFile(cPath, "int main(void) { return 0; }\n");
+    const observations: string[][] = [];
+    const build = (): Promise<void> => compileC({
+      cPath,
+      outPath,
+      cacheIdentity: "scriptc-generated-v1",
+      onArtifactReady: async ({ dependencies }) => {
+        observations.push(dependencies.map((dependency) => dependency.path));
+      },
+    });
+    await build();
+    await build();
+    expect(observations).toHaveLength(2);
+    expect(observations[0]!.length).toBeGreaterThan(0);
+    expect(observations[1]).toEqual(observations[0]);
+  } finally {
+    if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
+    else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
+    if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];
+    else process.env["SCRIPTC_NO_CACHE"] = oldNoCache;
   }
 });
 

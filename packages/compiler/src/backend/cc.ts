@@ -1,5 +1,5 @@
 import { execFile, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, existsSync, readdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { access, chmod, copyFile, link, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, unlink, utimes, writeFile } from "node:fs/promises";
@@ -170,6 +170,43 @@ export function toolchainEnvironmentCachePolicy(
 export function toolchainEnvironmentFingerprint(env: NodeJS.ProcessEnv = process.env): string {
   const hash = createHash("sha256").update("toolchain-env-v1\0");
   for (const name of TOOLCHAIN_ENV_KEYS) {
+    const value = env[name];
+    hash.update(name).update(value === undefined ? "\0unset\0" : "\0set\0").update(value ?? "").update("\0");
+  }
+  return hash.digest("hex");
+}
+
+/** Inputs that can change which native tool/runtime implementation an
+ * executable build selects before compileC has a chance to rediscover it.
+ * The early whole-program cache keys this exact posture before restoring a
+ * final binary; compileC retains its deeper inode/content validation. */
+export async function executableNativeEnvironmentFingerprint(
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<string> {
+  const configuredCompiler = env["SCRIPTC_CC"] ?? "";
+  let compilerIdentity: string;
+  try {
+    compilerIdentity = await effectiveCompilerEnvironmentIdentity(resolveCc(env), env);
+  } catch {
+    // A failed trace cannot safely describe a reusable native posture. Keep
+    // the build working, but make this invocation miss every persistent early
+    // entry so compileC performs its full discovery and validation.
+    compilerIdentity = `<unavailable:${configuredCompiler}:${randomUUID()}>`;
+  }
+  const hash = createHash("sha256")
+    .update("executable-native-environment-v2\0")
+    .update(toolchainEnvironmentFingerprint(env)).update("\0")
+    // PATH text alone is not a resolution proof, and on Darwin /usr/bin/clang
+    // is a stable shim whose selected Xcode compiler can change underneath it.
+    // Re-resolve and trace the effective driver on every early lookup.
+    .update(compilerIdentity).update("\0");
+  for (const name of [
+    "PATH",
+    "SCRIPTC_FETCH_CURL",
+    "SCRIPTC_TEST_RUNTIME_SRC_DIR",
+    "SCRIPTC_TEST_VENDOR_CACHE_DIR",
+    "SCRIPTC_TEST_TRUST_COMPILER_WRAPPER",
+  ]) {
     const value = env[name];
     hash.update(name).update(value === undefined ? "\0unset\0" : "\0set\0").update(value ?? "").update("\0");
   }
@@ -368,6 +405,18 @@ export interface CcOptions {
    * The unit also compiles whenever `tls` does — scr_tls.c consults its
    * default-set override and shared Windows-certificate enumerator. */
   tlsCa?: boolean;
+  /** Internal compiler hook: called only after a strict native artifact hit
+   * or a successful stable build has installed `outPath`. The executable
+   * frontend cache uses it to publish its stamp after native dependencies
+   * have validated; arbitrary compileC callers leave it unset. */
+  onArtifactReady?: (artifact: ValidatedNativeArtifact) => Promise<void>;
+}
+
+/** Native dependency proof attached to an executable frontend-cache entry.
+ * compileC produces this only after its strict local/CAS validation succeeds;
+ * the early reader replays it before restoring the final executable. */
+export interface ValidatedNativeArtifact {
+  dependencies: NativeArtifactDependency[];
 }
 
 /** Structured compiler-driver failure. Most callers still let this surface
@@ -2501,6 +2550,57 @@ interface ResolvedTool {
   fileIdentity: string;
 }
 
+/** Identity of the compiler implementation and configuration selected by a
+ * fresh driver invocation. In particular, Darwin's stable /usr/bin/clang shim
+ * exposes the currently selected Xcode clang only in its `-###` trace. The
+ * normalized trace also covers output-affecting default driver configuration
+ * that can change while argv[0] and PATH retain the same spelling. */
+async function effectiveCompilerEnvironmentIdentity(
+  driver: Pick<CcDriver, "argv" | "targetArgs">,
+  env: NodeJS.ProcessEnv,
+): Promise<string> {
+  const compiler = driver.argv[0] ?? "clang";
+  const resolvedDriver = await resolvedTool(compiler, env);
+  if (resolvedDriver === null) return `<unresolved:${compiler}>`;
+  const probeDir = await mkdtemp(join(tmpdir(), "scriptc-early-cc-probe-"));
+  try {
+    const source = join(probeDir, "empty.c");
+    const object = join(probeDir, "empty.o");
+    await writeFile(source, "int scriptc_early_driver_probe;\n");
+    const trace = await execFileAsync(
+      compiler,
+      [
+        ...driver.argv.slice(1),
+        ...driver.targetArgs,
+        "-###",
+        "-std=c11",
+        "-c",
+        source,
+        "-o",
+        object,
+      ],
+      { cwd: probeDir, env, maxBuffer: 16 * 1024 * 1024 },
+    );
+    const effectiveSpellings: string[] = [];
+    for (const line of `${trace.stdout}\n${trace.stderr}`.split(/\r?\n/)) {
+      const tokens = driverTraceCandidates(line);
+      const cc1 = tokens.indexOf("-cc1");
+      if (cc1 > 0) effectiveSpellings.push(tokens[cc1 - 1]!);
+    }
+    const effective = effectiveSpellings.length === 1
+      ? await resolvedTool(effectiveSpellings[0]!, env)
+      : null;
+    return createHash("sha256")
+      .update("effective-compiler-environment-v1\0")
+      .update(resolvedDriver.cacheIdentity).update("\0")
+      .update(normalizedProbeInvocation(trace, probeDir)).update("\0")
+      .update(effective?.cacheIdentity ?? `<unresolved-effective:${effectiveSpellings.join("\x1f")}>`)
+      .digest("hex");
+  } finally {
+    await rm(probeDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
 /** Resolve the executable the OS will select for an argv[0] spelling. The
  * path and inode metadata join the version output below: two PATH postures
  * must not share cache entries merely because both drivers call themselves
@@ -3842,11 +3942,11 @@ interface LocalArtifactStamp {
   version: 2;
   key: string;
   digest: string;
-  dependencies: LocalArtifactDependency[];
+  dependencies: NativeArtifactDependency[];
   integrity: string;
 }
 
-interface LocalArtifactDependency {
+export interface NativeArtifactDependency {
   path: string;
   kind: "file" | "directory" | "symlink";
   dev: number;
@@ -3918,7 +4018,7 @@ async function directoryTreeDigest(
 
 function localDependencyKind(
   info: Awaited<ReturnType<typeof lstat>>,
-): LocalArtifactDependency["kind"] | null {
+): NativeArtifactDependency["kind"] | null {
   return info.isFile()
     ? "file"
     : info.isDirectory()
@@ -3931,11 +4031,11 @@ function localDependencyKind(
 async function snapshotLocalArtifactDependency(
   path: string,
   treeExclusions: readonly string[] | null = null,
-): Promise<LocalArtifactDependency> {
+): Promise<NativeArtifactDependency> {
   const info = await lstat(path);
   const kind = localDependencyKind(info);
   if (kind === null) throw new Error(`unsupported local artifact dependency: ${path}`);
-  const dependency: LocalArtifactDependency = {
+  const dependency: NativeArtifactDependency = {
     path,
     kind,
     dev: info.dev,
@@ -3972,7 +4072,7 @@ async function snapshotLocalArtifactDependencies(
   dependencyPaths: readonly string[],
   recursiveDirectories: readonly string[] = [],
   recursiveExclusions: readonly string[] = [],
-): Promise<LocalArtifactDependency[]> {
+): Promise<NativeArtifactDependency[]> {
   const recursive = new Set(recursiveDirectories.map((path) => resolve(path)));
   return Promise.all(
     [...new Set(dependencyPaths)].sort().map((path) =>
@@ -3984,9 +4084,29 @@ async function snapshotLocalArtifactDependencies(
   );
 }
 
-async function localArtifactDependenciesStillMatch(
-  dependencies: readonly LocalArtifactDependency[],
+export async function nativeArtifactDependenciesStillMatch(
+  dependencies: readonly NativeArtifactDependency[],
 ): Promise<boolean> {
+  if (!dependencies.every((dependency) =>
+    dependency !== null && typeof dependency === "object" &&
+    typeof dependency.path === "string" &&
+    (dependency.kind === "file" || dependency.kind === "directory" || dependency.kind === "symlink") &&
+    typeof dependency.dev === "number" && typeof dependency.ino === "number" &&
+    typeof dependency.size === "number" && typeof dependency.mtimeMs === "number" &&
+    typeof dependency.ctimeMs === "number" &&
+    (dependency.treeDigest === undefined || typeof dependency.treeDigest === "string") &&
+    (dependency.treeExclusions === undefined || (
+      Array.isArray(dependency.treeExclusions) &&
+      dependency.treeExclusions.every((path) => typeof path === "string")
+    )) &&
+    (dependency.kind !== "symlink" || (
+      typeof dependency.targetPath === "string" &&
+      (dependency.targetKind === "file" || dependency.targetKind === "directory") &&
+      typeof dependency.targetDev === "number" && typeof dependency.targetIno === "number" &&
+      typeof dependency.targetSize === "number" && typeof dependency.targetMtimeMs === "number" &&
+      typeof dependency.targetCtimeMs === "number"
+    ))
+  )) return false;
   return (await Promise.all(
     dependencies.map(async (dependency) => {
       const current = await snapshotLocalArtifactDependency(
@@ -4002,7 +4122,7 @@ interface NativeMetadataStamp {
   version: 2;
   key: string;
   values: Record<string, string>;
-  dependencies: LocalArtifactDependency[];
+  dependencies: NativeArtifactDependency[];
   integrity: string;
 }
 
@@ -4040,7 +4160,7 @@ async function readNativeMetadataStamp(
         values: stamp.values,
         dependencies: stamp.dependencies,
       }) !== stamp.integrity ||
-      !(await localArtifactDependenciesStillMatch(stamp.dependencies))
+      !(await nativeArtifactDependenciesStillMatch(stamp.dependencies))
     ) {
       return null;
     }
@@ -4145,7 +4265,7 @@ async function localArtifactHit(
   stampPath: string,
   outPath: string,
   key: string,
-): Promise<boolean> {
+): Promise<LocalArtifactStamp | null> {
   try {
     const stamp = JSON.parse(await readFile(stampPath, "utf8")) as Partial<LocalArtifactStamp>;
     const output = await lstat(outPath);
@@ -4187,16 +4307,16 @@ async function localArtifactHit(
           typeof dependency.targetCtimeMs !== "number"
         )
       ) ||
-      !(await localArtifactDependenciesStillMatch(stamp.dependencies)) ||
+      !(await nativeArtifactDependenciesStillMatch(stamp.dependencies)) ||
       await fileDigest(outPath) !== stamp.digest
     ) {
-      return false;
+      return null;
     }
     const now = new Date();
     await utimes(stampPath, now, now).catch(() => undefined);
-    return true;
+    return stamp as LocalArtifactStamp;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -4207,7 +4327,7 @@ async function publishLocalArtifactStamp(
   dependencyPaths: readonly string[],
   recursiveDirectories: readonly string[] = [],
   recursiveExclusions: readonly string[] = [],
-): Promise<void> {
+): Promise<LocalArtifactStamp> {
   await mkdir(dirname(stampPath), { recursive: true });
   const tmp = `${stampPath}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
   try {
@@ -4228,6 +4348,7 @@ async function publishLocalArtifactStamp(
     };
     await writeFile(tmp, `${JSON.stringify(stamp)}\n`, { mode: 0o600 });
     await rename(tmp, stampPath);
+    return stamp;
   } finally {
     await rm(tmp, { force: true }).catch(() => undefined);
   }
@@ -4557,7 +4678,11 @@ export async function compileC(opts: CcOptions): Promise<void> {
           programBytes,
           compilerPath: effectiveCompiler.canonicalPath,
         };
-        if (await localArtifactHit(stampPath, opts.outPath, key)) return;
+        const hit = await localArtifactHit(stampPath, opts.outPath, key);
+        if (hit !== null) {
+          await opts.onArtifactReady?.({ dependencies: hit.dependencies }).catch(() => undefined);
+          return;
+        }
       }
     } catch {
       // The output-local tier is only an optimization; the fully validated
@@ -5095,7 +5220,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
       ? effectiveLinkInvocationArgs
       : effectiveLinkInvocationArgs.filter((arg) => arg !== `-L${curlStubDir}`);
   let implicitLinker: string | null = null;
-  let preBuildDependencies: LocalArtifactDependency[] | null = null;
+  let preBuildDependencies: NativeArtifactDependency[] | null = null;
   let localArtifactDependencyPaths: string[] | null = null;
   let linkMetadataStamp: NativeMetadataStamp | null = null;
   const linkMetadataKey =
@@ -5174,7 +5299,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
         !(await Promise.all(
           [toolchainMetadataStamp, compileMetadataStamp, linkMetadataStamp]
             .filter((stamp): stamp is NativeMetadataStamp => stamp !== null)
-            .map((stamp) => localArtifactDependenciesStillMatch(stamp.dependencies)),
+            .map((stamp) => nativeArtifactDependenciesStillMatch(stamp.dependencies)),
         )).every(Boolean)) {
         throw new CacheInputsChangedError();
       }
@@ -5252,14 +5377,17 @@ export async function compileC(opts: CcOptions): Promise<void> {
       await chmod(tmpOut, 0o777 & ~process.umask());
       await rename(tmpOut, opts.outPath);
       if (localArtifact !== null && localArtifactDependencyPaths !== null) {
-        await publishLocalArtifactStamp(
+        const stamp = await publishLocalArtifactStamp(
           localArtifact.stampPath,
           opts.outPath,
           localArtifact.key,
           localArtifactDependencyPaths,
           [dirname(resolve(opts.cPath))],
           [root],
-        ).catch(() => undefined);
+        ).catch(() => null);
+        if (stamp !== null) {
+          await opts.onArtifactReady?.({ dependencies: stamp.dependencies }).catch(() => undefined);
+        }
       }
       return; // hit: the program/runtime payload compile and link were skipped
     } catch {
@@ -5304,7 +5432,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
     let strictObjectVerification: Promise<boolean> | null = null;
     const objectImplicitToolchainStillMatches = (): Promise<boolean> => {
       if (preBuildDependencies !== null) {
-        return localArtifactDependenciesStillMatch(preBuildDependencies);
+        return nativeArtifactDependenciesStillMatch(preBuildDependencies);
       }
       // Complete-artifact caching can be disabled by caller-owned native
       // inputs while the safe runtime-object tier remains active. Preserve its
@@ -5384,7 +5512,7 @@ export async function compileC(opts: CcOptions): Promise<void> {
       cacheInputsStable =
         cacheInputsStable &&
         preBuildDependencies !== null &&
-        await localArtifactDependenciesStillMatch(preBuildDependencies) &&
+        await nativeArtifactDependenciesStillMatch(preBuildDependencies) &&
         currentRuntime === fingerprint &&
         currentImplicit === implicitToolchain &&
         currentRuntimeInvocation === runtimeCompilerInvocation &&
@@ -5409,14 +5537,17 @@ export async function compileC(opts: CcOptions): Promise<void> {
       cacheCompleteArtifact &&
       cacheInputsStable
     ) {
-      await publishLocalArtifactStamp(
+      const stamp = await publishLocalArtifactStamp(
         localArtifact.stampPath,
         opts.outPath,
         localArtifact.key,
         localArtifactDependencyPaths,
         [dirname(resolve(opts.cPath))],
         [root],
-      ).catch(() => undefined);
+      ).catch(() => null);
+      if (stamp !== null) {
+        await opts.onArtifactReady?.({ dependencies: stamp.dependencies }).catch(() => undefined);
+      }
     }
   } finally {
     await rm(buildDir, { recursive: true, force: true }).catch(() => undefined);
