@@ -594,7 +594,12 @@ const localNativeInput: NativeFrontendInput = {
     /* A DOTTED source type: the nested class, whose symbol is reachable only
      * through its owner's VALUE side. */
     { declaration: { module: nativePackage, name: "NativeCounter.Nested" }, type: COUNTER },
-    { declaration: { module: nativePackage, name: "TickSource" }, type: COUNTER },
+    /* The DECLARED base is an ancestor of what the registration delivers. A
+     * program writes `extends TickSource` while the generated class the
+     * platform constructs is one identity upcast below it — Android's
+     * `extends Activity` against a generated MainActivity — so `this` must be
+     * typed from the registration rather than from the base. */
+    { declaration: { module: nativePackage, name: "TickSource" }, type: COUNTER_MIDDLE },
     {
       declaration: { module: nativePackage, name: "Subscription" },
       type: SUBSCRIPTION,
@@ -1819,10 +1824,27 @@ const localNativeInput: NativeFrontendInput = {
       sourceCall: { kind: "method", receiverArgument: 0 },
       error: NO_NATIVE_ERROR,
       ...directSignature([
-        { name: "self", type: COUNTER, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
+        /* Declared over the BASE, which is what a superclass bridge is: the
+         * receiver widens on its way in, exactly as it does for an inherited
+         * member reached through `this`. */
+        { name: "self", type: COUNTER_MIDDLE, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
         { name: "seed", type: I32, passMode: "value", ownership: { kind: "value" } },
       ]),
       result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      /* A binding on a class the surface maps NO handle type to. The pairing
+       * is what a selection that dropped a type produces: members bind, the
+       * import resolves, and nothing names the object they are members of. */
+      id: "scriptc.fixture.c-v1@0.0.0#unmapped_value",
+      declaration: { module: nativePackage, name: "UnmappedSource.value" },
+      entry: { symbol: "nts_counter_value" },
+      sourceCall: { kind: "method", receiverArgument: 0 },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "self", type: COUNTER_MIDDLE, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
+      ]),
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
       id: "scriptc.fixture.c-v1@0.0.0#tick_mark",
@@ -1851,7 +1873,7 @@ const localNativeInput: NativeFrontendInput = {
       sourceCall: { kind: "method", receiverArgument: 0 },
       error: NO_NATIVE_ERROR,
       ...directSignature([
-        { name: "self", type: COUNTER, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
+        { name: "self", type: COUNTER_MIDDLE, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
       ]),
       result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
@@ -6223,6 +6245,36 @@ describe.each(["c", "llvm"] as const)(
         signal: run.signal,
         stderr: run.stderr.toString(),
       }).toEqual({ status: 42, signal: null, stderr: "" });
+    });
+
+    /* The surface declares the base and maps no handle type to it. This
+     * compiled SILENTLY before it refused — no registration, no diagnostic,
+     * and a link error naming a support symbol as the first sign. Cross-gated
+     * for the same reason as the test above: both fixtures declare the class,
+     * so the parent's substituted surface reaches the same refusal. */
+    test("refuses a base the native surface maps no handle type to", async () => {
+      const outDir = join(scratch, `native-base-unmapped-${backend}`);
+      const result = await compile(
+        join(repoRoot, "tests/native-ir/native-base-unmapped.ts"),
+        {
+          outDir,
+          outPath: join(outDir, "program"),
+          backend,
+          sanitize,
+          externalTypes: nativeExternalTypes(),
+          native: frontendNativeInput(),
+          nativeLinkInputs: [fixtureObject(), supportObject(), retainedSupportObject()],
+        },
+      );
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("an unmapped native base compiled");
+      expect(
+        result.diagnostics.some(({ code, message }) =>
+          code === "SC1090" &&
+          message.includes("'UnmappedSource'") &&
+          message.includes("maps no handle type to it")
+        ),
+      ).toBe(true);
     });
   },
 );

@@ -1227,7 +1227,7 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
         return {
           kind: "varRef",
           localId: override.thisLocalId,
-          type: { kind: "nativeHandle", typeId: override.subclass.handleTypeId },
+          type: override.receiverType,
           loc: locOf(expr),
         };
       }

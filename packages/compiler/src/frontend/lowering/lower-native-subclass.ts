@@ -38,24 +38,81 @@ export interface NativeSubclass {
   readonly handleTypeId: string;
 }
 
-/** The base's handle type, or null when this class is an ordinary one.
+/** What a class's base turned out to be.
+ *
+ * Three answers rather than a handle type and null, because "the base is an
+ * ordinary managed class" and "the base came from the native surface and that
+ * surface maps no handle type to it" are opposite situations that a null
+ * cannot tell apart. Reading them as one is how a class that overrides nothing
+ * used to compile in silence. */
+export type NativeBase =
+  | { readonly kind: "managed" }
+  | { readonly kind: "native"; readonly subclass: NativeSubclass }
+  | { readonly kind: "unmapped"; readonly base: ts.Identifier; readonly detail: string };
+
+/** Files the native surface draws TYPES from — the declaration files that
+ * describe a native package.
+ *
+ * A base declared in one of them is a native base whatever the input says
+ * about it, which is what lets an unresolved one be told apart from
+ * `class MyError extends Error`: `Error` is ambient too, but nothing in the
+ * native surface is declared beside it. Computed once because a large surface
+ * is thousands of types and this is asked per class declaration. */
+function nativeSurfaceFiles(L: Lowerer): ReadonlySet<ts.SourceFile> {
+  if (L.nativeSurfaceFilesCache !== null) return L.nativeSurfaceFilesCache;
+  const files = new Set<ts.SourceFile>();
+  for (const symbol of L.nativeTypesBySymbol.keys()) {
+    for (const declaration of L.checker.declarationsOf(symbol)) {
+      files.add(declaration.getSourceFile());
+    }
+  }
+  L.nativeSurfaceFilesCache = files;
+  return files;
+}
+
+/** What this class extends.
  *
  * Asked before ordinary collection so a native-based class never enters the
  * ClassInfo machinery at all: it has no managed base, no fields, no vtable and
  * no constructor, so every question that machinery answers is one this shape
  * does not ask. */
-export function nativeSubclassOf(
-  L: Lowerer,
-  decl: ts.ClassDeclaration,
-): NativeSubclass | null {
+export function nativeBaseOf(L: Lowerer, decl: ts.ClassDeclaration): NativeBase {
   const base = decl.heritageClauses
     ?.find((clause) => clause.token === ts.SyntaxKind.ExtendsKeyword)
     ?.types.map((type) => type.expression)
     .filter(ts.isIdentifier)[0];
-  if (base === undefined || decl.name === undefined) return null;
+  if (base === undefined || decl.name === undefined) return { kind: "managed" };
   const handleTypeId = nativeBaseHandleName(L, base);
-  if (handleTypeId === null) return null;
-  return { decl, className: decl.name.text, handleTypeId };
+  if (handleTypeId !== null) {
+    return {
+      kind: "native",
+      subclass: { decl, className: decl.name.text, handleTypeId },
+    };
+  }
+  const symbol = L.resolveValueSymbol(base);
+  const resolved = symbol !== null && symbol.flags & ts.SymbolFlags.Alias
+    ? L.checker.getAliasedSymbol(symbol)
+    : symbol;
+  if (resolved === null) return { kind: "managed" };
+  const declaredBySurface = L.checker
+    .declarationsOf(resolved)
+    .some((declaration) => nativeSurfaceFiles(L).has(declaration.getSourceFile()));
+  if (!declaredBySurface) return { kind: "managed" };
+  /* The surface declares the class and maps no HANDLE type to it — either no
+   * type at all, or one that names a value the boundary copies rather than an
+   * object a platform constructs and dispatches on. The message does not
+   * distinguish them because the answer is the same either way and only one of
+   * the two is reachable from source today; claiming to tell them apart would
+   * be a branch no program can take.
+   *
+   * Either way the SELECTION is short a type, not the program, which is why
+   * the message names the surface rather than the class that extends it. */
+  return {
+    kind: "unmapped",
+    base,
+    detail: `'${base.text}' is declared by a native surface that maps no handle ` +
+      "type to it, so nothing names the object an override would receive",
+  };
 }
 
 /** Every member this slice refuses, each by its own reason.
@@ -109,6 +166,12 @@ function refuseUnsupportedMembers(L: Lowerer, subclass: NativeSubclass): boolean
 export interface NativeOverrideContext {
   readonly subclass: NativeSubclass;
   readonly thisLocalId: string;
+  /* What the receiver IS, which is the registration's answer rather than the
+   * declared base's. Carried because `super` reads the same local and must
+   * agree with how it was declared — a varRef whose type disagrees with its
+   * binding is an internal compiler error, and the two disagree exactly when
+   * the generated class is below the base the program named. */
+  readonly receiverType: IrType;
   readonly baseCall: string | undefined;
 }
 
@@ -144,16 +207,24 @@ export function lowerNativeSuperCall(
  *
  * The same construction an ordinary method gets, differing only in what `this`
  * is: a native handle rather than a managed object. That is what makes the
- * lowered function directly usable as the registration's callback. */
+ * lowered function directly usable as the registration's callback.
+ *
+ * `thisType` comes from the REGISTRATION, not from the declared base. A
+ * class-anchored registration answers for every instance of the class the
+ * packager generated, so the receiver it delivers is that class — while
+ * `extends Activity` names an ANCESTOR, which is a different type and a
+ * weaker statement. Typing `this` from the base produced a handler the
+ * registration could not accept, and the mismatch surfaced as an internal
+ * compiler error rather than as anything a reader could act on. */
 function lowerOverride(
   L: Lowerer,
   subclass: NativeSubclass,
   member: ts.MethodDeclaration,
   name: string,
   baseCall: string | undefined,
+  thisType: IrType,
 ): IrFunction | null {
   if (member.body === undefined) return null;
-  const thisType: IrType = { kind: "nativeHandle", typeId: subclass.handleTypeId };
   const shapes = L.paramShapes(member.parameters);
   L.pushFnCtx(VOID);
   const previousOverride = L.currentNativeOverride;
@@ -165,7 +236,12 @@ function lowerOverride(
     /* Set for the BODY only: `super` means this override's receiver while
      * lowering it, and means nothing anywhere else. Saved and restored rather
      * than cleared, because an override's body may contain another class. */
-    L.currentNativeOverride = { subclass, thisLocalId: thisLocal.id, baseCall };
+    L.currentNativeOverride = {
+      subclass,
+      thisLocalId: thisLocal.id,
+      receiverType: thisType,
+      baseCall,
+    };
     const body: IrStmt[] = [
       ...declared.prologue,
       ...L.lowerStmts(member.body.statements),
@@ -222,16 +298,6 @@ export function lowerNativeSubclassRegistrations(
         ));
         continue;
       }
-      const fnName = `%${subclass.className}.${memberName}`;
-      const fn = lowerOverride(L, subclass, member, fnName, binding.baseCall);
-      if (fn === null) continue;
-      L.nativeOverrideFunctions.push(fn);
-      /* The only reference to this function is the closure synthesized below,
-       * which no reachability walk saw because the program never wrote it.
-       * Without the edge it is stripped and the closure names a function the
-       * module does not carry — the same shape as a payload destructor reached
-       * only through a contract. */
-      L.noteEdge(fn.name);
       const loc: SrcLoc = locOf(member);
       const callbackType = binding.arguments[0]?.type;
       if (callbackType === undefined || callbackType.kind !== "func") {
@@ -242,6 +308,31 @@ export function lowerNativeSubclassRegistrations(
         ));
         continue;
       }
+      /* Parameter zero is the receiver — the shape a class-anchored
+       * registration has, and the one an override lowers into with no adapter
+       * between. Nothing in the metadata marks it as the receiver rather than
+       * a first payload; that is the same convention the registration itself
+       * rests on, not a new assumption introduced here. */
+      const thisType = callbackType.params[0];
+      if (thisType === undefined || thisType.kind !== "nativeHandle") {
+        L.pushDiag(nativeBindingDiag(
+          binding.id,
+          "a native override registration delivers the receiver as the " +
+            "callback's first parameter, which must be a native handle",
+          loc,
+        ));
+        continue;
+      }
+      const fnName = `%${subclass.className}.${memberName}`;
+      const fn = lowerOverride(L, subclass, member, fnName, binding.baseCall, thisType);
+      if (fn === null) continue;
+      L.nativeOverrideFunctions.push(fn);
+      /* The only reference to this function is the closure synthesized below,
+       * which no reachability walk saw because the program never wrote it.
+       * Without the edge it is stripped and the closure names a function the
+       * module does not carry — the same shape as a payload destructor reached
+       * only through a contract. */
+      L.noteEdge(fn.name);
       const handler: IrExpr = {
         kind: "closure",
         fnName,
@@ -284,6 +375,9 @@ export function lowerNativeSubclassRegistrations(
           L.useNativeType(parameter.typeId);
         }
       }
+      /* Both the receiver's own type and the declared base's: the receiver is
+       * what arrives, and the base is what a `super` call upcasts to. */
+      L.useNativeType(thisType.typeId);
       L.useNativeType(subclass.handleTypeId);
     }
   }

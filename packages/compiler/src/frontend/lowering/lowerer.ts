@@ -94,7 +94,7 @@ import {
   withUndefinedArm as withUndefinedArmCanonical,
 } from "../types.js";
 import { CompoundOp, IslandFnEntry, boundaryIntoIslandMsg, boundaryOutOfIslandMsg, BuiltinModuleFn, builtinConstLit, builtinModuleConstOf, builtinModulesArrayLit, builtinFenceHintOf, builtinModuleFnOf, stdlibMemberFence, isStdlibMember, isStdlibSymbol, isStdlibGlobal, stdlibGlobalMember, nodeTypesOnlySymbol } from "./surfaces.js";
-import { nativeSubclassOf, type NativeOverrideContext, type NativeSubclass } from "./lower-native-subclass.js";
+import { nativeBaseOf, type NativeOverrideContext, type NativeSubclass } from "./lower-native-subclass.js";
 import { FileParts, splitFiles, collectProgram, collectNpmImports, collectJsonImports, moduleArtifacts, collectGlobals, declSymbolOf, defaultExportSymbolOf, lowerFileInit, lowerDefaultExport, buildMain, appendDynamicImportModules } from "./lower-modules.js";
 import { ClassInfo, ClassIteratorInfo, GenericClassInfo, registerBuiltinErrorClasses, registerBuiltinEmitterClass, registerBuiltinStreamClasses, builtinErrorInfoOf, builtinEmitterInfoOf, builtinStreamInfoOf, analyzeClassDecoration, classIteratorDrainCall, classIteratorNextCall, classIteratorOf, classIteratorOpenCall, classIteratorRestDrainCall, classMemberNameOf, classValueRef, collectClassShape, exactClassOfReceiver, collectClassShapeInner, ctorAbiEquals, findMethodOn, findStaticOn, findGenericMethodOn, findGenericStaticOn, genericClassInstanceType, isSubclassOf, inHierarchy, overrideBelow, staticShadowBelow, upcastTo, lowerClassMembers, lowerClassCtor, lowerClassExpression, lowerClassExpressionInfo, lowerClassMethodMember, lowerClassValueProperty, lowerStaticMethod, throwingSetterFn, fieldInitStmts, lowerStaticFieldInits, lowerStaticFieldRead, lowerDerivedCtorBody, superCallStmt, lowerSuperMethodCall, superThisRef, lowerSuperAccessorRead, lowerSuperAccessorWrite, inheritsBuiltinErrorCtor, inheritsBuiltinEmitterCtor, errorMessageArg, lowerNew, accessorCall } from "./lower-classes.js";
 import { MixinFnShape, mixinCallClassInfoOf, mixinIntersectionInstanceType } from "./lower-mixins.js";
@@ -7148,18 +7148,29 @@ export class Lowerer {
    * each registers when its own module evaluates. */
   readonly nativeSubclassesByFile = new Map<ts.SourceFile, NativeSubclass[]>();
 
+  /** Files the native surface draws types from, computed once per lowering.
+   * Null until first asked; a program with no native input never asks. */
+  nativeSurfaceFilesCache: ReadonlySet<ts.SourceFile> | null = null;
+
   collectClassShape(decl: ts.ClassDeclaration): void {
     /* Asked BEFORE ordinary collection, so a native-based class never enters
      * the ClassInfo machinery: it has no managed base, no fields, no vtable
      * and no constructor, so every question that machinery answers is one this
      * shape does not ask. */
-    const nativeSubclass = nativeSubclassOf(this, decl);
-    if (nativeSubclass !== null) {
+    const base = nativeBaseOf(this, decl);
+    if (base.kind === "native") {
       const file = decl.getSourceFile();
       const declared = this.nativeSubclassesByFile.get(file) ?? [];
-      declared.push(nativeSubclass);
+      declared.push(base.subclass);
       this.nativeSubclassesByFile.set(file, declared);
       return;
+    }
+    if (base.kind === "unmapped") {
+      /* Then collect it ORDINARILY anyway. The diagnostic already fails the
+       * build, and a class the rest of the file refers to should not also
+       * produce a cascade of unrelated errors about a name that is missing
+       * only because this one refused. */
+      this.pushDiag(unsupportedDiag("SC1090", locOf(base.base), base.detail));
     }
     return collectClassShape(this, decl);
   }

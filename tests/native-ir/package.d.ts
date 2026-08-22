@@ -149,6 +149,18 @@ export declare class TickSource {
   onTick(seed: i32): void;
 }
 export declare function tickMark(): void;
+
+/* Declared by the surface, mapped to NO handle type — a selection short a
+ * type, which is the shape a packaging bug takes. Nothing may bind to it; it
+ * exists so a class can try to extend it and be told why it cannot. */
+export declare class UnmappedSource {
+  /* A member that DOES bind, so the import resolves and the class reaches the
+   * heritage check. Without it the name has nothing native at all and the
+   * external-module check refuses first, which is a different fact. */
+  value(): i32;
+  onTick(seed: i32): void;
+}
+
 export declare function tickFire(seed: i32): i32;
 export declare function useNested(nested: NativeCounter.Nested): i32;
 
