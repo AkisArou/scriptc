@@ -26,6 +26,7 @@ import { nativeCallbackIsOwnerScoped, VOID } from "../../ir/nodes.js";
 import { locOf } from "../program.js";
 import * as ts from "../ts7/adapter.js";
 import { nativeBaseHandleName } from "./lower-classes.js";
+import { lowerNativeBaseCall } from "./lower-native.js";
 import type { Lowerer } from "./lowerer.js";
 
 /** A class declaration whose heritage names a native class, with the handle
@@ -102,6 +103,43 @@ function refuseUnsupportedMembers(L: Lowerer, subclass: NativeSubclass): boolean
   return ok;
 }
 
+/** The override being lowered, so `super.m(...)` inside it can find the binding
+ * that reaches the base. A native-based class has no ClassInfo, so the ordinary
+ * super path — which walks a managed base chain — has nothing to walk. */
+export interface NativeOverrideContext {
+  readonly subclass: NativeSubclass;
+  readonly thisLocalId: string;
+  readonly baseCall: string | undefined;
+}
+
+/** `super.m(args)` inside an override of a native base.
+ *
+ * The manifest names the binding that reaches the base; everything after that
+ * is the ordinary native invocation, so a base call is validated and projected
+ * exactly like the call a program writes by hand.
+ */
+export function lowerNativeSuperCall(
+  L: Lowerer,
+  context: NativeOverrideContext,
+  call: ts.CallExpression,
+  access: ts.PropertyAccessExpression,
+): IrExpr | null {
+  const member = access.name.text;
+  if (context.baseCall === undefined) {
+    /* No base implementation to reach, which is what an abstract or interface
+     * member looks like — a different fact from "super is unsupported", and
+     * the reason the manifest carries the link rather than a convention. */
+    L.pushDiag(unsupportedDiag(
+      "SC1090",
+      locOf(call),
+      `'super.${member}()' on '${context.subclass.className}': the manifest ` +
+        "records no base call for this member",
+    ));
+    return null;
+  }
+  return lowerNativeBaseCall(L, context.baseCall, call, access);
+}
+
 /** One override as its module function, with the receiver as parameter zero.
  *
  * The same construction an ordinary method gets, differing only in what `this`
@@ -112,16 +150,22 @@ function lowerOverride(
   subclass: NativeSubclass,
   member: ts.MethodDeclaration,
   name: string,
+  baseCall: string | undefined,
 ): IrFunction | null {
   if (member.body === undefined) return null;
   const thisType: IrType = { kind: "nativeHandle", typeId: subclass.handleTypeId };
   const shapes = L.paramShapes(member.parameters);
   L.pushFnCtx(VOID);
+  const previousOverride = L.currentNativeOverride;
   try {
     const thisLocal = L.declareThis(thisType);
     const params: IrParam[] = [{ localId: thisLocal.id, name: "this", type: thisType }];
     const declared = L.declareParams(member.parameters, shapes);
     params.push(...declared.params);
+    /* Set for the BODY only: `super` means this override's receiver while
+     * lowering it, and means nothing anywhere else. Saved and restored rather
+     * than cleared, because an override's body may contain another class. */
+    L.currentNativeOverride = { subclass, thisLocalId: thisLocal.id, baseCall };
     const body: IrStmt[] = [
       ...declared.prologue,
       ...L.lowerStmts(member.body.statements),
@@ -141,6 +185,7 @@ function lowerOverride(
       loc: locOf(member),
     };
   } finally {
+    L.currentNativeOverride = previousOverride;
     L.popFnCtx();
   }
 }
@@ -178,7 +223,7 @@ export function lowerNativeSubclassRegistrations(
         continue;
       }
       const fnName = `%${subclass.className}.${memberName}`;
-      const fn = lowerOverride(L, subclass, member, fnName);
+      const fn = lowerOverride(L, subclass, member, fnName, binding.baseCall);
       if (fn === null) continue;
       L.nativeOverrideFunctions.push(fn);
       /* The only reference to this function is the closure synthesized below,

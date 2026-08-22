@@ -1217,6 +1217,20 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       L.unsupported("SC1080", expr);
     }
     if (expr.kind === ts.SyntaxKind.SuperKeyword) {
+      /* Inside an override of a NATIVE base, `super` is the same object as
+       * `this`: a base call reaches another implementation over the same
+       * receiver, which is what makes it static. So the receiver an ordinary
+       * method call would pass is exactly what this lowers to, and the base
+       * call then travels the ordinary native path. */
+      const override = L.currentNativeOverride;
+      if (override !== null) {
+        return {
+          kind: "varRef",
+          localId: override.thisLocalId,
+          type: { kind: "nativeHandle", typeId: override.subclass.handleTypeId },
+          loc: locOf(expr),
+        };
+      }
       // super(...) and super.method(...) are handled at their call sites;
       // any other super position (field reads, bare references) stays out.
       L.unsupported("SC1090", expr, "'super' outside super() and super.method() calls");

@@ -828,6 +828,64 @@ function useNativeArgumentType(L: Lowerer, type: IrNativeArgumentType): void {
   }
 }
 
+/** `super.m(args)` inside an override of a native base class.
+ *
+ * Routed through the ordinary native invocation rather than reimplemented, so
+ * the base call is validated, projected and error-handled exactly like the
+ * call a program writes by hand — which is what `docs/native-subclassing.md`
+ * asks for when it says the compiler validates a base call "like any other
+ * native operation".
+ *
+ * Two things differ from an ordinary method call, and both are the point.
+ * The BINDING is the one the manifest recorded as this member's base call,
+ * not the one the member's own symbol names — that is what makes `super`
+ * static and stops it redispatching to the override. And the binding is
+ * validated against ITS OWN declaration, because the call site names the base
+ * member while the binding names the bridge that reaches it.
+ */
+export function lowerNativeBaseCall(
+  L: Lowerer,
+  baseCallId: string,
+  call: ts.CallExpression,
+  access: ts.PropertyAccessExpression,
+): IrExpr | null {
+  const binding = (L.nativeInput?.bindings ?? [])
+    .find((candidate) => candidate.id === baseCallId);
+  const loc = locOf(call);
+  if (binding === undefined) {
+    L.pushDiag(nativeBindingDiag(
+      baseCallId,
+      `named as a base call by '${access.name.text}', but no binding declares it`,
+      loc,
+    ));
+    return null;
+  }
+  const symbol = declarationSymbol(
+    L,
+    binding.declaration,
+    binding.sourceCall.kind === "method" ? "instance" : "value",
+  );
+  if (symbol === null) {
+    L.pushDiag(nativeBindingDiag(
+      binding.id,
+      "a base call must resolve to its own declaration",
+      loc,
+    ));
+    return null;
+  }
+  /* `super` lowers to the override's receiver, so the receiver node here is
+   * the same expression an ordinary method call would pass. */
+  return lowerNativeInvocation(
+    L,
+    binding,
+    symbol,
+    call.arguments,
+    binding.sourceCall.kind === "method" ? access.expression : null,
+    L.typeOf(call),
+    loc,
+  );
+}
+
 export function lowerNativeCall(L: Lowerer, expr: ts.CallExpression): IrExpr | null {
   const callee = expr.expression;
   const symbol = nativeExpressionSymbol(L, callee);

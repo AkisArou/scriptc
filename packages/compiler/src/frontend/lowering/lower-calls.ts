@@ -2,6 +2,7 @@
  * argument completion (optional/default/rest, explicit-undefined ≡ omission),
  * function/lambda lowering and signature collection, and monomorphizing
  * generic instantiation (bounded by MAX_GENERIC_INSTANCES). */
+import { lowerNativeSuperCall } from "./lower-native-subclass.js";
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import { lowerGenMethodCall } from "./lower-generators.js";
@@ -3144,6 +3145,12 @@ export function lowerCall(L: Lowerer, expr: ts.CallExpression): IrExpr {
       ts.isPropertyAccessExpression(expr.expression) &&
       expr.expression.expression.kind === ts.SyntaxKind.SuperKeyword
     ) {
+      const nativeOverride = L.currentNativeOverride;
+      if (nativeOverride !== null) {
+        const based = lowerNativeSuperCall(L, nativeOverride, expr, expr.expression);
+        if (based !== null) return based;
+        return { kind: "unitLit", unit: "undefined", type: UNDEFINED_T, loc: locOf(expr) };
+      }
       return L.lowerSuperMethodCall(expr, expr.expression);
     }
 

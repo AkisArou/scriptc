@@ -889,3 +889,12 @@ int32_t nts_tick_fire(int32_t seed) {
   nts_tick_cb(self, seed, nts_tick_ctx);
   return nts_tick_marks;
 }
+
+/* The BASE implementation an override reaches through `super`. On a platform
+ * this is a generated superclass bridge compiled to a non-virtual call; here
+ * it is an ordinary function, because what matters to the compiler is that it
+ * is a DISTINCT binding rather than the one the platform calls. */
+void nts_tick_base(NtsCounter *self, int32_t seed) {
+  (void)self;
+  nts_tick_marks += seed;
+}

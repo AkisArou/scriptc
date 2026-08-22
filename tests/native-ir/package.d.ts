@@ -140,6 +140,9 @@ export declare function makeNested(initialValue: i32): NativeCounter.Nested;
  * object the framework made. */
 export declare class TickSource {
   value(): i32;
+  /* What `super.onTick(...)` reaches. Declared on the base because that is
+   * where the base implementation lives; the manifest names the binding. */
+  baseTick(seed: i32): void;
   /* The member a subclass overrides. A platform base really does declare its
    * lifecycle members — Activity declares onCreate — so `override` is legal
    * for the ordinary TypeScript reason rather than by special arrangement. */

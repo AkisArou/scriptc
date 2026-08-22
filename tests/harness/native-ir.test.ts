@@ -1783,6 +1783,11 @@ const localNativeInput: NativeFrontendInput = {
        * into this slot with no adapter between. */
       id: "scriptc.fixture.c-v1@0.0.0#tick_register",
       declaration: { module: nativePackage, name: "Ticker.onTick" },
+      /* The binding `super.onTick(...)` reaches. A DISTINCT operation from the
+       * one the platform calls, which is what stops super redispatching to the
+       * override — and stated here because a class file cannot say which
+       * method is another method's base. */
+      baseCall: "scriptc.fixture.c-v1@0.0.0#tick_base",
       entry: { symbol: "nts_tick_register" },
       sourceCall: { kind: "function" },
       error: NO_NATIVE_ERROR,
@@ -1805,6 +1810,18 @@ const localNativeInput: NativeFrontendInput = {
           projection: { kind: "callbackContext", argument: 0 },
         },
       ],
+      result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#tick_base",
+      declaration: { module: nativePackage, name: "TickSource.baseTick" },
+      entry: { symbol: "nts_tick_base" },
+      sourceCall: { kind: "method", receiverArgument: 0 },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "self", type: COUNTER, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
+        { name: "seed", type: I32, passMode: "value", ownership: { kind: "value" } },
+      ]),
       result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
@@ -6175,7 +6192,11 @@ describe.each(["c", "llvm"] as const)(
 describe.each(["c", "llvm"] as const)(
   "Native IR native base classes, %s backend",
   (backend) => {
-    localFixtureTest("registers an override and reaches an inherited member through this", async () => {
+    /* NOT a local-fixture test: the parent's SCABI fixture declares the same
+     * tick surface, so the cross-gate runs `baseCall` through the manifest,
+     * its validation and the translator rather than only through the IR the
+     * fork hands itself. A field no gate reads is a field that cannot fail. */
+    test("registers an override and reaches an inherited member through this", async () => {
       const outDir = join(scratch, `native-subclass-${backend}`);
       const result = await compile(
         join(repoRoot, "tests/native-ir/native-subclass.ts"),

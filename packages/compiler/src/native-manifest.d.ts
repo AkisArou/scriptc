@@ -610,6 +610,19 @@ export interface IrNativeBinding {
   /** Source operation role. Read and write may intentionally share one
    * declaration identity for a native accessor pair. */
   sourceAccess: "call" | "read" | "write";
+  /** The binding that reaches the BASE implementation of this member, for a
+   * registration whose handler overrides one.
+   *
+   * `super.m(...)` must reach the base statically and must never redispatch to
+   * the override, so it cannot be the same binding the platform calls — it is
+   * a distinct operation with its own receiver, arguments and error contract,
+   * which the platform realizes with a generated superclass bridge or a
+   * non-virtual call. Naming it here is what lets the compiler validate it
+   * like any other native operation instead of trusting a spelling.
+   *
+   * Absent means the base has no implementation to reach — an abstract or
+   * interface member — and `super.m(...)` then refuses by name. */
+  baseCall?: string;
   /** How the call is materialized. One field today, because a C symbol is the
    * only call target implemented; it is a record rather than a bare string
    * because that is the position a descriptor or a capsule occupies when
@@ -853,6 +866,8 @@ export interface NativeFrontendBinding {
   };
   readonly error:
     Readonly<IrNativeErrorContract>;
+  /** See {@link IrNativeBinding.baseCall}. */
+  readonly baseCall?: string;
   readonly sourceCall:
     | { readonly kind: "function" }
     | { readonly kind: "constructor" }
