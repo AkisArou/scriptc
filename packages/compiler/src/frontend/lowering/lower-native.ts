@@ -387,15 +387,21 @@ function validateDeclaration(
     return declaration.kind === ts.SyntaxKind.MethodSignature ||
       (ts.isMethodDeclaration(declaration) && !hasStaticModifier(declaration));
   };
-  /* A declaration may be MERGED with ambient interface declarations — how a
-   * .d.ts says a class also has another type's members
-   * (`export interface Box extends Orientable {}`, the shape a class that
-   * implements an interface projects as). Such a declaration contributes
-   * signature members whose own bindings resolve on their own, adds no
-   * construction and no body, so it neither supplies a call declaration nor
-   * disqualifies the ones that do. */
+  /* A declaration may be MERGED with ambient declarations — how a .d.ts says a
+   * class also has another type's members (`export interface Box extends
+   * Orientable {}`, the shape a class implementing an interface projects as)
+   * or its own compile-time constants (`export declare namespace Widget { const
+   * MAX_DEPTH: jint; }`, the shape a class with static finals projects as).
+   *
+   * Both contribute members whose own bindings resolve on their own, add no
+   * construction and no body, so neither supplies a call declaration nor
+   * disqualifies the ones that do. The namespace was missing for as long as
+   * only constant-ONLY classes projected one, so a class with BOTH a
+   * constructor and constants was the first program to put the two in the same
+   * declaration list — and its constructor stopped resolving. */
   const mergedTypeDeclaration = (declaration: ts.Node): boolean =>
-    ts.isInterfaceDeclaration(declaration) &&
+    (ts.isInterfaceDeclaration(declaration) ||
+      ts.isModuleDeclaration(declaration)) &&
     declaration.getSourceFile().isDeclarationFile;
   const callDeclarations = declarations.filter(declarationGuard);
   if (

@@ -596,6 +596,12 @@ const localNativeInput: NativeFrontendInput = {
     declaration: { module: nativePackage, name: "FixtureValue.count" },
     type: I32,
     value: "17",
+  }, {
+    /* A constant on a CLASS, which is what merges a namespace onto one. */
+    id: "scriptc.fixture.c-v1@0.0.0#counter_step",
+    declaration: { module: nativePackage, name: "NativeCounter.step" },
+    type: I32,
+    value: "3",
   }],
   operations: [
     {

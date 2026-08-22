@@ -117,6 +117,14 @@ export declare class NativeCounter {
   static withInitialValue(initialValue: i32): NativeCounter;
 }
 
+/* A class MERGED with an ambient namespace, which is how a class carrying
+ * compile-time constants projects. The constructor above must keep resolving:
+ * a namespace supplies no call declaration and no body, exactly as a merged
+ * interface does not. */
+export declare namespace NativeCounter {
+  const step: i32;
+}
+
 /* Reports failure by returning an owned error object rather than a code, the
  * shape a C error object takes once an adapter has absorbed its
  * out-parameter. */
