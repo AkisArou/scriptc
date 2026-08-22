@@ -865,6 +865,40 @@ int32_t nts_maybe_fire(int32_t seed) {
   return nts_maybe_marks;
 }
 
+/* ONE object handed out TWICE, under a reference count.
+ *
+ * The fixture for a handle whose identity is `none`: a platform whose
+ * references cannot be compared — JNI, where two global refs to one object are
+ * distinct pointers and the specification forbids `==` — so the runtime may
+ * not intern by pointer and every arrival owns its own reference. Returning
+ * the same pointer is what makes the arm OBSERVABLE: under `pointer` the two
+ * arrivals would be one interned cell, under `none` they are two.
+ *
+ * The count is what proves the ownership half. Two arrivals must take two
+ * references and two disposals must give both back; a cell that released
+ * twice, or one that never released, shows here as a number rather than as a
+ * leak discovered somewhere else later. */
+typedef struct NtsToken {
+  int32_t value;
+} NtsToken;
+
+static NtsToken nts_token_object = { 7 };
+static int32_t nts_token_live = 0;
+
+NtsToken *nts_token_acquire(void) {
+  nts_token_live += 1;
+  return &nts_token_object;
+}
+
+void nts_token_release(NtsToken *token) {
+  (void)token;
+  nts_token_live -= 1;
+}
+
+int32_t nts_token_value(NtsToken *token) { return token->value; }
+
+int32_t nts_token_outstanding(void) { return nts_token_live; }
+
 /* A registration whose handler is the RECEIVER's own method: the platform
  * shape where a framework constructs the object and calls a lifecycle member
  * on it. The callback takes the receiver FIRST and the call's own argument

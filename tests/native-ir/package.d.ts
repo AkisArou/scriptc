@@ -148,6 +148,16 @@ export declare class TickSource {
    * for the ordinary TypeScript reason rather than by special arrangement. */
   onTick(seed: i32): void;
 }
+/* An object the runtime may NOT intern: its identity arm is `none`, because a
+ * platform whose references cannot be compared for identity has no pointer to
+ * key a cell by. Two acquisitions of the same object are two managed values,
+ * and `===` between them is false where the platform's own equality is true. */
+export declare class Token {
+  value(): i32;
+  dispose(): void;
+}
+export declare function tokenAcquire(): Token;
+export declare function tokenOutstanding(): i32;
 export declare function tickMark(): void;
 
 /* Declared by the surface, mapped to NO handle type — a selection short a

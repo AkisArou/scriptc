@@ -366,6 +366,22 @@ const TELLER = { kind: "nativeHandle", typeId: TELLER_ID } as const;
 const JUDGE_ID = "scriptc.fixture.c-v1@0.0.0#type:judge";
 const JUDGE = { kind: "nativeHandle", typeId: JUDGE_ID } as const;
 const COUNTER_DESTROY = "scriptc.fixture.c-v1@0.0.0#counter_destroy";
+const TOKEN_ID = "scriptc.fixture.c-v1@0.0.0#type:token";
+const TOKEN = { kind: "nativeHandle", typeId: TOKEN_ID } as const;
+const TOKEN_DEFINITION = {
+  kind: "handle",
+  id: TOKEN_ID,
+  declaration: { module: nativePackage, name: "Token" },
+  nativeName: "NtsToken",
+  threadSafety: "confined",
+  /* The arm a JVM handle declares, and the only one this fixture could not
+   * express before. A platform whose references cannot be compared for
+   * identity may not be interned by them, so every arrival builds its OWN
+   * cell — which is observable from the program, not only in bookkeeping. */
+  identity: "none",
+  cycleCollection: "none",
+  upcasts: [],
+} as const satisfies NativeFrontendInput["types"][number];
 
 /* The `onCreate` shape: answers nothing, and the object is the whole payload.
  * The physical slot is the handle type itself — an opaque pointer at the ABI,
@@ -591,6 +607,7 @@ const localNativeInput: NativeFrontendInput = {
     { declaration: { module: nativePackage, name: "CounterBase" }, type: COUNTER_BASE },
     { declaration: { module: nativePackage, name: "CounterMiddle" }, type: COUNTER_MIDDLE },
     { declaration: { module: nativePackage, name: "Counter" }, type: COUNTER },
+    { declaration: { module: nativePackage, name: "Token" }, type: TOKEN },
     /* A DOTTED source type: the nested class, whose symbol is reachable only
      * through its owner's VALUE side. */
     { declaration: { module: nativePackage, name: "NativeCounter.Nested" }, type: COUNTER },
@@ -673,6 +690,7 @@ const localNativeInput: NativeFrontendInput = {
     COUNTER_BASE_DEFINITION,
     COUNTER_MIDDLE_DEFINITION,
     COUNTER_DEFINITION,
+    TOKEN_DEFINITION,
     SUBSCRIPTION_DEFINITION,
     ASKER_DEFINITION,
     TELLER_DEFINITION,
@@ -2371,6 +2389,59 @@ const localNativeInput: NativeFrontendInput = {
         },
         projection: DIRECT_RESULT,
       },
+    },
+    {
+      /* Hands out the SAME pointer every time, under a reference count. Under
+       * a `pointer` handle the second call would find the first cell; under
+       * `none` it builds another, and the count proves two references really
+       * were taken rather than one being handed back twice. */
+      id: "scriptc.fixture.c-v1@0.0.0#token_acquire",
+      declaration: { module: nativePackage, name: "tokenAcquire" },
+      entry: { symbol: "nts_token_acquire" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([]),
+      result: {
+        type: TOKEN,
+        passMode: "pointer",
+        ownership: {
+          kind: "owned",
+          transfer: "to-runtime",
+          destructor: "scriptc.fixture.c-v1@0.0.0#token_release",
+        },
+        projection: DIRECT_RESULT,
+      },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#token_release",
+      declaration: { module: nativePackage, name: "Token.dispose" },
+      entry: { symbol: "nts_token_release" },
+      sourceCall: { kind: "method", receiverArgument: 0 },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "token", type: TOKEN, passMode: "pointer", ownership: { kind: "owned", transfer: "to-native" } },
+      ]),
+      result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#token_value",
+      declaration: { module: nativePackage, name: "Token.value" },
+      entry: { symbol: "nts_token_value" },
+      sourceCall: { kind: "method", receiverArgument: 0 },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "token", type: TOKEN, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
+      ]),
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#token_outstanding",
+      declaration: { module: nativePackage, name: "tokenOutstanding" },
+      entry: { symbol: "nts_token_outstanding" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([]),
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
       id: "scriptc.fixture.c-v1@0.0.0#counter_destroy",
@@ -6218,6 +6289,40 @@ describe.each(["c", "llvm"] as const)(
       );
       expect(result.ok ? [] : result.diagnostics).toEqual([]);
       if (!result.ok) throw new Error("nested class compile failed");
+      const run = spawnSync(result.binaryPath);
+      expect({
+        status: run.status,
+        signal: run.signal,
+        stderr: run.stderr.toString(),
+      }).toEqual({ status: 42, signal: null, stderr: "" });
+    });
+  },
+);
+
+describe.each(["c", "llvm"] as const)(
+  "Native IR uninterned handles, %s backend",
+  (backend) => {
+    /* The identity arm every other fixture handle cannot express. Until this
+     * existed both fixtures declared `pointer` everywhere, so the whole
+     * non-interning path — a cell per arrival, each owning its own reference —
+     * ran only end to end through the Android lanes, where a defect in it
+     * surfaces as a leak or a double release far from its cause. */
+    test("builds a cell per arrival and releases each exactly once", async () => {
+      const outDir = join(scratch, `uninterned-handle-${backend}`);
+      const result = await compile(
+        join(repoRoot, "tests/native-ir/uninterned-handle.ts"),
+        {
+          outDir,
+          outPath: join(outDir, "program"),
+          backend,
+          sanitize,
+          externalTypes: nativeExternalTypes(),
+          native: frontendNativeInput(),
+          nativeLinkInputs: [fixtureObject(), supportObject()],
+        },
+      );
+      expect(result.ok ? [] : result.diagnostics).toEqual([]);
+      if (!result.ok) throw new Error("uninterned handle compile failed");
       const run = spawnSync(result.binaryPath);
       expect({
         status: run.status,
