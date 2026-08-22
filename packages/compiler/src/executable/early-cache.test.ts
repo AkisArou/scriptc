@@ -25,6 +25,8 @@ const native: EarlyExecutableNativeFeatures = {
   copying: false,
   textDecoderLegacy: false,
   fileHandle: false,
+  nativeHandle: true,
+  retainedCallbacks: true,
   fetch: true,
   netIsland: false,
   zlib: false,

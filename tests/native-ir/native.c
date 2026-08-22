@@ -909,6 +909,106 @@ NtsToken *nts_shared_acquire(void) { return nts_token_acquire(); }
 
 void nts_shared_release(NtsToken *token) { nts_token_release(token); }
 
+/* ONE object the platform constructs and dispatches to TWICE, carrying a SLOT
+ * for a managed peer.
+ *
+ * This is the shape instance fields need. A field written in the first
+ * dispatch and read in the second requires something to survive between them,
+ * and on a platform whose references cannot be compared for identity the
+ * runtime cannot find that something by interning: `identity: "none"` means
+ * each arrival builds its own cell, so the cell cannot be where the peer
+ * lives. The FOREIGN OBJECT has to carry it, which is what this slot is —
+ * a generated Java class's field, spelled in C.
+ *
+ * The fixture returns the same object to both dispatches on purpose. That is
+ * what a lifecycle is, and it is the only way a test can tell a peer that
+ * survived from one that was rebuilt: a rebuilt peer has a zeroed field and
+ * reports a different number, rather than failing in a way that needs
+ * interpreting. */
+typedef struct NtsHost {
+  int32_t seed;
+  void *peer;
+  /* One object, MANY references. With `identity: "none"` each delivery builds
+   * its own managed cell and each cell owns a reference, exactly as a JNI
+   * adapter promotes a local reference to a global one per delivery. A
+   * destructor that freed outright would double-free on the second cell, so
+   * the count is not fixture bookkeeping — it is the ownership model the arm
+   * requires. */
+  int32_t refs;
+} NtsHost;
+
+typedef void (*NtsHostOpen)(NtsHost *self, int32_t seed, void *context);
+typedef void (*NtsHostSettle)(NtsHost *self, void *context);
+
+static NtsHostOpen nts_host_open_cb = NULL;
+static void *nts_host_open_ctx = NULL;
+static NtsHostSettle nts_host_settle_cb = NULL;
+static void *nts_host_settle_ctx = NULL;
+static int32_t nts_host_reported = 0;
+/* How many objects this fixture has created and not yet freed. A peer holding
+ * a reference past its object's end shows up here as a number, which is the
+ * only way that leak is visible from inside the program. */
+static int32_t nts_host_outstanding_count = 0;
+
+void nts_host_register_open(NtsHostOpen callback, void *context) {
+  nts_host_open_cb = callback;
+  nts_host_open_ctx = context;
+}
+
+void nts_host_register_settle(NtsHostSettle callback, void *context) {
+  nts_host_settle_cb = callback;
+  nts_host_settle_ctx = context;
+}
+
+/* The slot itself. A platform spells these as a generated field plus its
+ * accessors; here they are two functions, because what the compiler needs is
+ * a way to ASK the object what it is associated with and to tell it. */
+void *nts_host_peer(NtsHost *self) { return self->peer; }
+
+void nts_host_set_peer(NtsHost *self, void *peer) { self->peer = peer; }
+
+/* An inherited member reached through `this`. Declared on the base and taking
+ * the receiver, so a program calling `this.report(...)` from inside an
+ * override proves the peer still reaches its handle — which is the edge the
+ * design calls peer-to-handle, and the one a peer that lost its handle would
+ * fail on while every field assertion still passed. */
+void nts_host_report(NtsHost *self, int32_t value) {
+  (void)self;
+  nts_host_reported = value;
+}
+
+void nts_host_release(NtsHost *self) {
+  self->refs -= 1;
+  if (self->refs == 0) {
+    nts_host_outstanding_count -= 1;
+    free(self);
+  }
+}
+
+/* One object, two dispatches, in the order a lifecycle has them, and then the
+ * object ENDS. The second dispatch is the terminal event: the platform is
+ * finished with the object, which is where a peer's last reference has to go
+ * if it is not to outlive what it belongs to. */
+int32_t nts_host_run(int32_t seed) {
+  NtsHost *self = calloc(1, sizeof *self);
+  nts_host_outstanding_count += 1;
+  self->seed = seed;
+  self->peer = NULL;
+  /* The fixture's own reference, plus one per delivery below — the adapter's
+   * job, done here because this fixture IS the adapter. */
+  self->refs = 1;
+  nts_host_reported = -1;
+  self->refs += 1;
+  nts_host_open_cb(self, seed, nts_host_open_ctx);
+  self->refs += 1;
+  nts_host_settle_cb(self, nts_host_settle_ctx);
+  const int32_t reported = nts_host_reported;
+  nts_host_release(self);
+  return reported;
+}
+
+int32_t nts_host_outstanding(void) { return nts_host_outstanding_count; }
+
 /* A registration whose handler is the RECEIVER's own method: the platform
  * shape where a framework constructs the object and calls a lifecycle member
  * on it. The callback takes the receiver FIRST and the call's own argument

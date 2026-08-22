@@ -23,6 +23,10 @@ export interface EarlyExecutableNativeFeatures {
   copying: boolean;
   textDecoderLegacy: boolean;
   fileHandle: boolean;
+  /** The emitted module contains managed native-handle cells. */
+  nativeHandle: boolean;
+  /** The emitted module contains registrations that outlive their call. */
+  retainedCallbacks: boolean;
   fetch: boolean;
   netIsland: boolean;
   zlib: boolean;
@@ -124,6 +128,8 @@ const BOOLEAN_NATIVE_KEYS = [
   "copying",
   "textDecoderLegacy",
   "fileHandle",
+  "nativeHandle",
+  "retainedCallbacks",
   "fetch",
   "netIsland",
   "zlib",

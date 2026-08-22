@@ -540,6 +540,9 @@ export function nativeArgumentForm(
   /* The compiler's other own slot. Like the error slot it projects no
    * argument, so it is answered before anything reads one. */
   if (projection.kind === "bytesLengthOut") return { kind: "bytesLengthSlot" };
+  if (projection.kind === "peerSlotValue") {
+    return fail("a managed peer slot accessor cannot be emitted as an ordinary native call");
+  }
   if (projection.kind === "callbackRelease") {
     return { kind: "callbackRelease", registration: projection.registration };
   }

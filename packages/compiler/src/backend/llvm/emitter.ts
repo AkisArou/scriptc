@@ -1333,6 +1333,8 @@ class LlEmitter {
             return "float";
           case "f64":
             return "double";
+          default:
+            throw new LlvmUnsupportedError(`type:nativeScalar:${String(t.scalar)}`);
         }
       case "nativeStruct":
         return `%${mangleNativeStruct(t.typeId)}`;
@@ -4461,10 +4463,10 @@ class LlEmitter {
   /** Loads a record field (i8-stored bools trunc to i1). */
   private loadField(ptr: string, t: IrType): string {
     const B = this.B;
-    const fieldTy = llFieldType(t);
+    const fieldTy = llFieldType(t, this.sizeType);
     const raw = B.tmp();
     B.line(`${raw} = load ${fieldTy}, ptr ${ptr}`);
-    if (fieldTy !== "i8") return raw;
+    if (t.kind !== "bool") return raw;
     const b = B.tmp();
     B.line(`${b} = trunc i8 ${raw} to i1`);
     return b;
@@ -4473,8 +4475,8 @@ class LlEmitter {
   /** Stores a record field (i1 zext to the i8 storage). */
   private storeField(ptr: string, t: IrType, value: string): void {
     const B = this.B;
-    const fieldTy = llFieldType(t);
-    if (fieldTy !== "i8") {
+    const fieldTy = llFieldType(t, this.sizeType);
+    if (t.kind !== "bool") {
       B.line(`store ${fieldTy} ${value}, ptr ${ptr}`);
       return;
     }
@@ -5523,6 +5525,39 @@ class LlEmitter {
       case "tryCatch":
         this.emitTryCatch(s);
         break;
+      case "nativePeerDetach": {
+        const definition = this.nativeTypesById.get(s.handleTypeId);
+        if (definition?.kind !== "handle" || definition.peerSlot === undefined) {
+          throw new Error(`llvm emitter bug: native peer detach without a slot on ${s.handleTypeId}`);
+        }
+        const read = this.nativeById.get(definition.peerSlot.read);
+        const write = this.nativeById.get(definition.peerSlot.write);
+        if (!read || !write) throw new Error("llvm emitter bug: missing native peer slot accessor");
+        const handle = this.emitExpr(s.handle);
+        this.declare("declare ptr @scr_native_handle_require(ptr, ptr, ptr)");
+        this.declare(`declare ptr @${read.entry.symbol}(ptr)`);
+        this.declare(`declare void @${write.entry.symbol}(ptr, ptr)`);
+        const raw = B.tmp();
+        B.line(
+          `${raw} = call ptr @scr_native_handle_require(ptr ${handle.name}, ` +
+            `ptr @${mangleNativeHandleTag(s.handleTypeId)}, ` +
+            `ptr ${this.cstr(`managed peer for ${s.className}`)})`,
+        );
+        this.emitPendingCheck();
+        const peer = B.tmp();
+        const present = B.tmp();
+        const release = B.newLabel("native.peer.release");
+        const done = B.newLabel("native.peer.detached");
+        B.line(`${peer} = call ptr @${read.entry.symbol}(ptr ${raw})`);
+        B.line(`${present} = icmp ne ptr ${peer}, null`);
+        B.condBr(present, release, done);
+        B.startBlock(release);
+        B.line(`call void @${write.entry.symbol}(ptr ${raw}, ptr null)`);
+        this.releaseValue(peer, { kind: "object", className: s.className });
+        B.br(done);
+        B.startBlock(done);
+        break;
+      }
       default: {
         // Statement coverage is now total (bytesSet closed the set) —
         // keep the loud refusal for any future IR statement kind.
@@ -8558,6 +8593,65 @@ class LlEmitter {
         if (callbacksMayThrow || binding.error.detect.kind !== "never") this.emitPendingCheck();
         releaseArguments();
         return { name: result, type: e.type };
+      }
+      case "nativePeerAttach": {
+        const definition = this.nativeTypesById.get(e.handleTypeId);
+        if (definition?.kind !== "handle" || definition.peerSlot === undefined) {
+          throw new Error(`llvm emitter bug: native peer attach without a slot on ${e.handleTypeId}`);
+        }
+        const read = this.nativeById.get(definition.peerSlot.read);
+        const write = this.nativeById.get(definition.peerSlot.write);
+        if (!read || !write) throw new Error("llvm emitter bug: missing native peer slot accessor");
+        const handle = this.emitExpr(e.handle);
+        this.declare("declare ptr @scr_native_handle_require(ptr, ptr, ptr)");
+        this.declare(`declare ptr @${read.entry.symbol}(ptr)`);
+        this.declare(`declare void @${write.entry.symbol}(ptr, ptr)`);
+        const raw = B.tmp();
+        B.line(
+          `${raw} = call ptr @scr_native_handle_require(ptr ${handle.name}, ` +
+            `ptr @${mangleNativeHandleTag(e.handleTypeId)}, ` +
+            `ptr ${this.cstr(`managed peer for ${e.className}`)})`,
+        );
+        this.emitPendingCheck();
+        const slot = B.tmp();
+        const found = B.tmp();
+        const existingBlock = B.newLabel("native.peer.existing");
+        const createBlock = B.newLabel("native.peer.create");
+        const joined = B.newLabel("native.peer.attached");
+        B.line(`${slot} = call ptr @${read.entry.symbol}(ptr ${raw})`);
+        B.line(`${found} = icmp ne ptr ${slot}, null`);
+        B.condBr(found, existingBlock, createBlock);
+
+        B.startBlock(existingBlock);
+        const existing = B.tmp();
+        B.line(`${existing} = call ptr @${mangleClassRetain(e.className)}(ptr ${slot})`);
+        B.br(joined);
+
+        B.startBlock(createBlock);
+        const created = B.tmp();
+        B.line(`${created} = call ptr @${mangleClassNew(e.className)}()`);
+        const constructed = this.own({ name: created, type: e.type });
+        const ctorHandle = this.retainValue(handle.name, handle.type);
+        const ctorPeer = B.tmp();
+        B.line(`${ctorPeer} = call ptr @${mangleClassRetain(e.className)}(ptr ${created})`);
+        B.line(
+          `call void @${mangleFunction(`%${e.className}.constructor`)}(` +
+            `ptr ${ctorPeer}, ptr ${ctorHandle})`,
+        );
+        if (this.mayThrow.has(`%${e.className}.constructor`)) this.emitPendingCheck();
+        this.moveTemp(constructed);
+        const root = B.tmp();
+        B.line(`${root} = call ptr @${mangleClassRetain(e.className)}(ptr ${created})`);
+        B.line(`call void @${write.entry.symbol}(ptr ${raw}, ptr ${root})`);
+        B.br(joined);
+
+        B.startBlock(joined);
+        const peer = B.tmp();
+        B.line(
+          `${peer} = phi ptr [ ${existing}, %${existingBlock} ], ` +
+            `[ ${created}, %${createBlock} ]`,
+        );
+        return this.own({ name: peer, type: e.type });
       }
       case "new": {
         // Allocate (fields zeroed, vt stamped), then run the ctor. The
@@ -13934,7 +14028,7 @@ class LlEmitter {
     const members = [
       ...shape.fields.map((field, index) => ({
         index: index + 1,
-        type: llFieldType(field.type),
+        type: llFieldType(field.type, this.sizeType),
         name: field.name,
       })),
       ...(shape.indexValue
@@ -14131,8 +14225,8 @@ class LlEmitter {
           const fieldPtr = B.tmp();
           let fieldValue = B.tmp();
           B.line(`${fieldPtr} = getelementptr inbounds %${mangleRecordStruct(t.shapeId)}, ptr %p, i64 0, i32 ${index}`);
-          B.line(`${fieldValue} = load ${llFieldType(field.type)}, ptr ${fieldPtr}`);
-          if (llFieldType(field.type) === "i8") {
+          B.line(`${fieldValue} = load ${llFieldType(field.type, this.sizeType)}, ptr ${fieldPtr}`);
+          if (field.type.kind === "bool") {
             const boolValue = B.tmp();
             B.line(`${boolValue} = trunc i8 ${fieldValue} to i1`);
             fieldValue = boolValue;
@@ -14163,8 +14257,8 @@ class LlEmitter {
           const fieldPtr = B.tmp();
           let fieldValue = B.tmp();
           B.line(`${fieldPtr} = getelementptr inbounds %${mangleRecordStruct(t.shapeId)}, ptr %p, i64 0, i32 ${index}`);
-          B.line(`${fieldValue} = load ${llFieldType(field.type)}, ptr ${fieldPtr}`);
-          if (llFieldType(field.type) === "i8") {
+          B.line(`${fieldValue} = load ${llFieldType(field.type, this.sizeType)}, ptr ${fieldPtr}`);
+          if (field.type.kind === "bool") {
             const boolValue = B.tmp();
             B.line(`${boolValue} = trunc i8 ${fieldValue} to i1`);
             fieldValue = boolValue;

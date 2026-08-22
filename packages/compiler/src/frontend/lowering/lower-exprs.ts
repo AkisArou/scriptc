@@ -1226,7 +1226,7 @@ function lowerExprInner(L: Lowerer, expr: ts.Expression): IrExpr {
       if (override !== null) {
         return {
           kind: "varRef",
-          localId: override.thisLocalId,
+          localId: override.receiverLocalId,
           type: override.receiverType,
           loc: locOf(expr),
         };

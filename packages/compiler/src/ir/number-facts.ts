@@ -925,6 +925,11 @@ class FnAnalyzer {
         this.evalExpr(s.value, env);
         clearPathFacts(env);
         return env;
+      case "nativePeerDetach":
+        this.evalExpr(s.handle, env);
+        this.havocAllGlobals(env);
+        clearPathFacts(env);
+        return env;
       case "recordSet": {
         this.evalExpr(s.obj, env);
         const v = this.evalExpr(s.value, env);
@@ -1282,6 +1287,7 @@ class FnAnalyzer {
       case "call":
       case "ffiCall":
       case "nativeCall":
+      case "nativePeerAttach":
       case "callValue":
       case "new":
       case "newValue":
@@ -1632,6 +1638,7 @@ class FnAnalyzer {
       case "dynInvoke":
       case "virtualCall":
       case "new":
+      case "nativePeerAttach":
       case "intrinsic": {
         for (const v of childExprs(e)) this.evalExpr(v, env);
         this.havocAllGlobals(env);

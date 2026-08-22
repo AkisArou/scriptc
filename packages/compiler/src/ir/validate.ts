@@ -1414,6 +1414,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         !["confined", "shared"].includes(definition.threadSafety) ||
         !["none", "pointer", "binding", "platform"].includes(definition.identity) ||
         !["none", "traceable"].includes(definition.cycleCollection) ||
+        (definition.peerSlot !== undefined &&
+          (typeof definition.peerSlot !== "object" || definition.peerSlot === null)) ||
         !Array.isArray(definition.upcasts)
       ) {
         errors.push({ message: `Native IR handle type "${definition.id}" has invalid metadata`, loc: moduleLoc });
@@ -1960,6 +1962,42 @@ export function validateModule(mod: IrModule): IrValidationError[] {
   const bindingById = new Map(
     (mod.nativeBindings ?? []).map((binding) => [binding.id, binding]),
   );
+  const peerSlotAccessors = new Map<string, { kind: "read" | "write"; typeId: string }>();
+  for (const definition of nativeTypesById.values()) {
+    if (
+      definition.kind !== "handle" || definition.peerSlot === undefined ||
+      typeof definition.peerSlot !== "object" || definition.peerSlot === null
+    ) continue;
+    const slot = definition.peerSlot as { read?: unknown; write?: unknown };
+    if (
+      typeof slot.read !== "string" || slot.read === "" ||
+      typeof slot.write !== "string" || slot.write === "" ||
+      slot.read === slot.write
+    ) {
+      errors.push({
+        message: `Native IR handle type "${definition.id}" has an invalid managed peer slot`,
+        loc: moduleLoc,
+      });
+      continue;
+    }
+    for (const [kind, id] of [["read", slot.read], ["write", slot.write]] as const) {
+      const previous = peerSlotAccessors.get(id);
+      if (previous !== undefined) {
+        errors.push({
+          message: `Native IR managed peer accessor "${id}" is named by more than one slot`,
+          loc: moduleLoc,
+        });
+      } else {
+        peerSlotAccessors.set(id, { kind, typeId: definition.id });
+      }
+      if (!bindingById.has(id)) {
+        errors.push({
+          message: `Native IR handle type "${definition.id}" names missing managed peer ${kind} binding "${id}"`,
+          loc: moduleLoc,
+        });
+      }
+    }
+  }
   for (const binding of mod.nativeBindings ?? []) {
     if (!nativeId.test(binding.id)) {
       errors.push({ message: `invalid Native IR binding id "${binding.id}"`, loc: moduleLoc });
@@ -2112,6 +2150,12 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         loc: moduleLoc,
       });
     }
+    if (binding.terminal !== undefined && binding.terminal !== true) {
+      errors.push({
+        message: `Native IR binding "${binding.id}" has an invalid terminal marker`,
+        loc: moduleLoc,
+      });
+    }
     const declarationKey =
       `${binding.declaration.module}\0${binding.declaration.name}\0${binding.sourceAccess}`;
     if (nativeDeclarations.has(declarationKey)) {
@@ -2119,6 +2163,55 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         message: `duplicate Native IR declaration "${binding.declaration.module}"::"${binding.declaration.name}"`,
         loc: moduleLoc,
       });
+    }
+    const peerSlotAccessor = peerSlotAccessors.get(binding.id);
+    if (peerSlotAccessor !== undefined) {
+      const argument = binding.arguments[0];
+      const receiver = binding.parameters[0];
+      const common =
+        binding.terminal === undefined &&
+        binding.error.detect.kind === "never" &&
+        binding.error.message.kind === "none" &&
+        binding.error.release.kind === "none" &&
+        binding.arguments.length === 1 &&
+        argument?.type.kind === "nativeHandle" &&
+        argument.type.typeId === peerSlotAccessor.typeId &&
+        receiver?.type.kind === "nativeHandle" &&
+        receiver.type.typeId === peerSlotAccessor.typeId &&
+        receiver.passMode === "pointer" &&
+        receiver.ownership.kind === "borrowed" &&
+        receiver.projection.kind === "argument" &&
+        receiver.projection.argument === 0;
+      const valid = peerSlotAccessor.kind === "read"
+        ? common &&
+          binding.parameters.length === 1 &&
+          binding.result.type.kind === "nativePointer" &&
+          binding.result.type.pointee === "ptr" &&
+          binding.result.type.addressSpace === 0 &&
+          binding.result.passMode === "pointer" &&
+          binding.result.ownership.kind === "value" &&
+          binding.result.projection.kind === "peerSlotValue"
+        : common &&
+          binding.parameters.length === 2 &&
+          binding.parameters[1]?.type.kind === "nativeContext" &&
+          binding.parameters[1]?.type.addressSpace === 0 &&
+          binding.parameters[1]?.passMode === "pointer" &&
+          binding.parameters[1]?.ownership.kind === "value" &&
+          binding.parameters[1]?.projection.kind === "peerSlotValue" &&
+          binding.result.type.kind === "void" &&
+          binding.result.passMode === "value" &&
+          binding.result.ownership.kind === "value" &&
+          binding.result.projection.kind === "direct";
+      if (!valid) {
+        errors.push({
+          message: `Native IR managed peer ${peerSlotAccessor.kind} binding "${binding.id}" has an invalid accessor ABI`,
+          loc: moduleLoc,
+        });
+      }
+      nativeById.set(binding.id, binding);
+      nativeSymbols.add(binding.entry.symbol);
+      nativeDeclarations.add(declarationKey);
+      continue;
     }
     /* A function value that UNMAKES a registration carries no contract of its
      * own: the contract is the registration's, and it was stated where the
@@ -2289,6 +2382,13 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             loc: moduleLoc,
           });
         }
+        continue;
+      }
+      if (parameter.projection.kind === "peerSlotValue") {
+        errors.push({
+          message: `Native IR binding "${binding.id}" uses a managed peer value outside a declared peer slot`,
+          loc: moduleLoc,
+        });
         continue;
       }
       const sourceArgument = binding.arguments[parameter.projection.argument];
@@ -3167,6 +3267,11 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           loc: moduleLoc,
         });
       }
+    } else if (resultProjection?.kind === "peerSlotValue") {
+      errors.push({
+        message: `Native IR binding "${binding.id}" returns a managed peer value outside a declared peer slot`,
+        loc: moduleLoc,
+      });
     } else {
       errors.push({
         message: `Native IR binding "${binding.id}" has no valid result projection`,
@@ -5312,6 +5417,49 @@ function validateFunction(
           resultProjection?.kind !== "bytes"
         ) {
           err(`Native IR call ${e.binding} has no valid result projection`, e.loc);
+        }
+        break;
+      }
+      case "nativePeerAttach": {
+        checkExpr(e.handle);
+        expectType(
+          e.handle,
+          { kind: "nativeHandle", typeId: e.handleTypeId },
+          "native peer receiver",
+        );
+        if (!typeEquals(e.type, { kind: "object", className: e.className })) {
+          err(`nativePeerAttach must produce object:${e.className}`, e.loc);
+        }
+        const cls = classes.get(e.className);
+        const handleField = cls?.fields.find(
+          (field) =>
+            field.type.kind === "nativeHandle" &&
+            (field.type.typeId === e.handleTypeId || nativeHandleUpcastsTo(
+              nativeTypesById,
+              e.handleTypeId,
+              field.type.typeId,
+            )),
+        );
+        if (cls === undefined || handleField === undefined) {
+          err(`nativePeerAttach class ${e.className} has no strong ${e.handleTypeId} handle field`, e.loc);
+        }
+        const definition = nativeTypesById.get(e.handleTypeId);
+        if (definition?.kind !== "handle" || definition.peerSlot === undefined) {
+          err(`nativePeerAttach handle ${e.handleTypeId} has no managed peer slot`, e.loc);
+        }
+        const ctor = functions.get(`%${e.className}.constructor`);
+        if (
+          ctor === undefined || ctor.params.length !== 2 ||
+          !typeEquals(ctor.params[0]!.type, e.type) ||
+          ctor.params[1]!.type.kind !== "nativeHandle" ||
+          (ctor.params[1]!.type.typeId !== e.handleTypeId &&
+            !nativeHandleUpcastsTo(
+              nativeTypesById,
+              e.handleTypeId,
+              ctor.params[1]!.type.typeId,
+            ))
+        ) {
+          err(`nativePeerAttach class ${e.className} has no peer constructor`, e.loc);
         }
         break;
       }
@@ -7864,6 +8012,34 @@ function validateFunction(
         else {
           expectType(s.obj, { kind: "object", className: s.className }, "fieldSet receiver");
           expectType(s.value, field.type, `fieldSet ${s.className}.${s.field}`);
+        }
+        break;
+      }
+      case "nativePeerDetach": {
+        checkExpr(s.handle);
+        expectType(
+          s.handle,
+          { kind: "nativeHandle", typeId: s.handleTypeId },
+          "native peer terminal receiver",
+        );
+        const cls = classes.get(s.className);
+        if (
+          cls === undefined ||
+          !cls.fields.some(
+            (field) =>
+              field.type.kind === "nativeHandle" &&
+              (field.type.typeId === s.handleTypeId || nativeHandleUpcastsTo(
+                nativeTypesById,
+                s.handleTypeId,
+                field.type.typeId,
+              )),
+          )
+        ) {
+          err(`nativePeerDetach class ${s.className} has no strong ${s.handleTypeId} handle field`, s.loc);
+        }
+        const definition = nativeTypesById.get(s.handleTypeId);
+        if (definition?.kind !== "handle" || definition.peerSlot === undefined) {
+          err(`nativePeerDetach handle ${s.handleTypeId} has no managed peer slot`, s.loc);
         }
         break;
       }

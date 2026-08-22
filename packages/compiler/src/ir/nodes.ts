@@ -1158,7 +1158,7 @@ export type {
 };
 
 /** Current wire-format version for every producer and consumer of Native IR. */
-export const IR_VERSION = 44 as const;
+export const IR_VERSION = 45 as const;
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
@@ -1853,6 +1853,10 @@ export type IrStmt =
    * Evaluation order: obj, then value. The old value is released; ownership
    * of a refcounted new value MOVES into the object. */
   | { kind: "fieldSet"; obj: IrExpr; className: string; field: string; value: IrExpr; loc: SrcLoc }
+  /** Cut the strong registration root of a native subclass peer. The
+   * foreign slot is cleared before the managed reference is released, so a
+   * reentrant or repeated terminal delivery cannot observe a dangling peer. */
+  | { kind: "nativePeerDetach"; handle: IrExpr; className: string; handleTypeId: string; loc: SrcLoc }
   /** Record field write `r.f = v` — mirrors `fieldSet` exactly (evaluation
    * order obj then value; old value released; refcounted new value moved
    * in), with a shape id in place of a class name. */
@@ -5140,6 +5144,18 @@ export type IrExpr =
    * binding id—not a source-provided symbol string—selects the entry and
    * exact ABI signature. */
   | { kind: "nativeCall"; binding: string; args: IrExpr[]; type: IrType; loc: SrcLoc }
+  /** Resolve one native subclass's managed peer through the slot stored on
+   * the foreign receiver. An existing peer is retained for this dispatch; an
+   * absent one is constructed with the delivered handle, rooted once for the
+   * registration, and written into the slot. Result is owned (+1). */
+  | {
+      kind: "nativePeerAttach";
+      handle: IrExpr;
+      className: string;
+      handleTypeId: string;
+      type: IrType;
+      loc: SrcLoc;
+    }
   /** Closure creation: a function value over `fnName` (a module function),
    * capturing the listed boxed locals of the CREATING function (localIds,
    * in the callee's captures[] order). The result is owned (+1); the closure

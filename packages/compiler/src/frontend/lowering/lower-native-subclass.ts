@@ -6,12 +6,12 @@
  * a function to a registration. The generated adapter and the registration are
  * internal artifacts, not the architecture a person writes.
  *
- * WHAT THIS SLICE IS. Overrides, `this`, and inherited native members, with NO
- * managed fields. That exclusion is the whole reason it can ship now: with no
- * managed state there is no second object, and nothing the program can hold
- * outlives a dispatch, so none of the peer's lifetime question arises. An
- * instance field is exactly what introduces that object, and it refuses here
- * by name.
+ * A subclass without fields stays the cheap shape: its callback receiver is
+ * `this` and no managed object exists. A subclass with fields uses an ordinary
+ * ScriptC class as its peer. The generated foreign object carries only the
+ * peer association; the registration roots the peer until its stated terminal
+ * dispatch, and the peer's hidden field keeps one delivered handle alive for
+ * inherited calls outside a dispatch.
  *
  * It does NOT rest on the interning map. Only `pointer`-identity handles
  * intern, and a JVM handle declares `identity: "none"` because `NewGlobalRef`
@@ -20,12 +20,9 @@
  * from one cell per object precisely while no field exists to compare across
  * dispatches, which is the same boundary the refusal draws.
  *
- * WHY IT NEEDS NO NEW IR. A lowered method's first parameter is already its
- * receiver, typed — so an override lowered with `this` typed as the native
- * handle produces exactly the signature the registration's callback takes. The
- * synthesis is then a `nativeCall` over a `closure`, both of which exist. What
- * the class form adds is spelling, which is what the document said it should
- * add.
+ * The peer attach/detach operations are explicit IR because only the compiler
+ * can connect a managed object and the opaque slot without projecting that
+ * pointer into the source language.
  */
 import { nativeBindingDiag, unsupportedDiag } from "../../diagnostics/diagnostic.js";
 import type { IrExpr, IrFunction, IrParam, IrStmt, IrType, SrcLoc } from "../../ir/nodes.js";
@@ -33,7 +30,7 @@ import { nativeCallbackIsOwnerScoped, VOID } from "../../ir/nodes.js";
 import { locOf } from "../program.js";
 import * as ts from "../ts7/adapter.js";
 import { nativeBaseHandleName, nativeBaseSymbol } from "./lower-classes.js";
-import { lowerNativeBaseCall } from "./lower-native.js";
+import { lowerNativeBaseCall, type NativeInputBinding } from "./lower-native.js";
 import type { Lowerer } from "./lowerer.js";
 
 /** A class declaration whose heritage names a native class, with the handle
@@ -148,13 +145,10 @@ function refuseUnsupportedMembers(L: Lowerer, subclass: NativeSubclass): boolean
       continue;
     }
     if (ts.isPropertyDeclaration(member)) {
-      refuse(
-        member,
-        `an instance field on '${subclass.className}': fields live in the ` +
-          "managed peer, whose lifetime policy this platform has not declared " +
-          "(see docs/native-subclassing.md) — a local inside the override has " +
-          "no such question",
-      );
+      const isStatic = ts.getModifiers(member)?.some(
+        (modifier) => modifier.kind === ts.SyntaxKind.StaticKeyword,
+      ) === true;
+      if (isStatic) refuse(member, `a static field on '${subclass.className}'`);
       continue;
     }
     if (!ts.isMethodDeclaration(member)) {
@@ -169,7 +163,7 @@ function refuseUnsupportedMembers(L: Lowerer, subclass: NativeSubclass): boolean
  * super path — which walks a managed base chain — has nothing to walk. */
 export interface NativeOverrideContext {
   readonly subclass: NativeSubclass;
-  readonly thisLocalId: string;
+  readonly receiverLocalId: string;
   /* What the receiver IS, which is the registration's answer rather than the
    * declared base's. Carried because `super` reads the same local and must
    * agree with how it was declared — a varRef whose type disagrees with its
@@ -178,6 +172,11 @@ export interface NativeOverrideContext {
   readonly receiverType: IrType;
   readonly baseCall: string | undefined;
 }
+
+type NativeCallbackType = Extract<
+  NativeInputBinding["arguments"][number]["type"],
+  { readonly kind: "func" }
+>;
 
 /** `super.m(args)` inside an override of a native base.
  *
@@ -227,14 +226,33 @@ function lowerOverride(
   name: string,
   baseCall: string | undefined,
   thisType: IrType,
+  terminal: boolean,
 ): IrFunction | null {
   if (member.body === undefined) return null;
   const shapes = L.paramShapes(member.parameters);
   L.pushFnCtx(VOID);
   const previousOverride = L.currentNativeOverride;
+  const previousClass = L.currentClass;
   try {
-    const thisLocal = L.declareThis(thisType);
-    const params: IrParam[] = [{ localId: thisLocal.id, name: "this", type: thisType }];
+    const peerInfo = L.classes.get(subclass.className);
+    const peer = peerInfo?.nativePeer;
+    const receiverLocal = peer === undefined
+      ? L.declareThis(thisType)
+      : {
+          id: "nativeReceiver.0",
+          name: "nativeReceiver",
+          type: thisType,
+          mutable: false,
+        };
+    if (peer !== undefined) L.ctx.locals.push(receiverLocal);
+    const params: IrParam[] = [{
+      localId: receiverLocal.id,
+      name: peer === undefined ? "this" : "nativeReceiver",
+      type: thisType,
+    }];
+    const thisLocal = peer === undefined
+      ? receiverLocal
+      : L.declareThis({ kind: "object", className: subclass.className });
     const declared = L.declareParams(member.parameters, shapes);
     params.push(...declared.params);
     /* Set for the BODY only: `super` means this override's receiver while
@@ -242,14 +260,63 @@ function lowerOverride(
      * than cleared, because an override's body may contain another class. */
     L.currentNativeOverride = {
       subclass,
-      thisLocalId: thisLocal.id,
+      receiverLocalId: receiverLocal.id,
       receiverType: thisType,
       baseCall,
     };
-    const body: IrStmt[] = [
+    if (peerInfo !== undefined) L.currentClass = peerInfo;
+    const loweredBody: IrStmt[] = [
       ...declared.prologue,
       ...L.lowerStmts(member.body.statements),
     ];
+    const body: IrStmt[] = peer === undefined
+      ? loweredBody
+      : [
+          {
+            kind: "varDecl",
+            localId: thisLocal.id,
+            init: {
+              kind: "nativePeerAttach",
+              handle: {
+                kind: "varRef",
+                localId: receiverLocal.id,
+                type: thisType,
+                loc: locOf(member),
+              },
+              className: subclass.className,
+              handleTypeId: thisType.kind === "nativeHandle"
+                ? thisType.typeId
+                : subclass.handleTypeId,
+              type: { kind: "object", className: subclass.className },
+              loc: locOf(member),
+            },
+            loc: locOf(member),
+          },
+          ...(terminal
+            ? [{
+                kind: "tryCatch" as const,
+                tryBody: loweredBody,
+                catchBody: null,
+                catchLocalId: null,
+                finallyBody: [{
+                  kind: "nativePeerDetach" as const,
+                  handle: {
+                    kind: "varRef" as const,
+                    localId: receiverLocal.id,
+                    type: thisType,
+                    loc: locOf(member),
+                  },
+                  className: subclass.className,
+                  handleTypeId: thisType.kind === "nativeHandle"
+                    ? thisType.typeId
+                    : subclass.handleTypeId,
+                  loc: locOf(member),
+                }],
+                loc: locOf(member),
+              }]
+            : loweredBody),
+        ];
+    if (peer !== undefined) L.noteEdge(`%${subclass.className}.constructor`);
     return {
       name,
       params,
@@ -266,6 +333,177 @@ function lowerOverride(
     };
   } finally {
     L.currentNativeOverride = previousOverride;
+    L.currentClass = previousClass;
+    L.popFnCtx();
+  }
+}
+
+/** The terminal hook when the source class does not declare one.
+ *
+ * The platform selection still generates and registers the override: peer
+ * teardown is a platform lifetime rule, not something a program may forget by
+ * omitting `onDestroy`. With no source body to run, the honest implementation
+ * is the base implementation followed by the same finally-detach an explicit
+ * override receives. */
+function lowerSyntheticTerminal(
+  L: Lowerer,
+  subclass: NativeSubclass,
+  binding: NativeInputBinding,
+  callbackType: NativeCallbackType,
+): IrFunction | null {
+  const loc = locOf(subclass.decl);
+  const peerInfo = L.classes.get(subclass.className);
+  const peer = peerInfo?.nativePeer;
+  if (peer === undefined) return null;
+  if (binding.baseCall === undefined) {
+    L.pushDiag(nativeBindingDiag(
+      binding.id,
+      "a synthetic terminal override requires the stated base call it forwards to",
+      loc,
+    ));
+    return null;
+  }
+  const base = (L.nativeInput?.bindings ?? []).find(
+    (candidate) => candidate.id === binding.baseCall,
+  );
+  if (base === undefined) {
+    L.pushDiag(nativeBindingDiag(
+      binding.id,
+      `names missing synthetic terminal base call '${binding.baseCall}'`,
+      loc,
+    ));
+    return null;
+  }
+  if (
+    base.arguments.length !== callbackType.params.length ||
+    base.result.type.kind !== "void" ||
+    base.result.projection.kind !== "direct"
+  ) {
+    L.pushDiag(nativeBindingDiag(
+      binding.id,
+      "a synthetic terminal override must forward the callback's complete parameter list to a direct void base call",
+      loc,
+    ));
+    return null;
+  }
+  const parameterTypes: IrType[] = [];
+  for (const parameter of callbackType.params) {
+    if (parameter.kind !== "nativeScalar" && parameter.kind !== "nativeHandle") {
+      L.pushDiag(nativeBindingDiag(
+        binding.id,
+        "a synthetic terminal override can forward only exact scalar and native handle payloads",
+        loc,
+      ));
+      return null;
+    }
+    parameterTypes.push(parameter);
+  }
+
+  L.pushFnCtx(VOID);
+  const previousClass = L.currentClass;
+  try {
+    const params: IrParam[] = parameterTypes.map((type, index) => {
+      const local = {
+        id: `nativeTerminal.${index}`,
+        name: index === 0 ? "nativeReceiver" : `a${index - 1}`,
+        type,
+        mutable: false,
+      };
+      L.ctx.locals.push(local);
+      return { localId: local.id, name: local.name, type };
+    });
+    const receiver = params[0];
+    if (receiver === undefined || receiver.type.kind !== "nativeHandle") {
+      L.pushDiag(nativeBindingDiag(
+        binding.id,
+        "a synthetic terminal override must receive its native handle first",
+        loc,
+      ));
+      return null;
+    }
+    const thisLocal = L.declareThis({ kind: "object", className: subclass.className });
+    L.currentClass = peerInfo ?? null;
+    const args: IrExpr[] = params.map((param, index) => {
+      const value: IrExpr = {
+        kind: "varRef",
+        localId: param.localId,
+        type: param.type,
+        loc,
+      };
+      const expected = base.arguments[index]!.type;
+      return value.type.kind === "nativeHandle" &&
+          expected.kind === "nativeHandle" &&
+          value.type.typeId !== expected.typeId
+        ? {
+            kind: "upcast",
+            value,
+            type: { kind: "nativeHandle", typeId: expected.typeId },
+            loc,
+          }
+        : value;
+    });
+    L.noteEdge(`%${subclass.className}.constructor`);
+    L.usedNativeBindingIds.add(base.id);
+    for (const param of callbackType.params) {
+      if (param.kind === "nativeHandle") {
+        L.useNativeType(param.typeId);
+      }
+    }
+    for (const argument of base.arguments) {
+      if (argument.type.kind === "nativeHandle" || argument.type.kind === "nullableNativeHandle") {
+        L.useNativeType(argument.type.typeId);
+      }
+    }
+    return {
+      name: `%${subclass.className}.%terminal`,
+      params,
+      returnType: VOID,
+      locals: L.ctx.locals,
+      body: [{
+        kind: "varDecl",
+        localId: thisLocal.id,
+        init: {
+          kind: "nativePeerAttach",
+          handle: {
+            kind: "varRef",
+            localId: receiver.localId,
+            type: receiver.type,
+            loc,
+          },
+          className: subclass.className,
+          handleTypeId: receiver.type.typeId,
+          type: { kind: "object", className: subclass.className },
+          loc,
+        },
+        loc,
+      }, {
+        kind: "tryCatch",
+        tryBody: [{
+          kind: "exprStmt",
+          expr: { kind: "nativeCall", binding: base.id, args, type: VOID, loc },
+          loc,
+        }],
+        catchBody: null,
+        catchLocalId: null,
+        finallyBody: [{
+          kind: "nativePeerDetach",
+          handle: {
+            kind: "varRef",
+            localId: receiver.localId,
+            type: receiver.type,
+            loc,
+          },
+          className: subclass.className,
+          handleTypeId: receiver.type.typeId,
+          loc,
+        }],
+        loc,
+      }],
+      captures: [],
+      loc,
+    };
+  } finally {
+    L.currentClass = previousClass;
     L.popFnCtx();
   }
 }
@@ -284,6 +522,74 @@ export function lowerNativeSubclassRegistrations(
   const statements: IrStmt[] = [];
   for (const subclass of subclasses) {
     if (!refuseUnsupportedMembers(L, subclass)) continue;
+    const peerInfo = L.classes.get(subclass.className);
+    const peer = peerInfo?.nativePeer;
+    let terminalBinding: NativeInputBinding | undefined;
+    if (peer !== undefined) {
+      terminalBinding = (L.nativeInput?.bindings ?? []).find(
+        (binding) =>
+          binding.terminal === true &&
+          binding.declaration.name.startsWith(`${subclass.className}.`),
+      );
+      if (terminalBinding === undefined) {
+        L.pushDiag(unsupportedDiag(
+          "SC1090",
+          locOf(subclass.decl),
+          `instance fields on '${subclass.className}': the platform selection ` +
+            "declares no terminal event to release the managed peer",
+        ));
+        continue;
+      }
+    }
+    let sourceDeclaresTerminal = false;
+    const appendRegistration = (
+      binding: NativeInputBinding,
+      callbackType: NativeCallbackType,
+      fn: IrFunction,
+      loc: SrcLoc,
+    ): void => {
+      L.nativeOverrideFunctions.push(fn);
+      /* The only reference to this function is the closure synthesized below,
+       * which no reachability walk saw because the program never wrote it. */
+      L.noteEdge(fn.name);
+      const handler: IrExpr = {
+        kind: "closure",
+        fnName: fn.name,
+        captures: [],
+        type: { kind: "func", params: fn.params.map((param) => param.type), ret: VOID },
+        loc,
+      };
+      statements.push({
+        kind: "exprStmt",
+        expr: {
+          kind: "nativeCall",
+          binding: binding.id,
+          args: [handler],
+          type: VOID,
+          loc,
+        },
+        loc,
+      });
+      L.usesNativeTarget = true;
+      L.usedNativeBindingIds.add(binding.id);
+      const contract = binding.arguments[0]?.callback;
+      if (contract !== undefined) {
+        for (const source of contract.sourceArguments ?? []) {
+          if (source.kind === "callback-parameter" && source.destructor !== undefined) {
+            L.usedNativeBindingIds.add(source.destructor);
+          }
+        }
+        if (nativeCallbackIsOwnerScoped(contract)) {
+          L.usedNativeBindingIds.add(contract.cancellationBinding);
+        }
+      }
+      for (const parameter of callbackType.params) {
+        if (parameter.kind === "nativeHandle" || parameter.kind === "nullableNativeHandle") {
+          L.useNativeType(parameter.typeId);
+        }
+      }
+      L.useNativeType(subclass.handleTypeId);
+    };
     for (const member of subclass.decl.members) {
       if (!ts.isMethodDeclaration(member) || !ts.isIdentifier(member.name)) continue;
       const memberName = member.name.text;
@@ -327,62 +633,73 @@ export function lowerNativeSubclassRegistrations(
         ));
         continue;
       }
+      if (peer !== undefined) {
+        /* The slot belongs to the DELIVERED receiver, not necessarily to the
+         * base named in `extends`. On Android that distinction is concrete:
+         * source extends Activity while the generated MainActivity owns the
+         * field. Reading the base here made a correct platform package look
+         * slotless and, worse, let a same-type fixture conceal the mistake. */
+        const receiver = L.nativeTypeDefsById.get(thisType.typeId);
+        if (receiver?.kind !== "handle" || receiver.peerSlot === undefined) {
+          L.pushDiag(unsupportedDiag(
+            "SC1090",
+            locOf(member),
+            `instance fields on '${subclass.className}': the delivered native ` +
+              "receiver declares no managed peer slot",
+          ));
+          continue;
+        }
+        L.usedNativeBindingIds.add(receiver.peerSlot.read);
+        L.usedNativeBindingIds.add(receiver.peerSlot.write);
+      }
       const fnName = `%${subclass.className}.${memberName}`;
-      const fn = lowerOverride(L, subclass, member, fnName, binding.baseCall, thisType);
-      if (fn === null) continue;
-      L.nativeOverrideFunctions.push(fn);
-      /* The only reference to this function is the closure synthesized below,
-       * which no reachability walk saw because the program never wrote it.
-       * Without the edge it is stripped and the closure names a function the
-       * module does not carry — the same shape as a payload destructor reached
-       * only through a contract. */
-      L.noteEdge(fn.name);
-      const handler: IrExpr = {
-        kind: "closure",
+      const fn = lowerOverride(
+        L,
+        subclass,
+        member,
         fnName,
-        captures: [],
-        type: { kind: "func", params: fn.params.map((param) => param.type), ret: VOID },
-        loc,
-      };
-      statements.push({
-        kind: "exprStmt",
-        expr: {
-          kind: "nativeCall",
-          binding: binding.id,
-          args: [handler],
-          type: VOID,
-          loc,
-        },
-        loc,
-      });
-      L.usesNativeTarget = true;
-      L.usedNativeBindingIds.add(binding.id);
-      /* Everything the CONTRACT reaches, which an ordinary lowered call marks
-       * on the way through and a synthesized one otherwise does not. A payload
-       * destructor is named by the contract and by nothing else — the program
-       * never writes it — so without this the emitter asks for a binding the
-       * module stripped, and the same is true of the payload's own nominal
-       * type and of the binding that cancels an owner-scoped registration. */
-      const contract = binding.arguments[0]?.callback;
-      if (contract !== undefined) {
-        for (const source of contract.sourceArguments ?? []) {
-          if (source.kind === "callback-parameter" && source.destructor !== undefined) {
-            L.usedNativeBindingIds.add(source.destructor);
-          }
-        }
-        if (nativeCallbackIsOwnerScoped(contract)) {
-          L.usedNativeBindingIds.add(contract.cancellationBinding);
-        }
-      }
-      for (const parameter of callbackType.params) {
-        if (parameter.kind === "nativeHandle" || parameter.kind === "nullableNativeHandle") {
-          L.useNativeType(parameter.typeId);
-        }
-      }
+        binding.baseCall,
+        thisType,
+        binding.terminal === true,
+      );
+      if (fn === null) continue;
+      if (binding.terminal === true) sourceDeclaresTerminal = true;
+      appendRegistration(binding, callbackType, fn, loc);
       /* Both the receiver's own type and the declared base's: the receiver is
        * what arrives, and the base is what a `super` call upcasts to. */
       L.useNativeType(thisType.typeId);
-      L.useNativeType(subclass.handleTypeId);
+    }
+    if (peer !== undefined && terminalBinding !== undefined && !sourceDeclaresTerminal) {
+      const loc = locOf(subclass.decl);
+      const callbackType = terminalBinding.arguments[0]?.type;
+      if (callbackType === undefined || callbackType.kind !== "func") {
+        L.pushDiag(nativeBindingDiag(
+          terminalBinding.id,
+          "a native terminal registration takes exactly one callback argument",
+          loc,
+        ));
+        continue;
+      }
+      const terminalReceiver = callbackType.params[0];
+      const terminalReceiverDef = terminalReceiver?.kind === "nativeHandle"
+        ? L.nativeTypeDefsById.get(terminalReceiver.typeId)
+        : undefined;
+      if (
+        terminalReceiverDef?.kind !== "handle" ||
+        terminalReceiverDef.peerSlot === undefined
+      ) {
+        L.pushDiag(unsupportedDiag(
+          "SC1090",
+          loc,
+          `instance fields on '${subclass.className}': the delivered terminal ` +
+            "receiver declares no managed peer slot",
+        ));
+        continue;
+      }
+      L.usedNativeBindingIds.add(terminalReceiverDef.peerSlot.read);
+      L.usedNativeBindingIds.add(terminalReceiverDef.peerSlot.write);
+      const fn = lowerSyntheticTerminal(L, subclass, terminalBinding, callbackType);
+      if (fn !== null) appendRegistration(terminalBinding, callbackType, fn, loc);
     }
   }
   return statements;

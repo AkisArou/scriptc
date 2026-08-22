@@ -650,7 +650,7 @@ export class LlDyn {
             ? [
                 ...shape!.fields.map((field, index) => ({
                   index: index + 1,
-                  type: llFieldType(field.type),
+                  type: llFieldType(field.type, this.host.sizeType),
                   name: field.name,
                 })),
                 ...(shape!.indexValue
@@ -824,12 +824,12 @@ export class LlDyn {
           const idx = fieldIndex.get(fieldName)!;
           const p = B.tmp();
           B.line(`${p} = getelementptr inbounds %${struct}, ptr %r0, i64 0, i32 ${idx} ; .${fieldName}`);
-          if (llFieldType(ft) === "i8") {
+          if (ft.kind === "bool") {
             const z = B.tmp();
             B.line(`${z} = zext i1 ${value} to i8`);
             B.line(`store i8 ${z}, ptr ${p}`);
           } else {
-            B.line(`store ${llFieldType(ft)} ${value}, ptr ${p}`);
+            B.line(`store ${llFieldType(ft, this.host.sizeType)} ${value}, ptr ${p}`);
           }
         };
         // Tuple targets: a JSON ARRAY of exactly the arity.
@@ -1283,8 +1283,8 @@ export class LlDyn {
           const p = B.tmp();
           B.line(`${p} = getelementptr inbounds %${struct}, ptr %v, i64 0, i32 ${fieldIndex.get(fname)!} ; .${fname}`);
           const raw = B.tmp();
-          B.line(`${raw} = load ${llFieldType(ft)}, ptr ${p}`);
-          if (llFieldType(ft) !== "i8") return raw;
+          B.line(`${raw} = load ${llFieldType(ft, this.host.sizeType)}, ptr ${p}`);
+          if (ft.kind !== "bool") return raw;
           const b = B.tmp();
           B.line(`${b} = trunc i8 ${raw} to i1`);
           return b;

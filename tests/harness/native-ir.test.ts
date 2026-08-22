@@ -366,6 +366,71 @@ const TELLER = { kind: "nativeHandle", typeId: TELLER_ID } as const;
 const JUDGE_ID = "scriptc.fixture.c-v1@0.0.0#type:judge";
 const JUDGE = { kind: "nativeHandle", typeId: JUDGE_ID } as const;
 const COUNTER_DESTROY = "scriptc.fixture.c-v1@0.0.0#counter_destroy";
+const HOST_ID = "scriptc.fixture.c-v1@0.0.0#type:host";
+const HOST = { kind: "nativeHandle", typeId: HOST_ID } as const;
+const HOST_RELEASE = "scriptc.fixture.c-v1@0.0.0#host_release";
+const HOST_PEER_READ = "scriptc.fixture.c-v1@0.0.0#host_peer_read";
+const HOST_PEER_WRITE = "scriptc.fixture.c-v1@0.0.0#host_peer_write";
+const HOST_RECEIVER_ID = "scriptc.fixture.c-v1@0.0.0#type:host_receiver";
+const HOST_RECEIVER = { kind: "nativeHandle", typeId: HOST_RECEIVER_ID } as const;
+/* The base a class with FIELDS extends. Its identity arm is `none` — the arm
+ * a JVM handle declares — so two lifecycle dispatches on one object arrive as
+ * two distinct cells, and nothing about the cell can carry state between them.
+ * That is the whole point of the fixture: with `pointer` the interning map
+ * would answer, and the test would pass for a reason Android cannot supply. */
+const HOST_DEFINITION = {
+  kind: "handle",
+  id: HOST_ID,
+  declaration: { module: nativePackage, name: "Host" },
+  nativeName: "NtsHost",
+  threadSafety: "confined",
+  identity: "none",
+  cycleCollection: "none",
+  upcasts: [],
+} as const satisfies NativeFrontendInput["types"][number];
+/* The declaration the program EXTENDS and the receiver the generated host
+ * DELIVERS are intentionally different. A real Activity has this exact
+ * shape: source extends Activity, while the generated MainActivity owns the
+ * peer field. Putting the slot on Host would let a compiler read the base and
+ * pass this fixture for a reason the platform cannot supply. */
+const HOST_RECEIVER_DEFINITION = {
+  kind: "handle",
+  id: HOST_RECEIVER_ID,
+  declaration: { module: nativePackage, name: "HostReceiver" },
+  nativeName: "NtsHost",
+  threadSafety: "confined",
+  identity: "none",
+  cycleCollection: "none",
+  peerSlot: { read: HOST_PEER_READ, write: HOST_PEER_WRITE },
+  upcasts: [{ kind: "identity", target: HOST_ID }],
+} as const satisfies NativeFrontendInput["types"][number];
+const HOST_OPEN_CALLBACK = {
+  parameters: [HOST_RECEIVER, I32, CONTEXT],
+  result: { kind: "void" },
+} as const;
+const HOST_SETTLE_CALLBACK = {
+  parameters: [HOST_RECEIVER, CONTEXT],
+  result: { kind: "void" },
+} as const;
+const HOST_OPEN_CONTRACT = {
+  owner: { kind: "process" },
+  allowedInvocationExecutors: ["same-as-caller"],
+  synchronousReturn: true,
+  sourceArguments: [
+    { kind: "callback-parameter", parameter: 0, destructor: HOST_RELEASE },
+    { kind: "callback-parameter", parameter: 1 },
+  ],
+} as const satisfies IrNativeCallbackContract;
+const HOST_OPEN_SOURCE = nativeCallbackArgumentType(HOST_OPEN_CALLBACK);
+const HOST_SETTLE_SOURCE = nativeCallbackArgumentType(HOST_SETTLE_CALLBACK);
+const HOST_SETTLE_CONTRACT = {
+  owner: { kind: "process" },
+  allowedInvocationExecutors: ["same-as-caller"],
+  synchronousReturn: true,
+  sourceArguments: [
+    { kind: "callback-parameter", parameter: 0, destructor: HOST_RELEASE },
+  ],
+} as const satisfies IrNativeCallbackContract;
 const SHARED_ID = "scriptc.fixture.c-v1@0.0.0#type:shared";
 const SHARED = { kind: "nativeHandle", typeId: SHARED_ID } as const;
 /* The SAME C object as the token, under the OTHER identity arm. Two types over
@@ -625,6 +690,8 @@ const localNativeInput: NativeFrontendInput = {
     { declaration: { module: nativePackage, name: "Counter" }, type: COUNTER },
     { declaration: { module: nativePackage, name: "Token" }, type: TOKEN },
     { declaration: { module: nativePackage, name: "Shared" }, type: SHARED },
+    { declaration: { module: nativePackage, name: "Host" }, type: HOST },
+    { declaration: { module: nativePackage, name: "HostReceiver" }, type: HOST_RECEIVER },
     /* A DOTTED source type: the nested class, whose symbol is reachable only
      * through its owner's VALUE side. */
     { declaration: { module: nativePackage, name: "NativeCounter.Nested" }, type: COUNTER },
@@ -709,6 +776,8 @@ const localNativeInput: NativeFrontendInput = {
     COUNTER_DEFINITION,
     TOKEN_DEFINITION,
     SHARED_DEFINITION,
+    HOST_DEFINITION,
+    HOST_RECEIVER_DEFINITION,
     SUBSCRIPTION_DEFINITION,
     ASKER_DEFINITION,
     TELLER_DEFINITION,
@@ -1815,6 +1884,149 @@ const localNativeInput: NativeFrontendInput = {
         },
       ],
       result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    /* TWO registrations on one class, which is what makes a field observable:
+     * one dispatch writes it and a later one reads it. `onSettle` is the
+     * TERMINAL dispatch — the platform is finished with the object, and it is
+     * where a peer's last reference has to go. */
+    {
+      id: HOST_PEER_READ,
+      declaration: { module: nativePackage, name: "Host.peerSlotRead" },
+      entry: { symbol: "nts_host_peer" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "self", type: HOST_RECEIVER, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
+      ]),
+      result: {
+        type: { kind: "nativePointer", pointee: "ptr", const: false, addressSpace: 0 },
+        passMode: "pointer",
+        ownership: { kind: "value" },
+        projection: { kind: "peerSlotValue" },
+      },
+    },
+    {
+      id: HOST_PEER_WRITE,
+      declaration: { module: nativePackage, name: "Host.peerSlotWrite" },
+      entry: { symbol: "nts_host_set_peer" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      arguments: [{ name: "self", type: HOST_RECEIVER }],
+      parameters: [
+        {
+          name: "self",
+          type: HOST_RECEIVER,
+          passMode: "pointer",
+          ownership: { kind: "borrowed", scope: "call" },
+          projection: { kind: "argument", argument: 0 },
+        },
+        {
+          name: "peer",
+          type: { kind: "nativeContext", addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "value" },
+          projection: { kind: "peerSlotValue" },
+        },
+      ],
+      result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#host_register_open",
+      declaration: { module: nativePackage, name: "Widget.onOpen" },
+      entry: { symbol: "nts_host_register_open" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      arguments: [
+        { name: "callback", type: HOST_OPEN_SOURCE, callback: HOST_OPEN_CONTRACT },
+      ],
+      parameters: [
+        {
+          name: "callback",
+          type: { kind: "nativeCallback", signature: HOST_OPEN_CALLBACK },
+          passMode: "pointer",
+          ownership: { kind: "callback" },
+          projection: { kind: "callbackFunction", argument: 0 },
+        },
+        {
+          name: "context",
+          type: { kind: "nativeContext", addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "callback" },
+          projection: { kind: "callbackContext", argument: 0 },
+        },
+      ],
+      result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#host_register_settle",
+      terminal: true,
+      declaration: { module: nativePackage, name: "Widget.onSettle" },
+      entry: { symbol: "nts_host_register_settle" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      arguments: [
+        { name: "callback", type: HOST_SETTLE_SOURCE, callback: HOST_SETTLE_CONTRACT },
+      ],
+      parameters: [
+        {
+          name: "callback",
+          type: { kind: "nativeCallback", signature: HOST_SETTLE_CALLBACK },
+          passMode: "pointer",
+          ownership: { kind: "callback" },
+          projection: { kind: "callbackFunction", argument: 0 },
+        },
+        {
+          name: "context",
+          type: { kind: "nativeContext", addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "callback" },
+          projection: { kind: "callbackContext", argument: 0 },
+        },
+      ],
+      result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      id: HOST_RELEASE,
+      declaration: { module: nativePackage, name: "Host.dispose" },
+      entry: { symbol: "nts_host_release" },
+      sourceCall: { kind: "method", receiverArgument: 0 },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "self", type: HOST, passMode: "pointer", ownership: { kind: "owned", transfer: "to-native" } },
+      ]),
+      result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#host_report",
+      declaration: { module: nativePackage, name: "Host.report" },
+      entry: { symbol: "nts_host_report" },
+      sourceCall: { kind: "method", receiverArgument: 0 },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "self", type: HOST, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
+        { name: "value", type: I32, passMode: "value", ownership: { kind: "value" } },
+      ]),
+      result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#host_run",
+      declaration: { module: nativePackage, name: "hostRun" },
+      entry: { symbol: "nts_host_run" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "seed", type: I32, passMode: "value", ownership: { kind: "value" } },
+      ]),
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#host_outstanding",
+      declaration: { module: nativePackage, name: "hostOutstanding" },
+      entry: { symbol: "nts_host_outstanding" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([]),
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
       /* The platform shape: a registration whose handler is a MEMBER of the
@@ -4059,7 +4271,12 @@ test("a handle may be released as any type it identity-upcasts to", () => {
     throw new Error("test fixture lost its handle construction pair");
   }
   const mod = exactI32Module();
-  mod.nativeTypes = native.types.map((definition) => structuredClone(definition));
+  /* This unit fixture deliberately keeps only the two bindings under test.
+   * A slot-bearing handle is a contract with its accessor bindings, so it
+   * cannot be copied into that reduced module without those bindings. */
+  mod.nativeTypes = native.types
+    .filter((definition) => definition.kind !== "handle" || definition.peerSlot === undefined)
+    .map((definition) => structuredClone(definition));
   mod.nativeBindings = [create, destroy].map((binding) =>
     materializeNativeBinding(binding)
   );
@@ -4099,7 +4316,11 @@ test("Native IR rejects malformed borrowed UTF-8 C-string results", () => {
   );
   if (binding === undefined) throw new Error("test fixture lost its C-string-result binding");
   const mod = exactI32Module();
-  mod.nativeTypes = native.types.map((definition) => structuredClone(definition));
+  /* As above, keep a reduced binding module contract-complete rather than
+   * carrying the peer handle without the two accessors it names. */
+  mod.nativeTypes = native.types
+    .filter((definition) => definition.kind !== "handle" || definition.peerSlot === undefined)
+    .map((definition) => structuredClone(definition));
   mod.nativeBindings = [materializeNativeBinding(binding)];
   mod.functions = [];
   expect(validateModule(mod)).toEqual([]);
@@ -4827,7 +5048,7 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
     });
   });
 
-  localFixtureTest("refuses an instance field by naming what it waits on", async () => {
+  localFixtureTest("refuses a peer when the platform declares no terminal event", async () => {
     const native = frontendNativeInput();
     const result = await compile(
       join(repoRoot, "tests/native-ir/native-base-refused.ts"),
@@ -4883,13 +5104,12 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
      * that declaration is imported and correct — it sends a reader hunting for
      * an import they already wrote. */
     const messages = result.diagnostics.map(({ message }) => message);
-    /* WHICH refusal, and whether it says what to do instead. A field is not
-     * "unsupported on a native base" — it is waiting on a lifetime policy the
-     * platform has not declared, and a local in the override needs none. */
+    /* The blanket member refusal is gone. This platform shape still cannot
+     * host a peer because its selection states no event that releases the
+     * registration's strong root. */
     expect(messages.some((message) =>
-      message.includes("an instance field on 'Ticker'") &&
-      message.includes("docs/native-subclassing.md") &&
-      message.includes("a local inside the override has no such question")
+      message.includes("instance fields on 'Ticker'") &&
+      message.includes("declares no terminal event")
     )).toBe(true);
     expect(messages.some((message) =>
       message.includes("not declared in the program")
@@ -6336,6 +6556,39 @@ describe.each(["c", "llvm"] as const)(
       );
       expect(result.ok ? [] : result.diagnostics).toEqual([]);
       if (!result.ok) throw new Error("nested class compile failed");
+      const run = spawnSync(result.binaryPath);
+      expect({
+        status: run.status,
+        signal: run.signal,
+        stderr: run.stderr.toString(),
+      }).toEqual({ status: 42, signal: null, stderr: "" });
+    });
+  },
+);
+
+describe.each(["c", "llvm"] as const)(
+  "Native IR peer fields, %s backend",
+  (backend) => {
+    /* The observer for instance fields: the local C fixture supplies an
+     * identity:none host, a generated-receiver-shaped peer slot, and two
+     * deliveries on one object. The parent cross-gate supplies a different
+     * generated package, so this exact platform mechanism remains local. */
+    localFixtureTest("keeps a field across two lifecycle dispatches on one object", async () => {
+      const outDir = join(scratch, `native-peer-fields-${backend}`);
+      const result = await compile(
+        join(repoRoot, "tests/native-ir/native-peer-fields.ts"),
+        {
+          outDir,
+          outPath: join(outDir, "program"),
+          backend,
+          sanitize,
+          externalTypes: nativeExternalTypes(),
+          native: frontendNativeInput(),
+          nativeLinkInputs: [fixtureObject(), supportObject(), retainedSupportObject()],
+        },
+      );
+      expect(result.ok ? [] : result.diagnostics).toEqual([]);
+      if (!result.ok) throw new Error("peer field compile failed");
       const run = spawnSync(result.binaryPath);
       expect({
         status: run.status,

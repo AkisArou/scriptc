@@ -2991,6 +2991,46 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         releaseArguments();
         return result;
       }
+      case "nativePeerAttach": {
+        const definition = E.nativeTypesById.get(e.handleTypeId);
+        if (definition?.kind !== "handle" || definition.peerSlot === undefined) {
+          throw new Error(`emitter bug: native peer attach without a slot on ${e.handleTypeId}`);
+        }
+        const read = E.nativeById.get(definition.peerSlot.read);
+        const write = E.nativeById.get(definition.peerSlot.write);
+        if (!read || !write) throw new Error("emitter bug: missing native peer slot accessor");
+        const handle = E.emitExpr(e.handle);
+        const operation = cStringLiteral(
+          Buffer.from(`managed peer for ${e.className}`, "utf8"),
+        );
+        const raw = `sc_t${E.tempCounter++}`;
+        E.line(
+          `void *${raw} = scr_native_handle_require(${handle.name}, ` +
+            `&${mangleNativeHandleTag(e.handleTypeId)}, ${operation});`,
+        );
+        E.emitPendingCheck();
+        const slot = `sc_t${E.tempCounter++}`;
+        E.line(`void *${slot} = ${read.entry.symbol}(${raw});`);
+        const peer = E.newTemp(e.type, "NULL");
+        E.line(`if (${slot} != NULL) {`);
+        E.indent++;
+        E.line(`${peer.name} = ${mangleClassRetain(e.className)}((${cType(e.type).trim()})${slot});`);
+        E.indent--;
+        E.line("} else {");
+        E.indent++;
+        E.line(`${peer.name} = ${mangleClassNew(e.className)}();`);
+        E.line(
+          `${mangleFunction(`%${e.className}.constructor`)}(` +
+            `${mangleClassRetain(e.className)}(${peer.name}), ` +
+            `${retainCallC(e.handle.type, handle.name)});${E.srcComment(e.loc)}`,
+        );
+        if (E.mayThrow.has(`%${e.className}.constructor`)) E.emitPendingCheck();
+        E.line(`${mangleClassRetain(e.className)}(${peer.name}); /* registration root */`);
+        E.line(`${write.entry.symbol}(${raw}, (void *)${peer.name});`);
+        E.indent--;
+        E.line("}");
+        return peer;
+      }
       case "closure": {
         const target = E.fnByName.get(e.fnName);
         if (!target) throw new Error(`emitter bug: closure over unknown function ${e.fnName}`);

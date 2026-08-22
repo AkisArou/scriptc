@@ -219,7 +219,7 @@ export class LlWalkers {
   private loadField(B: BlockBuilder, recName: string, shapeId: string, index: number, t: IrType): string {
     const p = B.tmp();
     B.line(`${p} = getelementptr inbounds %${mangleRecordStruct(shapeId)}, ptr ${recName}, i64 0, i32 ${index}`);
-    const fieldTy = llFieldType(t);
+    const fieldTy = llFieldType(t, this.host.sizeType);
     const raw = B.tmp();
     B.line(`${raw} = load ${fieldTy}, ptr ${p}`);
     if (fieldTy !== "i8") return raw;

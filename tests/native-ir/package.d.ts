@@ -164,6 +164,22 @@ export declare class Shared {
 }
 export declare function sharedAcquire(): Shared;
 export declare function tokenOutstanding(): i32;
+/* A native base whose object receives TWO lifecycle dispatches, and which
+ * carries a slot for a managed peer. Its identity arm is `none`, so the two
+ * dispatches arrive as two distinct cells — which is what makes an instance
+ * field a question about the OBJECT rather than about the cell. */
+export declare class Host {
+  /* Inherited, and reached through `this` from inside an override — which is
+   * what proves a peer still reaches its handle. */
+  report(value: i32): void;
+  onOpen(seed: i32): void;
+  onSettle(): void;
+}
+/* The generated platform class that is actually delivered. It is not the
+ * source base: this distinction pins the slot to the object that owns it. */
+export declare class HostReceiver extends Host {}
+export declare function hostRun(seed: i32): i32;
+export declare function hostOutstanding(): i32;
 export declare function tickMark(): void;
 
 /* Declared by the surface, mapped to NO handle type — a selection short a

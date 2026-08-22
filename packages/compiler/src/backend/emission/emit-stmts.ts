@@ -4,9 +4,9 @@
  * scope, and temp state lives on CEmitter; these functions drive it. */
 import type { CEmitter, ScopeEntry } from "./emitter.js";
 import type { IrFunction } from "../../ir/nodes.js";
-import { mangleField, mangleGlobal, mangleLocal, mangleRawParam } from "../mangle.js";
+import { mangleField, mangleGlobal, mangleLocal, mangleNativeHandleTag, mangleRawParam } from "../mangle.js";
 import { BOOL, CAUGHT, IrExpr, IrStmt, RUNTIME_ERROR_CLASSES, isRefCounted } from "../../ir/nodes.js";
-import { boxAccess, cDecl, cStringLiteral, elemAccess, vAdapters } from "./emit-types.js";
+import { boxAccess, cDecl, cStringLiteral, elemAccess, releaseCallC, vAdapters } from "./emit-types.js";
 import { OVERFLOW_MEMBER } from "./emit-shapes.js";
 import { emitBytesReceiver } from "./emit-exprs.js";
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
@@ -669,6 +669,32 @@ export function emitStmt(E: CEmitter, s: IrStmt): void {
       case "tryCatch":
         E.emitTryCatch(s);
         break;
+      case "nativePeerDetach": {
+        const definition = E.nativeTypesById.get(s.handleTypeId);
+        if (definition?.kind !== "handle" || definition.peerSlot === undefined) {
+          throw new Error(`emitter bug: native peer detach without a slot on ${s.handleTypeId}`);
+        }
+        const read = E.nativeById.get(definition.peerSlot.read);
+        const write = E.nativeById.get(definition.peerSlot.write);
+        if (!read || !write) throw new Error("emitter bug: missing native peer slot accessor");
+        const handle = E.emitExpr(s.handle);
+        const operation = cStringLiteral(Buffer.from(`managed peer for ${s.className}`, "utf8"));
+        const raw = `sc_t${E.tempCounter++}`;
+        E.line(
+          `void *${raw} = scr_native_handle_require(${handle.name}, ` +
+            `&${mangleNativeHandleTag(s.handleTypeId)}, ${operation});`,
+        );
+        E.emitPendingCheck();
+        const peer = `sc_t${E.tempCounter++}`;
+        E.line(`void *${peer} = ${read.entry.symbol}(${raw});`);
+        E.line(`if (${peer} != NULL) {`);
+        E.indent++;
+        E.line(`${write.entry.symbol}(${raw}, NULL);`);
+        E.line(`${releaseCallC({ kind: "object", className: s.className }, `(${peer})`)};`);
+        E.indent--;
+        E.line("}");
+        break;
+      }
       default: {
         const _exhaustive: never = s;
         void _exhaustive;

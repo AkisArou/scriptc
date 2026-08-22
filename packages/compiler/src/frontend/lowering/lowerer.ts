@@ -6753,7 +6753,31 @@ export class Lowerer {
         }
       }
     }
-    const e = this.lowerExpr(node);
+    const lowered = this.lowerExpr(node);
+    /* A native subclass peer is the source-level `this`, but inherited
+     * platform members still receive the opaque handle. Project the hidden
+     * strong edge at the ordinary expected-type boundary, which also covers
+     * a closure that captures `this` and calls a native member after the
+     * lifecycle dispatch that created it has returned. */
+    const expectsNativeHandle = expected?.kind === "nativeHandle" ||
+      (expected?.kind === "union" &&
+        (this.unions.get(expected.unionId)?.arms.some(
+          (arm) => arm.kind === "nativeHandle",
+        ) ?? false));
+    const e = expectsNativeHandle && lowered.type.kind === "object"
+      ? (() => {
+          const peer = this.classes.get(lowered.type.className)?.nativePeer;
+          if (peer === undefined) return lowered;
+          return {
+            kind: "fieldGet" as const,
+            obj: lowered,
+            className: lowered.type.className,
+            field: peer.handleField,
+            type: { kind: "nativeHandle" as const, typeId: peer.handleTypeId },
+            loc: locOf(node),
+          };
+        })()
+      : lowered;
     return expected ? this.coerceInto(node, e, expected) : e;
   }
 
@@ -7163,6 +7187,20 @@ export class Lowerer {
       const declared = this.nativeSubclassesByFile.get(file) ?? [];
       declared.push(base.subclass);
       this.nativeSubclassesByFile.set(file, declared);
+      const hasInstanceFields = decl.members.some(
+        (member) =>
+          ts.isPropertyDeclaration(member) &&
+          !ts.getModifiers(member)?.some((modifier) => modifier.kind === ts.SyntaxKind.StaticKeyword),
+      );
+      if (hasInstanceFields) {
+        this.collectClassShapeInner(
+          decl,
+          undefined,
+          undefined,
+          undefined,
+          { handleTypeId: base.subclass.handleTypeId },
+        );
+      }
       return;
     }
     if (base.kind === "unmapped") {
@@ -7177,13 +7215,14 @@ export class Lowerer {
 
   collectClassShapeInner(decl: ts.ClassLikeDeclaration, jsNameOverride?: string,
     inst?: { family: ClassInfo; name: string; bindings: Map<ts.Symbol, IrType>; typeArgsText: string; ordinal: number },
-    mixin?: { base: ClassInfo; name: string; call: ts.CallExpression; bindings: Map<ts.Symbol, IrType>; context: string; ordinal: number },): void {
+    mixin?: { base: ClassInfo; name: string; call: ts.CallExpression; bindings: Map<ts.Symbol, IrType>; context: string; ordinal: number },
+    nativePeer?: { handleTypeId: string },): void {
     // Late class expressions and mixin/generic instances do not participate
     // in emitReachable's initial declaration wave. Prime their mandatory
     // shape queries at the collection boundary; initial declarations are
     // already warm and this is memo-free.
     this.prefetchClassCollection([decl]);
-    return collectClassShapeInner(this, decl, jsNameOverride, inst, mixin);
+    return collectClassShapeInner(this, decl, jsNameOverride, inst, mixin, nativePeer);
   }
 
   lowerClassExpressionInfo(expr: ts.ClassExpression): ClassInfo {

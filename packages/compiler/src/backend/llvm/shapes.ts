@@ -619,8 +619,34 @@ export function boxAccess(t: IrType): "f64" | "bool" | "ref" {
 
 /** A record field's in-struct LLVM type. bool fields store as i8 (the C
  * _Bool layout); loads/stores convert at the access site. */
-export function llFieldType(t: IrType): "double" | "i8" | "ptr" {
+export function llFieldType(
+  t: IrType,
+  sizeType?: "i32" | "i64",
+): "double" | "float" | "i8" | "i16" | "i32" | "i64" | "ptr" {
   switch (t.kind) {
+    case "nativeScalar":
+      switch (t.scalar) {
+        case "i8":
+        case "u8":
+          return "i8";
+        case "i16":
+        case "u16":
+          return "i16";
+        case "i32":
+        case "u32":
+          return "i32";
+        case "i64":
+        case "u64":
+          return "i64";
+        case "isize":
+        case "usize":
+          if (sizeType !== undefined) return sizeType;
+          throw new LlvmUnsupportedError("type:nativeScalar:pointer-width-field");
+        case "f32":
+          return "float";
+        case "f64":
+          return "double";
+      }
     case "f64":
     case "date":
       return "double";
@@ -744,7 +770,7 @@ export function emitRecordShapes(host: ShapeHost, mod: IrModule): { typeDefs: st
 
   for (const shape of records) {
     const struct = mangleRecordStruct(shape.id);
-    const fieldTys = shape.fields.map((f) => llFieldType(f.type));
+    const fieldTys = shape.fields.map((f) => llFieldType(f.type, host.sizeType));
     if (shape.indexValue) fieldTys.push("ptr"); // the overflow ScrMap *
     typeDefs.push(
       `%${struct} = type { ${host.sizeType}${fieldTys.length ? ", " + fieldTys.join(", ") : ""} } ` +
@@ -865,7 +891,7 @@ export function emitRecordShapes(host: ShapeHost, mod: IrModule): { typeDefs: st
       let i = 0;
       for (const field of shape.fields) {
         const index = i + 1;
-        const fieldTy = llFieldType(field.type);
+        const fieldTy = llFieldType(field.type, host.sizeType);
         clone.push(
           `  %sp${i} = getelementptr inbounds %${struct}, ptr %src, i64 0, i32 ${index}`,
           `  %sv${i} = load ${fieldTy}, ptr %sp${i}`,

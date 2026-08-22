@@ -88,13 +88,14 @@ describe.each(["c", "llvm"] as const)("outbound native FFI, %s backend", (backen
   test("calls the manifest-bound archive across every v1 ABI class plus v2/v3/v4/v5 callback ABI classes", async () => {
     const outDir = join(cacheRoot, backend);
     mkdirSync(outDir, { recursive: true });
-    const result = await compile(join(fixtureRoot, "main.ts"), {
+    const options = {
       outDir,
       outPath: join(outDir, "program"),
       backend,
       sanitize,
       ffiProfilePath: manifest(nativeArchive()),
-    });
+    } as const;
+    const result = await compile(join(fixtureRoot, "main.ts"), options);
     if (!result.ok) {
       throw new Error(
         result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"),
@@ -103,6 +104,20 @@ describe.each(["c", "llvm"] as const)("outbound native FFI, %s backend", (backen
     expect(
       execFileSync(result.binaryPath, [], { encoding: "utf8" }),
     ).toBe(expected);
+
+    /* A missing final binary restores the cached translation unit and relinks
+     * it from the cache's native-feature record. Retained callbacks require
+     * both their owner-loop runtime and managed native-handle cells; omitting
+     * either feature from that record made a cold build pass while this exact
+     * relink failed with unresolved runtime symbols. */
+    rmSync(result.binaryPath);
+    const relinked = await compile(join(fixtureRoot, "main.ts"), options);
+    if (!relinked.ok) {
+      throw new Error(
+        relinked.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"),
+      );
+    }
+    expect(execFileSync(relinked.binaryPath, [], { encoding: "utf8" })).toBe(expected);
   });
 
   test("traps a NULL callback cstring with a precise boundary error", async () => {

@@ -253,6 +253,7 @@ function matchesNativeResultSource(
       spanArms.some((arm) => arm.kind === "string") &&
       spanArms.some((arm) => arm.kind === "nullT");
   }
+  if (binding.result.projection.kind === "peerSlotValue") return false;
   if (!binding.result.projection.nullable) return mapped.kind === "string";
   if (mapped.kind !== "union") return false;
   const arms = L.unions.get(mapped.unionId)?.arms;
@@ -1524,6 +1525,8 @@ export function materializeNativeBinding(binding: NativeInputBinding): IrNativeB
       : binding.sourceCall.kind === "setter"
         ? "write"
         : "call",
+    ...(binding.baseCall === undefined ? {} : { baseCall: binding.baseCall }),
+    ...(binding.terminal === undefined ? {} : { terminal: true as const }),
     entry: { ...binding.entry },
     error: {
       detect: { ...binding.error.detect },
@@ -1625,6 +1628,9 @@ export function materializeNativeType(
     const result: IrNativeHandleDef = {
       ...definition,
       declaration: { ...definition.declaration },
+      ...(definition.peerSlot === undefined
+        ? {}
+        : { peerSlot: { ...definition.peerSlot } }),
       upcasts: definition.upcasts.map((upcast) => ({ ...upcast })),
     };
     return result;

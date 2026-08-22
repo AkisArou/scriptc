@@ -414,6 +414,11 @@ export type IrNativeArgumentType =
 
 export type IrNativeParameterProjection =
   | { kind: "argument"; argument: number }
+  /** The managed-peer pointer supplied by the compiler to a handle's slot
+   * writer. It is not a source argument: ordinary TypeScript cannot name a
+   * managed object as foreign ABI data, and only the `peerSlot.write`
+   * intrinsic call is allowed to fill this position. */
+  | { kind: "peerSlotValue" }
   | { kind: "boolean"; argument: number; falseValue: string; trueValue: string }
   /** JavaScript-number ingress into an exact integer slot, naming which
    * conversion it performs. `checked` requires finite, integral, and in the
@@ -479,6 +484,10 @@ export type IrNativeParameterProjection =
 
 export type IrNativeResultProjection =
   | { kind: "direct" }
+  /** The opaque managed-peer pointer returned by a handle's slot reader.
+   * It never becomes a source value; the peer attach operation either
+   * retains the existing object or constructs and associates one. */
+  | { kind: "peerSlotValue" }
   /** A native integer becoming a JavaScript boolean, naming which reading it
    * performs. `exact` admits only the two declared representations and
    * raises catchably on anything else — the contract a binding states when
@@ -623,6 +632,12 @@ export interface IrNativeBinding {
    * Absent means the base has no implementation to reach — an abstract or
    * interface member — and `super.m(...)` then refuses by name. */
   baseCall?: string;
+  /** This registration observes the platform event that ends its receiver.
+   * The platform metadata cannot supply that fact: a JVM class file, for
+   * example, describes `onDestroy` as an ordinary void method. Selection has
+   * to state the event, and the peer lowering uses this bit to cut the
+   * registration's strong reference after the handler runs. */
+  terminal?: true;
   /** How the call is materialized. One field today, because a C symbol is the
    * only call target implemented; it is a record rather than a bare string
    * because that is the position a descriptor or a capsule occupies when
@@ -748,6 +763,15 @@ export interface IrNativeHandleDef {
   /** Whether values of this nominal type carry a cycle-collector header.
    * Identity-upcast-connected types must agree because they share a cell. */
   cycleCollection: "none" | "traceable";
+  /** Accessors for the managed-peer identity stored on the foreign object.
+   *
+   * This cannot be inferred from platform metadata, for the same reason a
+   * registration's `baseCall` above cannot: a generated field and its two
+   * accessors are ordinary platform members. The binding generator creates
+   * them and names their exact ABI operations here. With `identity: "none"`
+   * the slot is what restores object identity across distinct delivered
+   * references; it is an association only, not an ownership edge. */
+  peerSlot?: { read: string; write: string };
   /** Direct representation-preserving nominal conversions. */
   upcasts: { kind: "identity"; target: string }[];
 }
@@ -848,8 +872,9 @@ export type NativeStructDefinition = Readonly<
 >;
 
 export type NativeHandleDefinition = Readonly<
-  Omit<IrNativeHandleDef, "upcasts"> & {
+  Omit<IrNativeHandleDef, "upcasts" | "peerSlot"> & {
     readonly upcasts: readonly Readonly<IrNativeHandleDef["upcasts"][number]>[];
+    readonly peerSlot?: Readonly<NonNullable<IrNativeHandleDef["peerSlot"]>>;
   }
 >;
 
@@ -868,6 +893,8 @@ export interface NativeFrontendBinding {
     Readonly<IrNativeErrorContract>;
   /** See {@link IrNativeBinding.baseCall}. */
   readonly baseCall?: string;
+  /** See {@link IrNativeBinding.terminal}. */
+  readonly terminal?: true;
   readonly sourceCall:
     | { readonly kind: "function" }
     | { readonly kind: "constructor" }

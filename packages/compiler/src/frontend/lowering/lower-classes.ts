@@ -24,6 +24,11 @@ import { mixinResultBindingClassOf, type MixinInstanceInfo } from "./lower-mixin
 
 export interface ClassInfo {
   def: IrClassDef;
+  /** Managed state paired with a platform-constructed native object. The
+   * class has an ordinary ScriptC layout and constructor for its fields, but
+   * its source methods lower as native override callbacks rather than vtable
+   * members. The hidden handle field is the peer-to-handle strong edge. */
+  nativePeer?: { handleTypeId: string; handleField: string };
   /** ALL fields visible on instances — the inherited ones included — for
    * receiver-side lookup (def.fields carries the layout order). */
   fields: Map<string, IrType>;
@@ -754,7 +759,8 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
      * class (the heritage clause names the mixin's parameter and is
      * resolved here, never through the loop below), `name` the
      * position-derived instance name. */
-    mixin?: { base: ClassInfo; name: string; call: ts.CallExpression; bindings: Map<ts.Symbol, IrType>; context: string; ordinal: number },): void {
+    mixin?: { base: ClassInfo; name: string; call: ts.CallExpression; bindings: Map<ts.Symbol, IrType>; context: string; ordinal: number },
+    nativePeer?: { handleTypeId: string },): void {
     {
       // Anonymous class EXPRESSIONS are ordinary (their .name follows
       // NamedEvaluation — jsNameOverride carries it). The one legal
@@ -935,7 +941,7 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
           }
         }
       }
-      for (const clause of inst || mixin ? [] : (decl.heritageClauses ?? [])) {
+      for (const clause of inst || mixin || nativePeer ? [] : (decl.heritageClauses ?? [])) {
         // `implements` is pure type-world: tsc checked the conformance and
         // the clause erases — nothing about the runtime class changes.
         // (Assigning an instance INTO an interface-typed slot is a separate
@@ -1645,6 +1651,12 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
           }
           ctor = member;
         } else if (ts.isMethodDeclaration(member)) {
+          /* Native override bodies lower through their class-anchored
+           * registrations. They still need the peer's ClassInfo while their
+           * field accesses lower, but entering them in this managed method
+           * map would create a second function/vtable implementation under
+           * the same source spelling. */
+          if (nativePeer !== undefined) continue;
           const mName = classMemberNameOf(L, member.name);
           if (mName === null) L.unsupported("SC1090", member, "computed method names");
           // PUBLIC generator METHODS stay fenced (virtualCall dispatch
@@ -2273,6 +2285,15 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
         ? L.paramShapes(ctor.parameters)
         : (base?.ctorParams ?? []);
 
+      const nativePeerInfo = nativePeer === undefined
+        ? undefined
+        : { handleTypeId: nativePeer.handleTypeId, handleField: "%nativeHandle" };
+      if (nativePeerInfo !== undefined) {
+        const handleType: IrType = { kind: "nativeHandle", typeId: nativePeerInfo.handleTypeId };
+        fields.set(nativePeerInfo.handleField, handleType);
+        fieldOrder.push({ name: nativePeerInfo.handleField, type: handleType, initializer: undefined });
+      }
+
       const info: ClassInfo = {
         def: {
           name: className,
@@ -2302,6 +2323,7 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
         fields,
         fieldOrder,
         methods,
+        ...(nativePeerInfo === undefined ? {} : { nativePeer: nativePeerInfo }),
         decl,
         ...(emitOverride !== undefined ? { emitOverride } : {}),
         ctor,
@@ -3803,6 +3825,51 @@ export function lowerClassMembers(L: Lowerer, info: ClassInfo): IrFunction[] {
       const thisLocal = L.declareThis(thisType);
       const params: IrParam[] = [{ localId: thisLocal.id, name: "this", type: thisType }];
       const body: IrStmt[] = [];
+      if (info.nativePeer !== undefined) {
+        const handleType: IrType = {
+          kind: "nativeHandle",
+          typeId: info.nativePeer.handleTypeId,
+        };
+        const handleLocal: IrLocal = {
+          id: "nativeHandle.0",
+          name: "nativeHandle",
+          type: handleType,
+          mutable: false,
+        };
+        L.ctx.locals.push(handleLocal);
+        params.push({
+          localId: handleLocal.id,
+          name: handleLocal.name,
+          type: handleType,
+        });
+        body.push({
+          kind: "fieldSet",
+          obj: {
+            kind: "varRef",
+            localId: thisLocal.id,
+            type: thisType,
+            loc: locOf(info.decl!),
+          },
+          className,
+          field: info.nativePeer.handleField,
+          value: {
+            kind: "varRef",
+            localId: handleLocal.id,
+            type: handleType,
+            loc: locOf(info.decl!),
+          },
+          loc: locOf(info.decl!),
+        });
+        body.push(...L.fieldInitStmts(info, thisLocal));
+        return {
+          name: `%${className}.constructor`,
+          params,
+          returnType: VOID,
+          locals: L.ctx.locals,
+          body,
+          loc: locOf(info.decl!),
+        };
+      }
       // The construction-relevant base: generic families are transparent
       // (an instantiation of a base-less generic class IS a base class —
       // its source has no super()).

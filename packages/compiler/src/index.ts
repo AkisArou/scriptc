@@ -1070,6 +1070,10 @@ function executableNativeFeatures(
     copying: moduleUsesCopying(mod),
     textDecoderLegacy: moduleUsesLegacyTextDecoder(mod),
     fileHandle: moduleUsesFileHandle(mod),
+    nativeHandle: (mod.nativeTypes ?? []).some(
+      (definition) => definition.kind === "handle",
+    ),
+    retainedCallbacks: moduleUsesRetainedCallbacks(mod),
     fetch: moduleUsesFetch(mod),
     netIsland:
       moduleEmbedsBuiltin(mod, "node:http") ||
@@ -1138,6 +1142,8 @@ async function compileExecutableNative(
     copying: features.copying,
     textDecoderLegacy: features.textDecoderLegacy,
     fileHandle: features.fileHandle,
+    nativeHandle: features.nativeHandle,
+    retainedCallbacks: features.retainedCallbacks,
     fetch: features.fetch,
     netIsland: features.netIsland,
     zlib: features.zlib,
@@ -1755,9 +1761,11 @@ async function compileTracked(
        * That helper derives its options from the cache-key feature record,
        * which by construction names only the surface an upstream build has.
        * A build here can additionally carry linked objects, system libraries,
-       * requested runtime services and native handles, none of which that
-       * record models — routing through it drops them and the link fails on
-       * the fixture's own symbols.
+       * requested runtime services, none of which that record models —
+       * routing through it drops them and the link fails on the fixture's own
+       * symbols. Intrinsic module features, including native handles and
+       * retained callbacks, do live in that record so a cache relink selects
+       * the same runtime objects as the cold build.
        *
        * So the options come from `executableNativeBuildPlan`, which is
        * already this fork's single description of a native build and is a

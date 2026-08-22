@@ -258,7 +258,7 @@ export function emitClassShapes(
 
   for (const cls of emitted) {
     const meta = metaMap.get(cls.name)!;
-    const fieldTys = cls.fields.map((f) => llFieldType(f.type));
+    const fieldTys = cls.fields.map((f) => llFieldType(f.type, host.sizeType));
     // Emitter subclasses embed ScrEmitter's remaining prefix (the registry
     // and display-name slots) between the vtable word and the field list;
     // stream subclasses add the state pointer — upcasts to ScrEmitter* /
