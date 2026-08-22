@@ -888,6 +888,30 @@ export function lowerNativeBaseCall(
 
 export function lowerNativeCall(L: Lowerer, expr: ts.CallExpression): IrExpr | null {
   const callee = expr.expression;
+  /* `super.m(...)` is NEVER this path, whatever the member resolves to.
+   *
+   * The member symbol behind `super.m` is the base's own declaration, and a
+   * platform base declares its lifecycle members as ordinary methods — so this
+   * path resolves `super.onCreate(state)` to `Activity.onCreate` and emits the
+   * VIRTUAL call, which redispatches straight back into the override that made
+   * it. On Android that is an unbounded recursion reported as
+   * SuperNotCalledException, with no diagnostic anywhere.
+   *
+   * Declining here rather than reordering the dispatch, because the reason is
+   * about meaning rather than precedence: `super.m` denotes the base
+   * implementation, which is a different operation from the member of that
+   * name, and the manifest names it separately (`baseCall`). The super path in
+   * `lowerCall` owns the choice and refuses by name when no base call exists.
+   *
+   * This was invisible for as long as the fixture's base declared no callable
+   * member of its own — with no binding to resolve, this path returned null
+   * and the super path got the call by default. */
+  if (
+    ts.isPropertyAccessExpression(callee) &&
+    callee.expression.kind === ts.SyntaxKind.SuperKeyword
+  ) {
+    return null;
+  }
   const symbol = nativeExpressionSymbol(L, callee);
   if (symbol === null) return null;
   const operation = L.nativeOperationsBySymbol.get(symbol);

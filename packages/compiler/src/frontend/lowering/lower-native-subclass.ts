@@ -8,10 +8,17 @@
  *
  * WHAT THIS SLICE IS. Overrides, `this`, and inherited native members, with NO
  * managed fields. That exclusion is the whole reason it can ship now: with no
- * managed state there is no second object, so `this` IS the handle cell whose
- * identity the interning map already keeps, and none of the peer's lifetime
- * question arises. An instance field is exactly what introduces that object,
- * and it refuses here by name.
+ * managed state there is no second object, and nothing the program can hold
+ * outlives a dispatch, so none of the peer's lifetime question arises. An
+ * instance field is exactly what introduces that object, and it refuses here
+ * by name.
+ *
+ * It does NOT rest on the interning map. Only `pointer`-identity handles
+ * intern, and a JVM handle declares `identity: "none"` because `NewGlobalRef`
+ * twice on one object yields two distinct `jobject`s — so on the platform this
+ * exists for, every dispatch builds a fresh cell. That is indistinguishable
+ * from one cell per object precisely while no field exists to compare across
+ * dispatches, which is the same boundary the refusal draws.
  *
  * WHY IT NEEDS NO NEW IR. A lowered method's first parameter is already its
  * receiver, typed — so an override lowered with `this` typed as the native

@@ -1847,6 +1847,23 @@ const localNativeInput: NativeFrontendInput = {
       result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
+      /* The base's OWN member, callable and virtual — the shape a platform
+       * surface always has, because a base that declares a lifecycle member
+       * declares it as a method. `super.onTick(...)` must reach the bridge
+       * above and never this, and without this binding present nothing in the
+       * fixture could tell the two apart. */
+      id: "scriptc.fixture.c-v1@0.0.0#tick_virtual",
+      declaration: { module: nativePackage, name: "TickSource.onTick" },
+      entry: { symbol: "nts_tick_virtual" },
+      sourceCall: { kind: "method", receiverArgument: 0 },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "self", type: COUNTER_MIDDLE, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
+        { name: "seed", type: I32, passMode: "value", ownership: { kind: "value" } },
+      ]),
+      result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
       id: "scriptc.fixture.c-v1@0.0.0#tick_mark",
       declaration: { module: nativePackage, name: "tickMark" },
       entry: { symbol: "nts_tick_mark" },
