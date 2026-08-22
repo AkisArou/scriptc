@@ -366,6 +366,22 @@ const TELLER = { kind: "nativeHandle", typeId: TELLER_ID } as const;
 const JUDGE_ID = "scriptc.fixture.c-v1@0.0.0#type:judge";
 const JUDGE = { kind: "nativeHandle", typeId: JUDGE_ID } as const;
 const COUNTER_DESTROY = "scriptc.fixture.c-v1@0.0.0#counter_destroy";
+const SHARED_ID = "scriptc.fixture.c-v1@0.0.0#type:shared";
+const SHARED = { kind: "nativeHandle", typeId: SHARED_ID } as const;
+/* The SAME C object as the token, under the OTHER identity arm. Two types over
+ * one pointer is what isolates the arm as the only difference: interning is
+ * then the whole of what changes, and a comparison that answered constantly
+ * would disagree with one of the two. */
+const SHARED_DEFINITION = {
+  kind: "handle",
+  id: SHARED_ID,
+  declaration: { module: nativePackage, name: "Shared" },
+  nativeName: "NtsToken",
+  threadSafety: "confined",
+  identity: "pointer",
+  cycleCollection: "none",
+  upcasts: [],
+} as const satisfies NativeFrontendInput["types"][number];
 const TOKEN_ID = "scriptc.fixture.c-v1@0.0.0#type:token";
 const TOKEN = { kind: "nativeHandle", typeId: TOKEN_ID } as const;
 const TOKEN_DEFINITION = {
@@ -608,6 +624,7 @@ const localNativeInput: NativeFrontendInput = {
     { declaration: { module: nativePackage, name: "CounterMiddle" }, type: COUNTER_MIDDLE },
     { declaration: { module: nativePackage, name: "Counter" }, type: COUNTER },
     { declaration: { module: nativePackage, name: "Token" }, type: TOKEN },
+    { declaration: { module: nativePackage, name: "Shared" }, type: SHARED },
     /* A DOTTED source type: the nested class, whose symbol is reachable only
      * through its owner's VALUE side. */
     { declaration: { module: nativePackage, name: "NativeCounter.Nested" }, type: COUNTER },
@@ -691,6 +708,7 @@ const localNativeInput: NativeFrontendInput = {
     COUNTER_MIDDLE_DEFINITION,
     COUNTER_DEFINITION,
     TOKEN_DEFINITION,
+    SHARED_DEFINITION,
     SUBSCRIPTION_DEFINITION,
     ASKER_DEFINITION,
     TELLER_DEFINITION,
@@ -2411,6 +2429,35 @@ const localNativeInput: NativeFrontendInput = {
         },
         projection: DIRECT_RESULT,
       },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#shared_acquire",
+      declaration: { module: nativePackage, name: "sharedAcquire" },
+      entry: { symbol: "nts_shared_acquire" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([]),
+      result: {
+        type: SHARED,
+        passMode: "pointer",
+        ownership: {
+          kind: "owned",
+          transfer: "to-runtime",
+          destructor: "scriptc.fixture.c-v1@0.0.0#shared_release",
+        },
+        projection: DIRECT_RESULT,
+      },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#shared_release",
+      declaration: { module: nativePackage, name: "Shared.dispose" },
+      entry: { symbol: "nts_shared_release" },
+      sourceCall: { kind: "method", receiverArgument: 0 },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "token", type: SHARED, passMode: "pointer", ownership: { kind: "owned", transfer: "to-native" } },
+      ]),
+      result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
       id: "scriptc.fixture.c-v1@0.0.0#token_release",

@@ -4162,6 +4162,16 @@ function validateFunction(
           if (e.right.type.kind !== "classval") {
             err(`bin ${e.op} on class values: right operand is ${e.right.type.kind}`, e.loc);
           }
+        } else if (isEq && e.left.type.kind === "nativeHandle") {
+          /* Handle identity tolerates DIFFERING nominal types, the way
+           * function and class identity tolerate differing signatures and
+           * classes: identity-upcast-related handles SHARE one cell, so the
+           * comparison asks about a single pointer whichever type the source
+           * used to reach it. What it must not admit is the other operand
+           * being something no pointer compare answers. */
+          if (e.right.type.kind !== "nativeHandle") {
+            err(`bin ${e.op} on native handles: right operand is ${e.right.type.kind}`, e.loc);
+          }
         } else if (
           isEq &&
           (e.left.type.kind === "array" ||

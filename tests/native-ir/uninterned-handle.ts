@@ -1,4 +1,4 @@
-import { tokenAcquire, tokenOutstanding } from "@scriptc/native-abi-fixture";
+import { sharedAcquire, tokenAcquire, tokenOutstanding } from "@scriptc/native-abi-fixture";
 import type { i32 } from "@scriptc/native-abi-fixture";
 import { exit } from "scriptc-native-test";
 
@@ -19,13 +19,14 @@ function run(): i32 {
   const first = tokenAcquire();
   const second = tokenAcquire();
 
-  /* The user-visible half — that `first === second` is FALSE where the
-   * platform's own equality is true — cannot be written yet: comparing two
-   * native handles is SC1043, unsupported. So this program asserts the arm
-   * through the reference count instead, and the comparison is recorded in
-   * docs/open-work.md as the thing that would state it directly. It matters
-   * beyond this test: `this === this` across two lifecycle dispatches is the
-   * assertion the peer slice needs, and it is not expressible either. */
+  /* The arm's USER-VISIBLE meaning: two arrivals of one object are two
+   * managed values, so `===` is false here where the platform's own equality
+   * would be true. Someone will meet this and think it a bug, which is why it
+   * is asserted as semantics rather than left implicit in the count below. */
+  if (first === second) return 1 as i32;
+  // The negated spelling lowers too, and a cell is equal to itself.
+  if (!(first !== second)) return 7 as i32;
+  if (first !== first) return 8 as i32;
   // The same object underneath, which is what makes two values surprising.
   if (first.value() !== (7 as i32)) return 2 as i32;
   if (second.value() !== (7 as i32)) return 3 as i32;
@@ -42,6 +43,18 @@ function run(): i32 {
   if (tokenOutstanding() !== (1 as i32)) return 5 as i32;
   second.dispose();
   if (tokenOutstanding() !== (0 as i32)) return 6 as i32;
+
+  /* THE CONTRAST, over the same C object under `identity: "pointer"`. The arm
+   * is the only difference between these two types, so this is what stops the
+   * assertions above passing for a comparison that answered constantly: here
+   * the second acquisition finds the first cell, the two values ARE equal, and
+   * interning hands the extra reference straight back. */
+  const shared = sharedAcquire();
+  const again = sharedAcquire();
+  if (shared !== again) return 9 as i32;
+  if (tokenOutstanding() !== (1 as i32)) return 10 as i32;
+  shared.dispose();
+  if (tokenOutstanding() !== (0 as i32)) return 11 as i32;
 
   return 42 as i32;
 }

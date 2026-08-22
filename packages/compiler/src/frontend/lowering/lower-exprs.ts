@@ -8349,6 +8349,28 @@ export function lowerBinary(L: Lowerer, expr: ts.BinaryExpression): IrExpr {
         if (DYN_HANDLE_KINDS.has(idLeft.type.kind) && typeEquals(idLeft.type, idRight.type)) {
           return { kind: "bin", op: negated ? "!==" : "===", left: idLeft, right: idRight, type: BOOL, loc };
         }
+        /* A NATIVE handle is an object to `===` too, and the comparison
+         * answers whether two values name the same managed CELL.
+         *
+         * That is the honest answer under both identity arms rather than a
+         * compromise between them. A `pointer` handle interns, so one foreign
+         * object yields one cell and this IS object equality. A handle whose
+         * identity is `none` — a JVM reference, where the specification
+         * forbids comparing references with `==` — builds a cell per arrival,
+         * so two arrivals of one object compare UNEQUAL. The compiler must not
+         * invent an equality the platform refuses to provide, and the arm is
+         * where the platform says which it provides.
+         *
+         * No same-type requirement, for the reason function and class values
+         * have none: identity-upcast-related handles SHARE a cell, so a
+         * comparison across the upcast asks about one pointer, and TypeScript
+         * has already refused the pairs that could never overlap. */
+        if (
+          idLeft.type.kind === "nativeHandle" &&
+          idRight.type.kind === "nativeHandle"
+        ) {
+          return { kind: "bin", op: negated ? "!==" : "===", left: idLeft, right: idRight, type: BOOL, loc };
+        }
         L.unsupported("SC1043", expr);
         break;
       }

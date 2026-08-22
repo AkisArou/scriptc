@@ -899,6 +899,16 @@ int32_t nts_token_value(NtsToken *token) { return token->value; }
 
 int32_t nts_token_outstanding(void) { return nts_token_live; }
 
+/* The same object again, behind its OWN symbols, because one C symbol backs
+ * exactly one binding — the compiler refuses a second, which is right: a
+ * symbol is what a binding IS, and two bindings sharing one would make the
+ * link ambiguous about which contract it satisfies. These exist so the same
+ * object can be reached under a `pointer`-identity handle and the arm can be
+ * the only difference between them. */
+NtsToken *nts_shared_acquire(void) { return nts_token_acquire(); }
+
+void nts_shared_release(NtsToken *token) { nts_token_release(token); }
+
 /* A registration whose handler is the RECEIVER's own method: the platform
  * shape where a framework constructs the object and calls a lifecycle member
  * on it. The callback takes the receiver FIRST and the call's own argument
