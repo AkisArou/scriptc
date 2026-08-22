@@ -80,7 +80,16 @@ export function resolveNativeFrontend(
   const constantsBySymbol = new Map<ts.Symbol, NativeInputConstant>();
   const operationsBySymbol = new Map<ts.Symbol, NativeInputOperation>();
   for (const sourceType of input?.sourceTypes ?? []) {
-    const symbol = declarationSymbol(L, sourceType.declaration);
+    /* "value", like the constant and operation paths below, because a DOTTED
+     * type name names something nested — and a nested class lives on the value
+     * side of its owner's merged symbol, not on the instance type. Reading the
+     * instance type finds no `View.OnClickListener` and the failure surfaces
+     * far away, as a parameter mapping to 'unknown' at the binding that takes
+     * one.
+     *
+     * Inert for an undotted name: the member loop never runs, so no existing
+     * source type changes meaning. */
+    const symbol = declarationSymbol(L, sourceType.declaration, "value");
     if (symbol !== null) {
       const type = { ...sourceType.type };
       typesBySymbol.set(symbol, type);

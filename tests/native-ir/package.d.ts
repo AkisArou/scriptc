@@ -123,7 +123,17 @@ export declare class NativeCounter {
  * interface does not. */
 export declare namespace NativeCounter {
   const step: i32;
+  /* A NESTED class, which is how a platform's inner class projects
+   * (`View$OnClickListener` as `View.OnClickListener`). Its declaration name is
+   * dotted, and a nested class lives on the VALUE side of the merged symbol —
+   * the instance type has no such property. */
+  class Nested {
+    private readonly nested: unique symbol;
+  }
 }
+
+export declare function makeNested(initialValue: i32): NativeCounter.Nested;
+export declare function useNested(nested: NativeCounter.Nested): i32;
 
 /* Reports failure by returning an owned error object rather than a code, the
  * shape a C error object takes once an adapter has absorbed its

@@ -574,6 +574,9 @@ const localNativeInput: NativeFrontendInput = {
     { declaration: { module: nativePackage, name: "CounterBase" }, type: COUNTER_BASE },
     { declaration: { module: nativePackage, name: "CounterMiddle" }, type: COUNTER_MIDDLE },
     { declaration: { module: nativePackage, name: "Counter" }, type: COUNTER },
+    /* A DOTTED source type: the nested class, whose symbol is reachable only
+     * through its owner's VALUE side. */
+    { declaration: { module: nativePackage, name: "NativeCounter.Nested" }, type: COUNTER },
     {
       declaration: { module: nativePackage, name: "Subscription" },
       type: SUBSCRIPTION,
@@ -1753,6 +1756,41 @@ const localNativeInput: NativeFrontendInput = {
         },
       ],
       result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      /* A nested class reached as a RESULT and then as a RECEIVER: the first
+       * needs its dotted type name to resolve as a RESULT, the second as a
+       * PARAMETER — which is the position the platform case fails in, where a
+       * listener is handed to `setOnClickListener`. */
+      id: "scriptc.fixture.c-v1@0.0.0#nested_create",
+      declaration: { module: nativePackage, name: "makeNested" },
+      entry: { symbol: "nts_counter_create" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "initial_value", type: I32, passMode: "value", ownership: { kind: "value" } },
+      ]),
+      result: {
+        type: COUNTER,
+        passMode: "pointer",
+        ownership: {
+          kind: "owned",
+          transfer: "to-runtime",
+          destructor: "scriptc.fixture.c-v1@0.0.0#counter_destroy",
+        },
+        projection: DIRECT_RESULT,
+      },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#nested_value",
+      declaration: { module: nativePackage, name: "useNested" },
+      entry: { symbol: "nts_counter_value" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "counter", type: COUNTER, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
+      ]),
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
       /* A second registration over the same C constructor, differing only in
@@ -6005,6 +6043,40 @@ describe.each(["c", "llvm"] as const)(
       );
       expect(result.ok ? [] : result.diagnostics).toEqual([]);
       if (!result.ok) throw new Error("bit-pattern literal compile failed");
+      const run = spawnSync(result.binaryPath);
+      expect({
+        status: run.status,
+        signal: run.signal,
+        stderr: run.stderr.toString(),
+      }).toEqual({ status: 42, signal: null, stderr: "" });
+    });
+  },
+);
+
+describe.each(["c", "llvm"] as const)(
+  "Native IR nested class declarations, %s backend",
+  (backend) => {
+    /* Local-only: a C fixture has no nested classes and no reason to grow
+     * them, so this shape extends the in-tree fixture with declarations an
+     * embedder-supplied one does not promise. Its contract-level proof is the
+     * JVM lane, where a platform's inner classes are the reason the spelling
+     * exists at all. */
+    localFixtureTest("resolves a dotted type name through its owner's value side", async () => {
+      const outDir = join(scratch, `nested-class-${backend}`);
+      const result = await compile(
+        join(repoRoot, "tests/native-ir/nested-class.ts"),
+        {
+          outDir,
+          outPath: join(outDir, "program"),
+          backend,
+          sanitize,
+          externalTypes: nativeExternalTypes(),
+          native: frontendNativeInput(),
+          nativeLinkInputs: [fixtureObject(), supportObject()],
+        },
+      );
+      expect(result.ok ? [] : result.diagnostics).toEqual([]);
+      if (!result.ok) throw new Error("nested class compile failed");
       const run = spawnSync(result.binaryPath);
       expect({
         status: run.status,
