@@ -10,7 +10,7 @@ import { dynDestrCheckHelper, dynIterNHelper, dynKeyGetHelper } from "./emit-wal
 import { genResultThunkFor } from "./emit-async.js";
 import { nativeCallbackCancellationArgument } from "../native-callbacks.js";
 import { nativeCallLifecycle } from "../native-callbacks.js";
-import { nativeArgumentBorrow, nativeArgumentHandle, nativeArgumentForm, nativeCallDisposal, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultCopy, nativeResultForm, nativeResultHandle, type NativeArgumentFormExhausted } from "../native-call-plan.js";
+import { nativeArgumentBorrow, nativeArgumentHandle, nativeArgumentForm, nativeCallDisposal, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultAcquisition, nativeResultCopy, nativeResultForm, nativeResultHandle, type NativeArgumentFormExhausted } from "../native-call-plan.js";
 
 function streamTypedRefCommitAdapter(
   E: CEmitter,
@@ -688,6 +688,9 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           return E.newTemp(e.type, isRefCounted(e.type) ? retainCallC(e.type, gname) : gname);
         }
         const name = mangleLocal(e.localId);
+        if (local?.nativeFrame !== undefined) {
+          return E.newBorrowedNativeFrameTemp(e.type, name, local.nativeFrame.release);
+        }
         if (local?.boxed) {
           // Reads go through the shared binding; ref kinds come out +1.
           const acc = boxAccess(e.type);
@@ -2260,6 +2263,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         const args = e.args.map((arg) => E.emitExpr(arg));
         const releaseArguments = (): void => {
           for (const arg of args) {
+            /* A frame-bounded handle reference is a raw borrow from the
+             * lexical local that owns its exact release. It creates no
+             * temporary resource for this argument evaluation. */
+            if (arg.nativeFrame !== undefined) continue;
             if (!isRefCounted(arg.type)) continue;
             E.moveTemp(arg);
             E.releaseValue(arg.name, arg.type);
@@ -2548,6 +2555,12 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
                * a present handle is validated exactly as a required one is. */
               if (handle.source === null) return "NULL";
               const arg = args[handle.source.argument]!;
+              if (arg.nativeFrame !== undefined) {
+                if (handle.surrenders) {
+                  throw new Error(`emitter bug: frame-bounded handle surrendered in ${binding.id}`);
+                }
+                return arg.name;
+              }
               const tagRef = `&${mangleNativeHandleTag(handle.typeId!)}`;
               /* Surrender is everything an explicit disposal does except
                * freeing the object: that is the callee's now, and using the
@@ -2588,7 +2601,8 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           );
           emitConversionPendingCheck();
         }
-        let call = `${binding.entry.symbol}(${nativeArgs.join(", ")})`;
+        const acquisition = nativeResultAcquisition(binding, resultForm, e.resultMode);
+        let call = `${acquisition.symbol}(${nativeArgs.join(", ")})`;
         /* A callback whose C signature has no userdata slot cannot be handed
          * its closure, so the call lends one through the adapter's
          * thread-local for exactly its own duration. Set after every argument
@@ -2897,6 +2911,25 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             binding.error.detect.kind === "resultIsNull",
             lifecycle.registrationOwner,
           );
+          if (acquisition.kind === "frameBounded") {
+            const result = E.newNativeFrameTemp(e.type, call, acquisition.release);
+            if (plan.onNull !== "unchecked") {
+              E.line(`if (${result.name} == NULL) {`);
+              E.indent++;
+              if (plan.onNull === "throw") {
+                E.line(`if (!scr_exc_pending()) scr_native_throw_null(${operation});`);
+              } else if (plan.onNull === "trap") {
+                E.line(`scr_trap("scriptc: non-failing native call produced NULL\\n");`);
+              } else {
+                throw new Error(`emitter bug: frame-bounded required handle has nullable result in ${binding.id}`);
+              }
+              E.indent--;
+              E.line(`}`);
+            }
+            E.emitPendingCheck();
+            releaseArguments();
+            return result;
+          }
           const { definition, destructor } = plan;
           const raw = `sc_t${E.tempCounter++}`;
           const prepared = `sc_t${E.tempCounter++}`;

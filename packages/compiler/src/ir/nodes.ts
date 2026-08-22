@@ -1158,7 +1158,7 @@ export type {
 };
 
 /** Current wire-format version for every producer and consumer of Native IR. */
-export const IR_VERSION = 45 as const;
+export const IR_VERSION = 46 as const;
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
@@ -1773,6 +1773,12 @@ export interface IrLocal {
    * paired with `boxed`; restricted to pointer-backed types (the NULL slot
    * IS the TDZ sentinel). Capture entries inherit the flag. */
   tdz?: true;
+  /** This local owns a frame-bounded foreign handle rather than an ordinary
+   * managed handle cell. Its source type remains `nativeHandle`; the storage
+   * fact is compiler-only and validated so the value can appear solely in
+   * synchronous borrowed native arguments. Scope cleanup calls `release`
+   * exactly once on every exit. */
+  nativeFrame?: { release: string };
 }
 
 /* ── statements ────────────────────────────────────────────────────────── */
@@ -5143,7 +5149,16 @@ export type IrExpr =
   /** Backend-neutral call through one validated Native IR binding. The
    * binding id—not a source-provided symbol string—selects the entry and
    * exact ABI signature. */
-  | { kind: "nativeCall"; binding: string; args: IrExpr[]; type: IrType; loc: SrcLoc }
+  | {
+      kind: "nativeCall";
+      binding: string;
+      args: IrExpr[];
+      type: IrType;
+      /** Selects the binding result's frame-bounded mechanics. Absent keeps
+       * the existing stable entry and managed-handle representation. */
+      resultMode?: "frameBounded";
+      loc: SrcLoc;
+    }
   /** Resolve one native subclass's managed peer through the slot stored on
    * the foreign receiver. An existing peer is retained for this dispatch; an
    * absent one is constructed with the delivered handle, rooted once for the

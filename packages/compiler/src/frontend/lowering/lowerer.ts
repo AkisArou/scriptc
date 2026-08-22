@@ -55,6 +55,7 @@ import type {
   SrcLoc,
 } from "../../ir/nodes.js";
 import { arrayOf, BOOL, canAdaptDynFuncTo, canConvertToDyn, canCrossIslandBoundary, canExitIslandToType, canMarshalTypedFuncIntoIsland, DYN, F64, IR_VERSION, isJsonSafeType, isUndefinedArmedUnion, isUnitType, JSVAL, RUNTIME_ERROR_CLASSES, STRING, typeEquals, UNDEFINED_T, VOID } from "../../ir/nodes.js";
+import { specializeNativeFrameResources } from "../../ir/native-frame-resources.js";
 import { type DynamicImportResolution, type NpmBuiltinUse, type NpmLazyTrap } from "../npm.js";
 import type { NativeFrontendInput } from "../native.js";
 import { provenanceActive } from "../provenance-registry.js";
@@ -2614,6 +2615,7 @@ export class Lowerer {
               ? { ffiImports: [...this.ffiImports] }
               : {}),
           };
+    if (module !== null) specializeNativeFrameResources(module);
     return {
       module,
       diagnostics: this.diags,

@@ -241,6 +241,15 @@ export declare function failErrno(errorNumber: i32): never;
 export declare function spanLabel(): string;
 export declare function spanLabelMaybe(which: i32): string | null;
 export declare function createCounter(initialValue: i32): Counter;
+/* A constructor-shaped result whose capsule can provide either a stable
+ * reference or a frame-bounded one. The source type deliberately does not
+ * expose that representation choice. */
+export declare function createFrameCounter(initialValue: i32): Counter;
+export declare function frameResourceReset(): void;
+export declare function frameGlobalPromotions(): i32;
+export declare function frameLocalReleases(): i32;
+export declare function frameManagedCells(): i32;
+export declare function frameExpectedManagedCells(expected: i32): i32;
 /* A callback the native side asks rather than tells: it runs during the
  * emitting call and the value it answers with is that call's result. */
 export interface Asker {

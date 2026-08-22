@@ -91,7 +91,7 @@ import { nullableNativeHandleUnion, canMarshalFuncIntoIsland, CAUGHT, DYN, F64, 
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
 import { NATIVE_CALLBACK_INVOCATION_BASE_FIELDS, allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, nativeCallLifecycle, nativeCallbackPayloads, nativeQueuedPayloadCleanup, nativeTrampolineForm, type NativeCallbackAbsentPayload, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
-import { nativeArgumentBorrow, nativeArgumentHandle, nativeArgumentForm, nativeCallDisposal, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultCopy, nativeResultForm, nativeResultHandle, type NativeArgumentFormExhausted } from "../native-call-plan.js";
+import { nativeArgumentBorrow, nativeArgumentHandle, nativeArgumentForm, nativeCallDisposal, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultAcquisition, nativeResultCopy, nativeResultForm, nativeResultHandle, type NativeArgumentFormExhausted } from "../native-call-plan.js";
 import { computeMayThrow } from "../emission/may-throw.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleNativeHandleTag, mangleNativeStruct, mangleRecordClone, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
@@ -169,6 +169,7 @@ interface LlValue {
   name: string;
   type: IrType;
   slot?: boolean;
+  nativeFrame?: { release: string };
 }
 
 /** A scope entry: a refcounted local held in an alloca slot — releases
@@ -179,6 +180,7 @@ interface LlScopeEntry {
   slot: string;
   type: IrType;
   boxed?: boolean;
+  nativeFrame?: { release: string };
 }
 
 export interface LlvmTargetOptions {
@@ -3910,7 +3912,7 @@ class LlEmitter {
 
   /** Registers an owned refcounted value on the current statement frame. */
   private own(v: LlValue): LlValue {
-    if (isRefCounted(v.type)) this.currentFrame().push(v);
+    if (v.nativeFrame !== undefined || isRefCounted(v.type)) this.currentFrame().push(v);
     return v;
   }
 
@@ -3922,7 +3924,7 @@ class LlEmitter {
 
   /** Strike a refcounted temp from its frame: ownership is being moved. */
   private moveTemp(v: LlValue): void {
-    if (!isRefCounted(v.type)) return;
+    if (v.nativeFrame === undefined && !isRefCounted(v.type)) return;
     for (let i = this.frames.length - 1; i >= 0; i--) {
       const idx = this.frames[i]!.findIndex((e) => e.name === v.name);
       if (idx >= 0) {
@@ -3949,6 +3951,16 @@ class LlEmitter {
 
   private releaseFrame(frame: LlValue[]): void {
     for (const v of frame) {
+      if (v.nativeFrame !== undefined) {
+        this.declare(`declare void @${v.nativeFrame.release}(ptr)`);
+        let value = v.name;
+        if (v.slot) {
+          value = this.B.tmp();
+          this.B.line(`${value} = load ptr, ptr ${v.name}`);
+        }
+        this.B.line(`call void @${v.nativeFrame.release}(ptr ${value})`);
+        continue;
+      }
       if (v.slot) {
         const t = this.B.tmp();
         this.B.line(`${t} = load ptr, ptr ${v.name}`);
@@ -3966,6 +3978,9 @@ class LlEmitter {
       if (e.boxed) {
         this.declare(`declare void @scr_box_release(ptr)`);
         this.B.line(`call void @scr_box_release(ptr ${t})`);
+      } else if (e.nativeFrame !== undefined) {
+        this.declare(`declare void @${e.nativeFrame.release}(ptr)`);
+        this.B.line(`call void @${e.nativeFrame.release}(ptr ${t})`);
       } else {
         this.releaseValue(t, e.type); // runtime releases are NULL-tolerant
       }
@@ -4763,14 +4778,14 @@ class LlEmitter {
       // local is a catch binding: its slot holds the ScrCaught snapshot
       // box the catch prologue takes (scr_exc_take).
       const slotTy =
-        local.boxed || this.captureIds.has(local.id) || local.type.kind === "caught"
+        local.nativeFrame !== undefined || local.boxed || this.captureIds.has(local.id) || local.type.kind === "caught"
           ? "ptr"
           : this.llType(local.type);
       B.entryAllocas.push(`%${mangleLocal(local.id)} = alloca ${slotTy} ; ${local.name}`);
       // Refcounted/boxed locals start NULL (the C prologue's `= NULL`):
       // scope-exit releases run whether or not an assign ever did.
       if (paramIds.has(local.id) || this.captureIds.has(local.id)) continue;
-      if (local.boxed || isRefCounted(local.type)) {
+      if (local.nativeFrame !== undefined || local.boxed || isRefCounted(local.type)) {
         B.line(`store ptr null, ptr %${mangleLocal(local.id)}`);
       }
     }
@@ -4935,8 +4950,12 @@ class LlEmitter {
         const v = this.emitExpr(s.init);
         this.moveTemp(v);
         B.line(`store ${this.llType(b.type)} ${v.name}, ptr ${b.slot}`);
-        if (isRefCounted(b.type)) {
-          this.scopes[this.scopes.length - 1]!.push({ slot: b.slot, type: b.type });
+        if (v.nativeFrame !== undefined || isRefCounted(b.type)) {
+          this.scopes[this.scopes.length - 1]!.push({
+            slot: b.slot,
+            type: b.type,
+            ...(v.nativeFrame === undefined ? {} : { nativeFrame: v.nativeFrame }),
+          });
         }
         break;
       }
@@ -6030,6 +6049,9 @@ class LlEmitter {
         }
         const t = B.tmp();
         B.line(`${t} = load ${this.llType(b.type)}, ptr ${b.slot}`);
+        if (b.local?.nativeFrame !== undefined) {
+          return { name: t, type: e.type, nativeFrame: b.local.nativeFrame };
+        }
         if (isRefCounted(e.type)) return this.own({ name: this.retainValue(t, e.type), type: e.type });
         return { name: t, type: e.type };
       }
@@ -7354,6 +7376,10 @@ class LlEmitter {
         const args = e.args.map((arg) => this.emitExpr(arg));
         const releaseArguments = (): void => {
           for (const arg of args) {
+            /* A frame-bounded handle reference is a raw borrow from the
+             * lexical local that owns its exact release. It creates no
+             * temporary resource for this argument evaluation. */
+            if (arg.nativeFrame !== undefined) continue;
             if (!isRefCounted(arg.type)) continue;
             this.moveTemp(arg);
             this.releaseValue(arg.name, arg.type);
@@ -7387,6 +7413,7 @@ class LlEmitter {
           nativeTypesById: this.nativeTypesById,
           nativeById: this.nativeById,
         });
+        const acquisition = nativeResultAcquisition(binding, resultForm, e.resultMode);
         for (const step of lifecycle.setup) {
           const closure = args[step.argument]!.name;
           const token = B.tmp();
@@ -7498,7 +7525,7 @@ class LlEmitter {
           );
         }
         this.declare(
-          `declare ${returnType} @${binding.entry.symbol}(${declarationParameters.join(", ")})`,
+          `declare ${returnType} @${acquisition.symbol}(${declarationParameters.join(", ")})`,
         );
         /* A failable call that keeps its own result reports the error through
          * a slot the compiler owns. Kept in lockstep with the C backend. */
@@ -7809,6 +7836,13 @@ class LlEmitter {
               this.declare(`declare ptr @${symbol}(ptr, ptr, ptr)`);
               const tag = mangleNativeHandleTag(handle.typeId!);
               const arg = args[handle.source.argument]!;
+              if (arg.nativeFrame !== undefined) {
+                if (handle.surrenders) {
+                  throw new Error(`llvm emitter bug: frame-bounded handle surrendered in ${binding.id}`);
+                }
+                callArgs.push(`${parameterType} ${arg.name}`);
+                return;
+              }
               let value: string;
               if (handle.source.unionTag !== null) {
                 const tagValue = this.unionTag(arg.name);
@@ -7936,7 +7970,7 @@ class LlEmitter {
           saved.set(lend.argument, previous);
         }
         let call =
-          `call ${returnType} @${binding.entry.symbol}(` +
+          `call ${returnType} @${acquisition.symbol}(` +
           `${callArgs.join(", ")})`;
         /* Everything that has to happen the moment the native call returns,
          * in the order the lifecycle gives. */
@@ -8430,6 +8464,50 @@ class LlEmitter {
             binding.error.detect.kind === "resultIsNull",
             lifecycle.registrationOwner,
           );
+          if (acquisition.kind === "frameBounded") {
+            const raw = B.tmp();
+            B.line(`${raw} = ${call}`);
+            const value = this.own({
+              name: raw,
+              type: e.type,
+              nativeFrame: { release: acquisition.release },
+            });
+            if (plan.onNull === "throw") {
+              const isNull = B.tmp();
+              const nullBlock = B.newLabel("native.frame.null");
+              const throwBlock = B.newLabel("native.frame.throw");
+              const continuation = B.newLabel("native.frame.ok");
+              B.line(`${isNull} = icmp eq ptr ${raw}, null`);
+              B.condBr(isNull, nullBlock, continuation);
+              B.startBlock(nullBlock);
+              this.declare("declare zeroext i1 @scr_exc_pending()");
+              const pending = B.tmp();
+              B.line(`${pending} = call zeroext i1 @scr_exc_pending()`);
+              B.condBr(pending, continuation, throwBlock);
+              B.startBlock(throwBlock);
+              this.declare("declare void @scr_native_throw_null(ptr)");
+              B.line(`call void @scr_native_throw_null(ptr ${operation})`);
+              B.br(continuation);
+              B.startBlock(continuation);
+            } else if (plan.onNull === "trap") {
+              const isNull = B.tmp();
+              const trapBlock = B.newLabel("native.frame.trap");
+              const continuation = B.newLabel("native.frame.ok");
+              B.line(`${isNull} = icmp eq ptr ${raw}, null`);
+              B.condBr(isNull, trapBlock, continuation);
+              B.startBlock(trapBlock);
+              this.declare("declare void @scr_trap(ptr)");
+              const message = this.cstr(
+                "scriptc: non-failing native call produced NULL\n",
+              );
+              B.line(`call void @scr_trap(ptr ${message})`);
+              B.line("unreachable");
+              B.startBlock(continuation);
+            }
+            this.emitPendingCheck();
+            releaseArguments();
+            return value;
+          }
           const { definition, destructor } = plan;
           this.declare(`declare void @${destructor}(ptr)`);
           this.declare(`declare ptr @scr_native_handle_prepare(ptr, ptr, ptr)`);

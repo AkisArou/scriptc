@@ -55,8 +55,10 @@ export function emitFunction(E: CEmitter, fn: IrFunction): void {
       if (local.boxed) {
         E.line(`ScrBox *${mangleLocal(local.id)} = NULL; /* ${local.name} (boxed) */`);
       } else {
-        const init = isRefCounted(local.type) ? " = NULL" : "";
-        E.line(`${cDecl(local.type, mangleLocal(local.id))}${init}; /* ${local.name} */`);
+        const declaration = local.nativeFrame !== undefined
+          ? `void *${mangleLocal(local.id)} = NULL`
+          : `${cDecl(local.type, mangleLocal(local.id))}${isRefCounted(local.type) ? " = NULL" : ""}`;
+        E.line(`${declaration}; /* ${local.name} */`);
       }
     }
 
@@ -210,8 +212,12 @@ export function emitStmt(E: CEmitter, s: IrStmt): void {
         const v = E.emitExpr(s.init);
         E.moveTemp(v);
         E.line(`${target} = ${v.name};${E.srcComment(s.loc)}`);
-        if (isRefCounted(v.type)) {
-          E.scopes[E.scopes.length - 1]!.push({ name: target, type: v.type });
+        if (v.nativeFrame !== undefined || isRefCounted(v.type)) {
+          E.scopes[E.scopes.length - 1]!.push({
+            name: target,
+            type: v.type,
+            ...(v.nativeFrame === undefined ? {} : { nativeFrame: v.nativeFrame }),
+          });
         }
         break;
       }

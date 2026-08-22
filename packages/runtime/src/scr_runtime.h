@@ -3066,6 +3066,11 @@ ScrNativeHandle *scr_native_handle_interned(const ScrNativeHandleType *type,
 ScrNativeHandle *scr_native_handle_prepare(ScrNativeDestructor destructor,
                                            const ScrNativeHandleType *type,
                                            const char *type_name);
+/* Checked-build instrumentation for resource-lowering observers. Production
+ * builds retain the query surface but do not count, so the hot allocation
+ * path stays unchanged outside SCR_RC_AUDIT. */
+void scr_native_handle_audit_reset(void);
+size_t scr_native_handle_audit_prepare_count(void);
 void scr_native_handle_commit(ScrNativeHandle *handle, void *foreign);
 void scr_native_handle_abandon(ScrNativeHandle *handle);
 ScrNativeHandle *scr_native_handle_retain(ScrNativeHandle *handle);

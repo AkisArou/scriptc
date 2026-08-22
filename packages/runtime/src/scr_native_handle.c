@@ -53,6 +53,24 @@ struct ScrNativeHandle {
   ScrNativeHandleState state;
 };
 
+#ifdef SCR_RC_AUDIT
+static _Thread_local size_t scr_native_handle_prepares;
+#endif
+
+void scr_native_handle_audit_reset(void) {
+#ifdef SCR_RC_AUDIT
+  scr_native_handle_prepares = 0;
+#endif
+}
+
+size_t scr_native_handle_audit_prepare_count(void) {
+#ifdef SCR_RC_AUDIT
+  return scr_native_handle_prepares;
+#else
+  return 0;
+#endif
+}
+
 /* Identity map for interned handle types.
  *
  * Chained buckets keyed by the pointer alone. Not by pointer and type: one
@@ -172,6 +190,9 @@ ScrNativeHandle *scr_native_handle_prepare(ScrNativeDestructor destructor,
                                            const ScrNativeHandleType *type,
                                            const char *type_name) {
   if (!destructor || !type) scr_trap("scriptc: invalid native handle metadata\n");
+#ifdef SCR_RC_AUDIT
+  scr_native_handle_prepares++;
+#endif
   ScrNativeHandle *handle = type->cycle_collected
                                 ? scr_cyc_alloc(sizeof *handle,
                                                 &scr_native_handle_trace_v,

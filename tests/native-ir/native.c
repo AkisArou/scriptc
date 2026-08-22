@@ -639,6 +639,8 @@ NtsCounter *nts_counter_create(int32_t initial_value) {
   return counter;
 }
 
+void nts_counter_destroy(NtsCounter *counter);
+
 NtsCounter *nts_counter_create_with_initial_value(int32_t initial_value) {
   return nts_counter_create(initial_value);
 }
@@ -674,8 +676,6 @@ const char *const *nts_counter_tags(NtsCounter *counter) {
 const char *nts_counter_required_label(NtsCounter *counter) {
   return nts_counter_label(counter);
 }
-
-void nts_counter_destroy(NtsCounter *counter);
 
 /* A vault that takes ownership of the counter handed to it, the shape
  * `gtk_widget_add_controller` has: the argument's reference moves to the

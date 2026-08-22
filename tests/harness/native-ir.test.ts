@@ -2621,6 +2621,63 @@ const localNativeInput: NativeFrontendInput = {
       },
     },
     {
+      /* One source constructor whose binding supplies both mechanics arms.
+       * The compiler, not this manifest, decides which call sites may use the
+       * frame-bounded entry. */
+      id: "scriptc.fixture.c-v1@0.0.0#frame_counter_create",
+      declaration: { module: nativePackage, name: "createFrameCounter" },
+      entry: { symbol: "nts_frame_counter_create_stable" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "initial_value", type: I32, passMode: "value", ownership: { kind: "value" } },
+      ]),
+      result: {
+        type: COUNTER,
+        passMode: "pointer",
+        ownership: {
+          kind: "owned",
+          transfer: "to-runtime",
+          destructor: "scriptc.fixture.c-v1@0.0.0#counter_destroy",
+        },
+        projection: DIRECT_RESULT,
+        frameBounded: {
+          entry: { symbol: "nts_frame_counter_create_local" },
+          release: { symbol: "nts_frame_counter_release_local" },
+        },
+      },
+    },
+    ...([
+      ["frameResourceReset", "nts_frame_resource_reset", NATIVE_VOID],
+      ["frameGlobalPromotions", "nts_frame_global_promotion_count", I32],
+      ["frameLocalReleases", "nts_frame_local_release_count", I32],
+      ["frameManagedCells", "nts_frame_managed_cell_count", I32],
+    ] as const).map(([name, symbol, resultType]) => ({
+      id: `scriptc.fixture.c-v1@0.0.0#${name}`,
+      declaration: { module: nativePackage, name },
+      entry: { symbol },
+      sourceCall: { kind: "function" as const },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([]),
+      result: {
+        type: resultType,
+        passMode: "value" as const,
+        ownership: { kind: "value" as const },
+        projection: DIRECT_RESULT,
+      },
+    })),
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#frameExpectedManagedCells",
+      declaration: { module: nativePackage, name: "frameExpectedManagedCells" },
+      entry: { symbol: "nts_frame_expected_managed_cells" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "expected", type: I32, passMode: "value", ownership: { kind: "value" } },
+      ]),
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
       /* Hands out the SAME pointer every time, under a reference count. Under
        * a `pointer` handle the second call would find the first cell; under
        * `none` it builds another, and the count proves two references really
@@ -3593,7 +3650,7 @@ function compileNativeObject(
   const object = join(scratch, objectName);
   execFileSync("clang", [
     "-std=c11",
-    ...(sanitize ? ["-O1", "-fsanitize=address"] : ["-O2"]),
+    ...(sanitize ? ["-O1", "-fsanitize=address", "-DSCR_RC_AUDIT"] : ["-O2"]),
     ...(includeDir === undefined ? [] : ["-I", includeDir]),
     "-c",
     source,
@@ -3618,6 +3675,13 @@ function supportObject(): string {
   return compileNativeObject(
     join(repoRoot, "tests/native-ir/native-support.c"),
     "native-support.o",
+  );
+}
+
+function frameFixtureObject(): string {
+  return compileNativeObject(
+    join(repoRoot, "tests/native-ir/native-frame.c"),
+    "native-frame.o",
   );
 }
 
@@ -4245,6 +4309,45 @@ test("Native IR rejects invalid binding identity, exact types, and i32 literals"
   exit.expr.type = I32;
   expect(validateModule(wrongResult).map((error) => error.message)).toContain(
     "in __main: Native IR call process.exit type native:i32 does not match its direct result",
+  );
+});
+
+test("Native IR admits only an exact frame-bounded handle-result capability", () => {
+  const native = structuredClone(localNativeInput);
+  const create = native.bindings.find(
+    (candidate) =>
+      candidate.id === "scriptc.fixture.c-v1@0.0.0#frame_counter_create",
+  );
+  const destroy = native.bindings.find(
+    (candidate) => candidate.id === "scriptc.fixture.c-v1@0.0.0#counter_destroy",
+  );
+  if (create === undefined || destroy === undefined) {
+    throw new Error("test fixture lost its frame-bounded construction pair");
+  }
+  const mod = exactI32Module();
+  mod.nativeTypes = native.types
+    .filter((definition) => definition.kind !== "handle" || definition.peerSlot === undefined)
+    .map((definition) => structuredClone(definition));
+  mod.nativeBindings = [create, destroy].map((binding) =>
+    materializeNativeBinding(binding)
+  );
+  mod.functions = [];
+  expect(validateModule(mod)).toEqual([]);
+
+  const malformed = structuredClone(mod);
+  malformed.nativeBindings![0]!.result.frameBounded = {
+    entry: { symbol: malformed.nativeBindings![0]!.entry.symbol },
+    release: { symbol: "not-a-c-symbol" },
+  };
+  expect(validateModule(malformed).map(({ message }) => message)).toContain(
+    'Native IR binding "scriptc.fixture.c-v1@0.0.0#frame_counter_create" has an invalid frame-bounded result capability',
+  );
+
+  const colliding = structuredClone(mod);
+  colliding.nativeBindings![0]!.result.frameBounded!.entry.symbol =
+    colliding.nativeBindings![1]!.entry.symbol;
+  expect(validateModule(colliding).map(({ message }) => message)).toContain(
+    `duplicate Native IR frame-bounded C symbol "${colliding.nativeBindings![1]!.entry.symbol}"`,
   );
 });
 
@@ -6918,6 +7021,32 @@ describe.each(["c", "llvm"] as const)(
 );
 
 describe.each(["c", "llvm"] as const)("Native IR opaque handles, %s backend", (backend) => {
+  localFixtureTest("keeps a non-escaping result frame-bounded and an escaping sibling stable", async () => {
+    const outDir = join(scratch, `handle-frame-bounded-${backend}`);
+    const result = await compile(
+      join(repoRoot, "tests/native-ir/handle-frame-bounded.ts"),
+      {
+        outDir,
+        outPath: join(outDir, "program"),
+        backend,
+        emitIr: true,
+        sanitize,
+        externalTypes: nativeExternalTypes(),
+        native: frontendNativeInput(),
+        nativeLinkInputs: [fixtureObject(), frameFixtureObject(), supportObject()],
+      },
+    );
+    expect(result.ok ? [] : result.diagnostics).toEqual([]);
+    if (!result.ok || result.irPath === undefined) {
+      throw new Error("frame-bounded handle observer did not emit IR");
+    }
+    expect(validateModule(deserializeModule(readFileSync(result.irPath, "utf8"))))
+      .toEqual([]);
+    const run = spawnSync(result.binaryPath);
+    expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() })
+      .toEqual({ status: 42, signal: null, stderr: "" });
+  });
+
   test.each([
     ["identity upcasts preserve the managed cell and validate base calls", "handle-upcast.ts"],
     ["explicit disposal is alias-safe and idempotent", "handle-explicit.ts"],

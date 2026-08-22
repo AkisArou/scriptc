@@ -29,6 +29,7 @@ import type {
   SrcLoc,
 } from "./nodes.js";
 import { nullableNativeHandleUnion, arrayOf, BIGINT, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, ffiClassType, ffiSourceParamTypes, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, isFfiCallbackParam, isFfiContextParam, isFfiReleaseParam, isJsonSafeType, islandPromisePayloadTag, isRefCounted, isSupportedArrayElem, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, nativeArgumentScriptType, nativeCallbackIsOwnerScoped, nativeFailureReadsResult, nativeIntegerInfo, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, shapeHasAccessorSlots, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
+import { validateNativeFrameResources } from "./native-frame-resources.js";
 
 /**
  * A published union as it arrives from OUTSIDE, with every payload field
@@ -1277,6 +1278,20 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     NonNullable<IrModule["nativeBindings"]>[number]
   >();
   const nativeSymbols = new Set<string>();
+  const nativeFrameEntrySymbols = new Set<string>();
+  const declaredNativeEntrySymbols = new Set(
+    (mod.nativeBindings ?? []).map((binding) => binding.entry.symbol),
+  );
+  const declaredNativeFrameReleaseSymbols = new Set(
+    (mod.nativeBindings ?? []).flatMap((binding) => {
+      const capability = binding.result.frameBounded as unknown;
+      if (typeof capability !== "object" || capability === null) return [];
+      const release = (capability as { release?: unknown }).release;
+      if (typeof release !== "object" || release === null) return [];
+      const symbol = (release as { symbol?: unknown }).symbol;
+      return typeof symbol === "string" ? [symbol] : [];
+    }),
+  );
   const nativeDeclarations = new Set<string>();
   const nativePointerBits = mod.nativeTarget?.pointerBits;
   const validNativeTarget = nativePointerBits === 32 || nativePointerBits === 64;
@@ -2017,11 +2032,71 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         loc: moduleLoc,
       });
     }
+    if (nativeFrameEntrySymbols.has(binding.entry.symbol)) {
+      errors.push({
+        message: `Native IR C symbol "${binding.entry.symbol}" is also a frame-bounded entry`,
+        loc: moduleLoc,
+      });
+    }
     if (ffiSymbols.has(binding.entry.symbol)) {
       errors.push({
         message: `Native IR C symbol "${binding.entry.symbol}" is also declared by the value FFI`,
         loc: moduleLoc,
       });
+    }
+    {
+      const capability = binding.result.frameBounded as unknown;
+      if (capability !== undefined) {
+        const shape = typeof capability === "object" && capability !== null
+          ? capability as { entry?: unknown; release?: unknown }
+          : null;
+        const entry = typeof shape?.entry === "object" && shape.entry !== null
+          ? shape.entry as { symbol?: unknown }
+          : null;
+        const release = typeof shape?.release === "object" && shape.release !== null
+          ? shape.release as { symbol?: unknown }
+          : null;
+        const entrySymbol = entry?.symbol;
+        const releaseSymbol = release?.symbol;
+        const valid =
+          Object.keys(shape ?? {}).sort().join(",") === "entry,release" &&
+          Object.keys(entry ?? {}).join(",") === "symbol" &&
+          Object.keys(release ?? {}).join(",") === "symbol" &&
+          typeof entrySymbol === "string" && cIdentifier.test(entrySymbol) &&
+          typeof releaseSymbol === "string" && cIdentifier.test(releaseSymbol) &&
+          entrySymbol !== binding.entry.symbol && entrySymbol !== releaseSymbol &&
+          binding.result.type.kind === "nativeHandle" &&
+          binding.result.passMode === "pointer" &&
+          binding.result.ownership.kind === "owned" &&
+          binding.result.projection.kind === "direct";
+        if (!valid) {
+          errors.push({
+            message: `Native IR binding "${binding.id}" has an invalid frame-bounded result capability`,
+            loc: moduleLoc,
+          });
+        } else if (
+          declaredNativeEntrySymbols.has(entrySymbol) ||
+          nativeFrameEntrySymbols.has(entrySymbol) ||
+          declaredNativeFrameReleaseSymbols.has(entrySymbol) ||
+          ffiSymbols.has(entrySymbol)
+        ) {
+          errors.push({
+            message: `duplicate Native IR frame-bounded C symbol "${entrySymbol}"`,
+            loc: moduleLoc,
+          });
+        } else {
+          nativeFrameEntrySymbols.add(entrySymbol);
+          if (
+            declaredNativeEntrySymbols.has(releaseSymbol) ||
+            ffiSymbols.has(releaseSymbol)
+          ) {
+            errors.push({
+              message: `Native IR frame-bounded release symbol "${releaseSymbol}" conflicts with a call entry`,
+              loc: moduleLoc,
+            });
+          }
+        }
+      }
     }
     if (binding.declaration.module === "" || binding.declaration.name === "") {
       errors.push({
@@ -4014,6 +4089,9 @@ function validateFunction(
   // return type is frontend breakage (mapType never produces them).
   for (const l of fn.locals) {
     if (isUnitType(l.type)) err(`local "${l.name}" has bare unit type ${l.type.kind}`, fn.loc);
+  }
+  for (const issue of validateNativeFrameResources(fn, nativeById)) {
+    err(issue.message, issue.loc);
   }
   if (isUnitType(fn.returnType)) {
     err(`return type is bare unit type ${fn.returnType.kind}`, fn.loc);

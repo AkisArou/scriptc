@@ -102,6 +102,9 @@ export function emitModule(
 export interface Temp {
   name: string;
   type: IrType;
+  /** Raw frame-bounded foreign resource, owned when present on a statement
+   * frame or scope entry and borrowed on a varRef temp. */
+  nativeFrame?: { release: string };
 }
 
 /** A scope entry: a refcounted local, either held directly or through a
@@ -910,6 +913,13 @@ export class CEmitter {
         `extern ${nativeAbiType(binding.result.type)} ${binding.entry.symbol}(` +
           `${params.length > 0 ? params.join(", ") : "void"});`,
       );
+      if (binding.result.frameBounded !== undefined) {
+        out.push(
+          `extern ${nativeAbiType(binding.result.type)} ${binding.result.frameBounded.entry.symbol}(` +
+            `${params.length > 0 ? params.join(", ") : "void"});`,
+          `extern void ${binding.result.frameBounded.release.symbol}(void *);`,
+        );
+      }
       if (binding.error.message.kind === "symbol") {
         // The accessor and release entries the error contract names are
         // foreign symbols too, and their shapes are fixed by the contract.
@@ -1844,6 +1854,23 @@ export class CEmitter {
     return { name, type };
   }
 
+  /** A raw foreign pointer whose exact release is part of the legalized
+   * result plan. It joins the statement frame before any pending check, just
+   * like an ordinary owned temp, but never allocates a managed handle cell. */
+  newNativeFrameTemp(type: IrType, init: string, release: string): Temp {
+    const name = `sc_t${this.tempCounter++}`;
+    this.line(`void *${name} = ${init};`);
+    const temp = { name, type, nativeFrame: { release } };
+    this.currentFrame().push(temp);
+    return temp;
+  }
+
+  newBorrowedNativeFrameTemp(type: IrType, init: string, release: string): Temp {
+    const name = `sc_t${this.tempCounter++}`;
+    this.line(`void *${name} = ${init};`);
+    return { name, type, nativeFrame: { release } };
+  }
+
   /** newTemp for a MAY-THROW runtime call: the result joins its frame
    * BEFORE the standard pending check, so an unwind releases the dummy
    * (NULL for refcounted kinds) harmlessly and the value is only read past
@@ -1863,7 +1890,7 @@ export class CEmitter {
 
   /** Strike a refcounted temp from its frame: ownership is being moved. */
   moveTemp(t: Temp): void {
-    if (!isRefCounted(t.type)) return;
+    if (t.nativeFrame === undefined && !isRefCounted(t.type)) return;
     for (let i = this.frames.length - 1; i >= 0; i--) {
       const idx = this.frames[i]!.findIndex((e) => e.name === t.name);
       if (idx >= 0) {
@@ -1882,6 +1909,9 @@ export class CEmitter {
   releaseFrame(frame: ScopeEntry[]): void {
     for (const t of frame) {
       if (t.boxed) this.line(`scr_box_release(${t.name});`);
+      else if (t.nativeFrame !== undefined) {
+        this.line(`${t.nativeFrame.release}(${t.name});`);
+      }
       else this.releaseValue(t.name, t.type);
     }
   }

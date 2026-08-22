@@ -688,6 +688,20 @@ export interface IrNativeBinding {
       | { kind: "borrowed"; scope: "receiver"; anchor: string }
       | { kind: "owned"; transfer: "to-runtime"; destructor: string };
     projection: IrNativeResultProjection;
+    /** Optional mechanics for acquiring the same logical handle as a
+     * frame-bounded foreign resource instead of as the stable resource
+     * returned by `entry`.
+     *
+     * The manifest supplies HOW to acquire and release that representation;
+     * it cannot select WHEN it is safe. Escape, suspension and use analysis
+     * belong to the compiler, which records the selected representation on
+     * the call and its local storage in Native IR. This is a result capability
+     * rather than a second binding because both entries implement one source
+     * operation with one failure and argument contract. */
+    frameBounded?: {
+      entry: { symbol: string };
+      release: { symbol: string };
+    };
   };
 }
 
@@ -937,6 +951,11 @@ export interface NativeFrontendBinding {
           readonly destructor: string;
         };
     readonly projection: Readonly<IrNativeResultProjection>;
+    /** See {@link IrNativeBinding.result}. */
+    readonly frameBounded?: {
+      readonly entry: { readonly symbol: string };
+      readonly release: { readonly symbol: string };
+    };
   };
 }
 

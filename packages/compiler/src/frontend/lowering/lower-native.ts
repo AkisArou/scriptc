@@ -1552,6 +1552,14 @@ export function materializeNativeBinding(binding: NativeInputBinding): IrNativeB
       passMode: binding.result.passMode,
       ownership: { ...binding.result.ownership },
       projection: { ...binding.result.projection },
+      ...(binding.result.frameBounded === undefined
+        ? {}
+        : {
+            frameBounded: {
+              entry: { ...binding.result.frameBounded.entry },
+              release: { ...binding.result.frameBounded.release },
+            },
+          }),
     },
   };
 }

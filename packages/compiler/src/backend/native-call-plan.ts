@@ -24,6 +24,7 @@
  */
 import type {
   IrModule,
+  IrExpr,
   IrNativeBinding,
   IrNativeHandleDef,
   IrNativeScalarType,
@@ -971,6 +972,36 @@ export type NativeResultHandleForm = Extract<
   NativeResultForm,
   { kind: "handle" | "handleOrNull" }
 >;
+
+/** Which mechanics entry acquires this call site's result. The binding's
+ * ordinary entry returns a stable resource; a compiler-selected frame result
+ * uses the alternate entry and carries the exact release symbol into scope
+ * cleanup. Selection is made once here so C and LLVM cannot infer escape
+ * independently. */
+export type NativeResultAcquisition =
+  | { readonly kind: "stable"; readonly symbol: string }
+  | {
+      readonly kind: "frameBounded";
+      readonly symbol: string;
+      readonly release: string;
+    };
+
+export function nativeResultAcquisition(
+  binding: IrNativeBinding,
+  form: NativeResultForm,
+  mode: Extract<IrExpr, { kind: "nativeCall" }>["resultMode"],
+): NativeResultAcquisition {
+  if (mode === undefined) return { kind: "stable", symbol: binding.entry.symbol };
+  const frame = binding.result.frameBounded;
+  if (mode !== "frameBounded" || form.kind !== "handle" || frame === undefined) {
+    throw new NativeCallPlanError(binding.id, "invalid frame-bounded result selection");
+  }
+  return {
+    kind: "frameBounded",
+    symbol: frame.entry.symbol,
+    release: frame.release.symbol,
+  };
+}
 
 /**
  * How an owned handle result reaches a managed cell.
