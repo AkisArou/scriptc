@@ -1,21 +1,25 @@
-import { NativeCounter } from "@scriptc/native-abi-fixture";
+import { TickSource, tickMark } from "@scriptc/native-abi-fixture";
 import type { i32 } from "@scriptc/native-abi-fixture";
 import { exit } from "scriptc-native-test";
 
-/* A TypeScript class whose base is a NATIVE class. `docs/native-subclassing.md`
- * makes exactly this the public API for a platform whose application model is
- * subclass-based, so it is what a person writes first — and until the peer's
- * lifetime policy is declared, what they get back has to say which of two
- * things they are looking at.
+/* The member this slice refuses, and the reason it refuses rather than the
+ * fact that it does.
  *
- * Before this refusal existed the message was "extending classes not declared
- * in the program", which is true of the base's TypeScript declaration and
- * sends the reader hunting for a missing import that is already there. */
-class Derived extends NativeCounter {}
+ * An instance field needs a managed PEER to live in — a second object beside
+ * the native one — and a peer needs a declared answer to what keeps it alive
+ * and which platform event ends it. Android has no such declaration yet, so
+ * admitting the field would mean choosing that policy silently, which is the
+ * one thing `docs/native-subclassing.md` forbids.
+ *
+ * A local inside the override has no such question, which is why the message
+ * says so: the program that wants a counter can have one today. */
+class Ticker extends TickSource {
+  private taps = 0;
 
-function run(): i32 {
-  const derived = new Derived(1 as i32);
-  return derived === null ? (1 as i32) : (42 as i32);
+  override onTick(seed: i32): void {
+    this.taps += 1;
+    if (seed > (0 as i32)) tickMark();
+  }
 }
 
-exit(run());
+exit(42 as i32);

@@ -864,3 +864,28 @@ int32_t nts_maybe_fire(int32_t seed) {
   nts_maybe_cb(subject, nts_maybe_ctx);
   return nts_maybe_marks;
 }
+
+/* A registration whose handler is the RECEIVER's own method: the platform
+ * shape where a framework constructs the object and calls a lifecycle member
+ * on it. The callback takes the receiver FIRST and the call's own argument
+ * after, which is the order a lowered method already has — its `this` is
+ * parameter zero. */
+typedef void (*NtsTickCallback)(NtsCounter *self, int32_t seed, void *context);
+
+static NtsTickCallback nts_tick_cb = NULL;
+static void *nts_tick_ctx = NULL;
+static int32_t nts_tick_marks = 0;
+
+void nts_tick_register(NtsTickCallback callback, void *context) {
+  nts_tick_cb = callback;
+  nts_tick_ctx = context;
+}
+
+void nts_tick_mark(void) { nts_tick_marks++; }
+
+int32_t nts_tick_fire(int32_t seed) {
+  nts_tick_marks = 0;
+  NtsCounter *self = nts_counter_create(seed);
+  nts_tick_cb(self, seed, nts_tick_ctx);
+  return nts_tick_marks;
+}

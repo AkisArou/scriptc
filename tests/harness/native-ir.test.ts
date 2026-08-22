@@ -453,6 +453,23 @@ const MAYBE_JUDGE_CONTRACT = {
   ],
 } as const satisfies IrNativeCallbackContract;
 
+/* The receiver arrives as an owned payload and the call's own argument follows
+ * it, which is exactly a lowered method's parameter order. */
+const TICK_CALLBACK = {
+  parameters: [COUNTER, I32, CONTEXT],
+  result: { kind: "void" },
+} as const;
+const TICK_SOURCE_TYPE = nativeCallbackArgumentType(TICK_CALLBACK);
+const TICK_CONTRACT = {
+  owner: { kind: "process" },
+  allowedInvocationExecutors: ["same-as-caller"],
+  synchronousReturn: true,
+  sourceArguments: [
+    { kind: "callback-parameter", parameter: 0, destructor: COUNTER_DESTROY },
+    { kind: "callback-parameter", parameter: 1 },
+  ],
+} as const satisfies IrNativeCallbackContract;
+
 const TELLER_DEFINITION = {
   kind: "handle",
   id: TELLER_ID,
@@ -577,6 +594,7 @@ const localNativeInput: NativeFrontendInput = {
     /* A DOTTED source type: the nested class, whose symbol is reachable only
      * through its owner's VALUE side. */
     { declaration: { module: nativePackage, name: "NativeCounter.Nested" }, type: COUNTER },
+    { declaration: { module: nativePackage, name: "TickSource" }, type: COUNTER },
     {
       declaration: { module: nativePackage, name: "Subscription" },
       type: SUBSCRIPTION,
@@ -1756,6 +1774,69 @@ const localNativeInput: NativeFrontendInput = {
         },
       ],
       result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      /* The platform shape: a registration whose handler is a MEMBER of the
+       * receiver's own class. The callback takes the receiver first and the
+       * call's argument after, which is the order a lowered method already
+       * has — its `this` is parameter zero — so an override lowers straight
+       * into this slot with no adapter between. */
+      id: "scriptc.fixture.c-v1@0.0.0#tick_register",
+      declaration: { module: nativePackage, name: "Ticker.onTick" },
+      entry: { symbol: "nts_tick_register" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      arguments: [
+        { name: "callback", type: TICK_SOURCE_TYPE, callback: TICK_CONTRACT },
+      ],
+      parameters: [
+        {
+          name: "callback",
+          type: { kind: "nativeCallback", signature: TICK_CALLBACK },
+          passMode: "pointer",
+          ownership: { kind: "callback" },
+          projection: { kind: "callbackFunction", argument: 0 },
+        },
+        {
+          name: "context",
+          type: { kind: "nativeContext", addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "callback" },
+          projection: { kind: "callbackContext", argument: 0 },
+        },
+      ],
+      result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#tick_mark",
+      declaration: { module: nativePackage, name: "tickMark" },
+      entry: { symbol: "nts_tick_mark" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([]),
+      result: { type: NATIVE_VOID, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#tick_fire",
+      declaration: { module: nativePackage, name: "tickFire" },
+      entry: { symbol: "nts_tick_fire" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "seed", type: I32, passMode: "value", ownership: { kind: "value" } },
+      ]),
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#tick_value",
+      declaration: { module: nativePackage, name: "TickSource.value" },
+      entry: { symbol: "nts_counter_value" },
+      sourceCall: { kind: "method", receiverArgument: 0 },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "self", type: COUNTER, passMode: "pointer", ownership: { kind: "borrowed", scope: "call" } },
+      ]),
+      result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
     },
     {
       /* A nested class reached as a RESULT and then as a RECEIVER: the first
@@ -4572,7 +4653,7 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
     });
   });
 
-  localFixtureTest("names a native base as specified-not-built, rather than as missing", async () => {
+  localFixtureTest("refuses an instance field by naming what it waits on", async () => {
     const native = frontendNativeInput();
     const result = await compile(
       join(repoRoot, "tests/native-ir/native-base-refused.ts"),
@@ -4628,9 +4709,13 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
      * that declaration is imported and correct — it sends a reader hunting for
      * an import they already wrote. */
     const messages = result.diagnostics.map(({ message }) => message);
+    /* WHICH refusal, and whether it says what to do instead. A field is not
+     * "unsupported on a native base" — it is waiting on a lifetime policy the
+     * platform has not declared, and a local in the override needs none. */
     expect(messages.some((message) =>
-      message.includes("extending the native class 'NativeCounter'") &&
-      message.includes("docs/native-subclassing.md")
+      message.includes("an instance field on 'Ticker'") &&
+      message.includes("docs/native-subclassing.md") &&
+      message.includes("a local inside the override has no such question")
     )).toBe(true);
     expect(messages.some((message) =>
       message.includes("not declared in the program")
@@ -6077,6 +6162,40 @@ describe.each(["c", "llvm"] as const)(
       );
       expect(result.ok ? [] : result.diagnostics).toEqual([]);
       if (!result.ok) throw new Error("nested class compile failed");
+      const run = spawnSync(result.binaryPath);
+      expect({
+        status: run.status,
+        signal: run.signal,
+        stderr: run.stderr.toString(),
+      }).toEqual({ status: 42, signal: null, stderr: "" });
+    });
+  },
+);
+
+describe.each(["c", "llvm"] as const)(
+  "Native IR native base classes, %s backend",
+  (backend) => {
+    localFixtureTest("registers an override and reaches an inherited member through this", async () => {
+      const outDir = join(scratch, `native-subclass-${backend}`);
+      const result = await compile(
+        join(repoRoot, "tests/native-ir/native-subclass.ts"),
+        {
+          outDir,
+          outPath: join(outDir, "program"),
+          backend,
+          emitIr: true,
+          sanitize,
+          externalTypes: nativeExternalTypes(),
+          native: frontendNativeInput(),
+          nativeLinkInputs: [fixtureObject(), supportObject(), retainedSupportObject()],
+        },
+      );
+      expect(result.ok ? [] : result.diagnostics).toEqual([]);
+      if (!result.ok || result.irPath === undefined) {
+        throw new Error("native base class compile failed");
+      }
+      expect(validateModule(deserializeModule(readFileSync(result.irPath, "utf8"))))
+        .toEqual([]);
       const run = spawnSync(result.binaryPath);
       expect({
         status: run.status,

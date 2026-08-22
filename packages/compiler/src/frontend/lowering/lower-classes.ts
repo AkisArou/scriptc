@@ -722,7 +722,7 @@ export function collectClassShape(L: Lowerer, decl: ts.ClassDeclaration): void {
  * missing, and the two deserve different sentences. Resolving through the
  * value symbol is what the surrounding code already does, so a base that is a
  * declared native class is found the same way an unresolvable one is. */
-function nativeBaseHandleName(L: Lowerer, base: ts.Identifier): string | null {
+export function nativeBaseHandleName(L: Lowerer, base: ts.Identifier): string | null {
   const symbol = L.resolveValueSymbol(base);
   if (symbol === null) return null;
   /* An imported base is an ALIAS symbol, and the map is keyed by the
@@ -1112,17 +1112,10 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
            * model is subclass-based, so a person writing an Android activity
            * writes exactly this and deserves to be told which of those two
            * they are looking at. */
-          const nativeBase = ts.isIdentifier(t.expression)
-            ? nativeBaseHandleName(L, t.expression)
-            : null;
           L.unsupported(
             "SC1090",
             t,
-            nativeBase === null
-              ? `extending classes not declared in the program ('${t.expression.text}')`
-              : `extending the native class '${t.expression.text}' — a TypeScript ` +
-                "class may not yet have a native base (see docs/native-subclassing.md; " +
-                "today the platform's registration is called directly)",
+            `extending classes not declared in the program ('${t.expression.text}')`,
           );
         }
       }

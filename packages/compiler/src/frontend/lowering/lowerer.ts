@@ -94,6 +94,7 @@ import {
   withUndefinedArm as withUndefinedArmCanonical,
 } from "../types.js";
 import { CompoundOp, IslandFnEntry, boundaryIntoIslandMsg, boundaryOutOfIslandMsg, BuiltinModuleFn, builtinConstLit, builtinModuleConstOf, builtinModulesArrayLit, builtinFenceHintOf, builtinModuleFnOf, stdlibMemberFence, isStdlibMember, isStdlibSymbol, isStdlibGlobal, stdlibGlobalMember, nodeTypesOnlySymbol } from "./surfaces.js";
+import { nativeSubclassOf, type NativeSubclass } from "./lower-native-subclass.js";
 import { FileParts, splitFiles, collectProgram, collectNpmImports, collectJsonImports, moduleArtifacts, collectGlobals, declSymbolOf, defaultExportSymbolOf, lowerFileInit, lowerDefaultExport, buildMain, appendDynamicImportModules } from "./lower-modules.js";
 import { ClassInfo, ClassIteratorInfo, GenericClassInfo, registerBuiltinErrorClasses, registerBuiltinEmitterClass, registerBuiltinStreamClasses, builtinErrorInfoOf, builtinEmitterInfoOf, builtinStreamInfoOf, analyzeClassDecoration, classIteratorDrainCall, classIteratorNextCall, classIteratorOf, classIteratorOpenCall, classIteratorRestDrainCall, classMemberNameOf, classValueRef, collectClassShape, exactClassOfReceiver, collectClassShapeInner, ctorAbiEquals, findMethodOn, findStaticOn, findGenericMethodOn, findGenericStaticOn, genericClassInstanceType, isSubclassOf, inHierarchy, overrideBelow, staticShadowBelow, upcastTo, lowerClassMembers, lowerClassCtor, lowerClassExpression, lowerClassExpressionInfo, lowerClassMethodMember, lowerClassValueProperty, lowerStaticMethod, throwingSetterFn, fieldInitStmts, lowerStaticFieldInits, lowerStaticFieldRead, lowerDerivedCtorBody, superCallStmt, lowerSuperMethodCall, superThisRef, lowerSuperAccessorRead, lowerSuperAccessorWrite, inheritsBuiltinErrorCtor, inheritsBuiltinEmitterCtor, errorMessageArg, lowerNew, accessorCall } from "./lower-classes.js";
 import { MixinFnShape, mixinCallClassInfoOf, mixinIntersectionInstanceType } from "./lower-mixins.js";
@@ -2384,6 +2385,10 @@ export class Lowerer {
       for (const fp of parts) {
         functions.push(this.lowerFileInit(fp.sf, fp.topStmts, this.initNameOf.get(fp.sf)!));
       }
+      /* The overrides lowered while those inits ran. Appended after them
+       * because a registration statement inside an init refers to the function
+       * by name, and the module carries both. */
+      functions.push(...this.nativeOverrideFunctions);
       functions.push(this.buildMain());
     }
     // Class EXPRESSIONS collected while the inits lowered: their members
@@ -3080,6 +3085,10 @@ export class Lowerer {
       ...instanceFunctions,
       ...this.liftedFns,
       ...this.implicitFns,
+      /* Overrides of native-based classes, lowered while the inits ran. Like
+       * the lifted and implicit functions beside them, they exist because the
+       * lowering made them rather than because the program wrote them. */
+      ...this.nativeOverrideFunctions,
     ];
     this.reachableForArtifacts = reachable;
     return { reachable, result: this.finishModule(functions) };
@@ -7135,7 +7144,23 @@ export class Lowerer {
     }
   }
 
+  /** Classes whose base is a NATIVE class, by the file that declares them, so
+   * each registers when its own module evaluates. */
+  readonly nativeSubclassesByFile = new Map<ts.SourceFile, NativeSubclass[]>();
+
   collectClassShape(decl: ts.ClassDeclaration): void {
+    /* Asked BEFORE ordinary collection, so a native-based class never enters
+     * the ClassInfo machinery: it has no managed base, no fields, no vtable
+     * and no constructor, so every question that machinery answers is one this
+     * shape does not ask. */
+    const nativeSubclass = nativeSubclassOf(this, decl);
+    if (nativeSubclass !== null) {
+      const file = decl.getSourceFile();
+      const declared = this.nativeSubclassesByFile.get(file) ?? [];
+      declared.push(nativeSubclass);
+      this.nativeSubclassesByFile.set(file, declared);
+      return;
+    }
     return collectClassShape(this, decl);
   }
 
@@ -7413,6 +7438,34 @@ export class Lowerer {
 
   /** Declares the `this` param local, registered under the THIS_BINDING
    * sentinel so lexical-this capture in arrows uses the normal machinery. */
+  /** Module functions for the overrides of native-based classes, lowered per
+   * file and appended after the file inits. They are ordinary functions whose
+   * parameter zero is a native handle. */
+  readonly nativeOverrideFunctions: IrFunction[] = [];
+
+  /** A native subclass's overrides run in their own function context, and
+   * these are the two lines that would otherwise be copied to do it. */
+  pushFnCtx(returnType: IrType): void {
+    this.fnStack.push(newFnCtx(false, null, null, returnType));
+  }
+
+  popFnCtx(): void {
+    this.fnStack.pop();
+  }
+
+  /** The binding whose SOURCE DECLARATION is exactly this name.
+   *
+   * An override names its member; the packager named the same member when it
+   * generated and ingested the class, so the two meet at the declaration
+   * identity rather than at a symbol — the class the program writes has no
+   * declaration in any .d.ts to resolve through. */
+  nativeBindingByDeclaredName(name: string): NativeInputBinding | null {
+    for (const binding of this.nativeInput?.bindings ?? []) {
+      if (binding.declaration.name === name) return binding;
+    }
+    return null;
+  }
+
   declareThis(type: IrType): IrLocal {
     const ctx = this.ctx;
     const local: IrLocal = { id: "this.0", name: "this", type, mutable: false };

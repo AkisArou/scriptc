@@ -2,6 +2,7 @@
  * program-collection pass (signatures, classes, globals — reachability
  * seeds), npm/JSON import collection, per-file %init functions, %main, and
  * the module artifacts (globals, embedded npm tables) the IR module carries. */
+import { lowerNativeSubclassRegistrations } from "./lower-native-subclass.js";
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import { dirname as dirnamePath, resolve as resolvePath } from "node:path";
@@ -1890,7 +1891,24 @@ export function collectGlobals(L: Lowerer, sf: ts.SourceFile, topStmts: ts.State
         if (ms && ms.sf === sf) statics.push({ pos: ms.pos, info: c });
       }
       statics.sort((a, b) => a.pos - b.pos);
-      const body = [...header, ...prelude];
+      /* A native-based class registers BEFORE the module's own statements run,
+       * not after them.
+       *
+       * The platform reaches an override through the class rather than through
+       * anything the program does, and it may reach one before the program's
+       * top level has finished — on Android the library loads from the
+       * generated class's static initializer, so a lifecycle call can arrive
+       * while the module is still evaluating. Appending the registration at
+       * the end models a program that registers itself, which is exactly the
+       * shape this spelling exists to stop being.
+       *
+       * Placed after the run-once guard so a re-entered module still registers
+       * once. */
+      const nativeSubclasses = L.nativeSubclassesByFile.get(sf);
+      const registrations = nativeSubclasses === undefined
+        ? []
+        : lowerNativeSubclassRegistrations(L, nativeSubclasses);
+      const body = [...header, ...registrations, ...prelude];
       let at = 0;
       for (const stmt of stmts) {
         // `<=`: a mixin instantiation's position IS its statement's start

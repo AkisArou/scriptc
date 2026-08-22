@@ -133,6 +133,20 @@ export declare namespace NativeCounter {
 }
 
 export declare function makeNested(initialValue: i32): NativeCounter.Nested;
+
+/* A native class a TypeScript class may EXTEND. The platform shape: the
+ * framework constructs the object and calls a member on it, so the program
+ * declares the member rather than registering a function, and `this` is the
+ * object the framework made. */
+export declare class TickSource {
+  value(): i32;
+  /* The member a subclass overrides. A platform base really does declare its
+   * lifecycle members — Activity declares onCreate — so `override` is legal
+   * for the ordinary TypeScript reason rather than by special arrangement. */
+  onTick(seed: i32): void;
+}
+export declare function tickMark(): void;
+export declare function tickFire(seed: i32): i32;
 export declare function useNested(nested: NativeCounter.Nested): i32;
 
 /* Reports failure by returning an owned error object rather than a code, the
