@@ -716,6 +716,25 @@ export function collectClassShape(L: Lowerer, decl: ts.ClassDeclaration): void {
     }
   }
 
+/** The native handle type a base-class identifier names, or null.
+ *
+ * Asked only on the refusal path: a native base is SPECIFIED rather than
+ * missing, and the two deserve different sentences. Resolving through the
+ * value symbol is what the surrounding code already does, so a base that is a
+ * declared native class is found the same way an unresolvable one is. */
+function nativeBaseHandleName(L: Lowerer, base: ts.Identifier): string | null {
+  const symbol = L.resolveValueSymbol(base);
+  if (symbol === null) return null;
+  /* An imported base is an ALIAS symbol, and the map is keyed by the
+   * declaration's own — the same resolution `nativeTypeOf` performs, for the
+   * same reason: every native base worth naming arrives through an import. */
+  const resolved = symbol.flags & ts.SymbolFlags.Alias
+    ? L.checker.getAliasedSymbol(symbol)
+    : symbol;
+  const declared = L.nativeTypesBySymbol.get(resolved);
+  return declared?.kind === "nativeHandle" ? declared.typeId : null;
+}
+
 export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration, jsNameOverride?: string,
     inst?: { family: ClassInfo; name: string; bindings: Map<ts.Symbol, IrType>; typeArgsText: string; ordinal: number },
     /** MIXIN instantiation mode (lower-mixins.ts): the class inside a
@@ -1086,10 +1105,24 @@ export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration
         if (t.typeArguments) L.unsupported("SC1090", t, "extending generic classes");
         base = named;
         if (!base) {
+          /* A NATIVE base is a different refusal from a missing one, and
+           * saying so is the difference between "you forgot an import" and
+           * "this is specified and not yet built". `docs/native-subclassing.md`
+           * makes the subclass the public API for a platform whose application
+           * model is subclass-based, so a person writing an Android activity
+           * writes exactly this and deserves to be told which of those two
+           * they are looking at. */
+          const nativeBase = ts.isIdentifier(t.expression)
+            ? nativeBaseHandleName(L, t.expression)
+            : null;
           L.unsupported(
             "SC1090",
             t,
-            `extending classes not declared in the program ('${t.expression.text}')`,
+            nativeBase === null
+              ? `extending classes not declared in the program ('${t.expression.text}')`
+              : `extending the native class '${t.expression.text}' — a TypeScript ` +
+                "class may not yet have a native base (see docs/native-subclassing.md; " +
+                "today the platform's registration is called directly)",
           );
         }
       }

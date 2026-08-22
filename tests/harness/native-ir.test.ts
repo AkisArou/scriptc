@@ -4471,6 +4471,71 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
     });
   });
 
+  localFixtureTest("names a native base as specified-not-built, rather than as missing", async () => {
+    const native = frontendNativeInput();
+    const result = await compile(
+      join(repoRoot, "tests/native-ir/native-base-refused.ts"),
+      {
+        outDir: join(scratch, `native-base-refused-${backend}`),
+        outPath: join(scratch, `native-base-refused-${backend}`, "program"),
+        backend,
+        sanitize,
+        externalTypes: nativeExternalTypes(),
+        native: {
+          ...native,
+          sourceTypes: [
+            ...native.sourceTypes,
+            {
+              declaration: { module: nativePackage, name: "NativeCounter" },
+              type: COUNTER,
+            },
+          ],
+          bindings: [
+            ...native.bindings,
+            {
+              id: "scriptc.fixture.c-v1@0.0.0#counter_construct",
+              declaration: { module: nativePackage, name: "NativeCounter" },
+              entry: { symbol: "nts_counter_create_with_initial_value" },
+              sourceCall: { kind: "constructor" },
+              error: NO_NATIVE_ERROR,
+              ...directSignature([{
+                name: "initial_value",
+                type: I32,
+                passMode: "value",
+                ownership: { kind: "value" },
+              }]),
+              result: {
+                type: COUNTER,
+                passMode: "pointer" as const,
+                ownership: {
+                  kind: "owned" as const,
+                  transfer: "to-runtime" as const,
+                  destructor: "scriptc.fixture.c-v1@0.0.0#counter_destroy",
+                },
+                projection: DIRECT_RESULT,
+              },
+            },
+          ],
+        },
+        nativeLinkInputs: [fixtureObject(), supportObject()],
+      },
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("a native base compiled");
+    /* WHICH refusal is the whole point. The old message described the base's
+     * TypeScript declaration as absent, which is both true and useless when
+     * that declaration is imported and correct — it sends a reader hunting for
+     * an import they already wrote. */
+    const messages = result.diagnostics.map(({ message }) => message);
+    expect(messages.some((message) =>
+      message.includes("extending the native class 'NativeCounter'") &&
+      message.includes("docs/native-subclassing.md")
+    )).toBe(true);
+    expect(messages.some((message) =>
+      message.includes("not declared in the program")
+    )).toBe(false);
+  });
+
   localFixtureTest("lowers native class construction and static factories through a namespace import", async () => {
     const destructor = "scriptc.fixture.c-v1@0.0.0#counter_destroy";
     const resultType = {
@@ -4937,6 +5002,33 @@ describe.each(["c", "llvm"] as const)("Native IR checked-number boundary, %s bac
       signal: null,
       stderr: "",
     });
+  });
+
+  localFixtureTest("refuses the decimal spelling of a bit pattern it admits in hex", async () => {
+    const outDir = join(scratch, `bit-pattern-decimal-${backend}`);
+    const result = await compile(
+      join(repoRoot, "tests/native-ir/bit-pattern-decimal-refused.ts"),
+      {
+        outDir,
+        outPath: join(outDir, "program"),
+        backend,
+        sanitize,
+        externalTypes: nativeExternalTypes(),
+        native: frontendNativeInput(),
+        nativeLinkInputs: [fixtureObject(), supportObject()],
+      },
+    );
+    /* Without this the rule would read as "large literals are fine now", and
+     * the next person would widen it to computed values, where nobody can see
+     * what width the bits were meant for. */
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("a decimal quantity out of range must not compile");
+    expect(
+      result.diagnostics.some((diagnostic) =>
+        diagnostic.message.includes("which no 'i32' value represents") &&
+        diagnostic.message.includes("hex, binary or octal")
+      ),
+    ).toBe(true);
   });
 
   localFixtureTest("refuses a literal argument no native value can hold", async () => {
@@ -5821,6 +5913,35 @@ describe.each(["c", "llvm"] as const)(
       );
       expect(result.ok ? [] : result.diagnostics).toEqual([]);
       if (!result.ok) throw new Error("number-declared constant compile failed");
+      const run = spawnSync(result.binaryPath);
+      expect({
+        status: run.status,
+        signal: run.signal,
+        stderr: run.stderr.toString(),
+      }).toEqual({ status: 42, signal: null, stderr: "" });
+    });
+  },
+);
+
+describe.each(["c", "llvm"] as const)(
+  "Native IR bit-pattern literals, %s backend",
+  (backend) => {
+    test("admits a radix-spelled literal that fills a signed slot", async () => {
+      const outDir = join(scratch, `bit-pattern-${backend}`);
+      const result = await compile(
+        join(repoRoot, "tests/native-ir/bit-pattern-literal.ts"),
+        {
+          outDir,
+          outPath: join(outDir, "program"),
+          backend,
+          sanitize,
+          externalTypes: nativeExternalTypes(),
+          native: frontendNativeInput(),
+          nativeLinkInputs: [fixtureObject(), supportObject()],
+        },
+      );
+      expect(result.ok ? [] : result.diagnostics).toEqual([]);
+      if (!result.ok) throw new Error("bit-pattern literal compile failed");
       const run = spawnSync(result.binaryPath);
       expect({
         status: run.status,

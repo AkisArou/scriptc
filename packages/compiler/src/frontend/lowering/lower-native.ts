@@ -683,8 +683,17 @@ function lowerNativeInvocation(
     }
     argumentNodes.splice(binding.sourceCall.receiverArgument, 0, receiver);
   }
-  refuseUnprovableNumberLiterals(L, binding, argumentNodes);
+  const reinterpreted = refuseUnprovableNumberLiterals(L, binding, argumentNodes);
   const args = argumentNodes.map((argument, index) => {
+    /* A bit pattern admitted above crosses as the value those bits name in
+     * this slot. Rewriting it HERE rather than at the boundary keeps the
+     * decision where the width is known: the emitters then prove the literal
+     * like any other and drop the conversion entirely, which is the same
+     * treatment `0x7F000000` already got for being one bit smaller. */
+    const signed = reinterpreted.get(index);
+    if (signed !== undefined) {
+      return { kind: "numLit" as const, value: signed, type: F64, loc: locOf(argument) };
+    }
     const expected = binding.arguments[index]!.type;
     /* The three nullable source forms are unions the call site may narrow, so
      * they are lowered from the CONTEXTUAL type below rather than against one
@@ -1012,6 +1021,21 @@ export function lowerNativeConstruct(L: Lowerer, expr: ts.NewExpression): IrExpr
  * unary sign a caller may spell it with. Every literal spelling — decimal,
  * hex, exponent, separator — reaches the emitter as the same folded double,
  * so the frontend reads the folded value rather than the source text. */
+/** A literal written in hex, binary or octal — a BIT PATTERN spelling.
+ *
+ * Radix-prefixed spellings name bits; decimal names a quantity. Every language
+ * with both draws that line, and Java draws it in the grammar: `int x =
+ * 0xFF000000;` compiles and means -16777216, while `int x = 4278190080;` is
+ * "integer number too large" (JLS 3.10.1). A program writing a colour, a mask
+ * or a flag set writes the bits, and the slot it writes them into is the same
+ * width either way. */
+function radixSpelledLiteral(node: ts.Expression): boolean {
+  let expression = node;
+  while (ts.isParenthesizedExpression(expression)) expression = expression.expression;
+  if (!ts.isNumericLiteral(expression)) return false;
+  return /^0[xXbBoO]/.test(expression.getText());
+}
+
 function numericLiteralValue(node: ts.Expression): number | null {
   let expression = node;
   while (ts.isParenthesizedExpression(expression)) expression = expression.expression;
@@ -1027,6 +1051,25 @@ function numericLiteralValue(node: ts.Expression): number | null {
   return sign * Number(expression.text);
 }
 
+/** The signed value a radix-spelled literal names when it fills the slot from
+ * the top, or null when this is not that case.
+ *
+ * Only a SIGNED slot has an unreachable upper half to reinterpret: in an
+ * unsigned one the same bits are already the value the literal states, so
+ * `provenNumberLiteral` has admitted it before this is asked. */
+function twosComplementLiteral(
+  node: ts.Expression,
+  value: number,
+  info: { min: bigint; max: bigint; bits: number },
+): number | null {
+  if (info.min >= 0n || !radixSpelledLiteral(node)) return null;
+  if (!Number.isInteger(value) || value < 0) return null;
+  const exact = BigInt(value);
+  const span = 1n << BigInt(info.bits);
+  if (exact <= info.max || exact >= span) return null;
+  return Number(exact - span);
+}
+
 /* A checked-number parameter converts at run time, but a literal argument is
  * decided at compile time: either the emitters prove it and drop the check
  * entirely, or no value of the native type can hold it and the call could
@@ -1036,7 +1079,8 @@ function refuseUnprovableNumberLiterals(
   L: Lowerer,
   binding: NativeInputBinding,
   argumentNodes: readonly ts.Expression[],
-): void {
+): ReadonlyMap<number, number> {
+  const reinterpreted = new Map<number, number>();
   for (const parameter of binding.parameters) {
     if (
       parameter.projection.kind !== "number" ||
@@ -1055,16 +1099,33 @@ function refuseUnprovableNumberLiterals(
     /* Only an integer slot can disprove a literal. A float slot holds every
      * number a caller can write — NaN and the infinities included, and the
      * rest by rounding — so there is nothing here to refuse. */
-    if (nativeIntegerInfo(parameter.type.scalar, pointerBits) === null) continue;
+    const info = nativeIntegerInfo(parameter.type.scalar, pointerBits);
+    if (info === null) continue;
     if (provenNumberLiteral(value, parameter.type.scalar, pointerBits) !== null) continue;
+    /* A bit pattern that fills the slot is not out of range, it is written
+     * from the other end. `0xFF000000` in a 32-bit signed slot is the colour
+     * every Android program writes, and refusing it taught `| 0` — a spelling
+     * that means "reinterpret" and reads as arithmetic.
+     *
+     * Admitted for the RADIX spellings only, which is the line Java's own
+     * grammar draws for the same slot, and only for a literal written at the
+     * call: a computed value stays strict, because the moment it is computed
+     * nobody can see what width it was meant for. */
+    const signed = twosComplementLiteral(node, value, info);
+    if (signed !== null) {
+      reinterpreted.set(parameter.projection.argument, signed);
+      continue;
+    }
     failSignature(
       L,
       binding,
       `argument ${parameter.projection.argument + 1} is the literal ${String(value)}, ` +
-        `which no '${parameter.type.scalar}' value represents, so this call could only throw`,
+        `which no '${parameter.type.scalar}' value represents, so this call could only ` +
+        `throw (a bit pattern this wide is admitted written as hex, binary or octal)`,
       locOf(node),
     );
   }
+  return reinterpreted;
 }
 
 function exactIntegerLiteral(
