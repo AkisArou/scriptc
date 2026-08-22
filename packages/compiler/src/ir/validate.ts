@@ -1755,6 +1755,23 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     }
     const ownerKind = (owner as { kind?: unknown }).kind;
     if (ownerKind === "call") {
+      /* A call-scoped delivery reads its payloads and invokes; it does not
+       * build a managed cell, because nothing outlives the call for a cell to
+       * own. So a HANDLE payload has no form here: the trampoline would hand
+       * the handler the foreign pointer where a cell is expected, which is a
+       * type confusion no diagnostic reports.
+       *
+       * Refused rather than left to the emitter, and refused here rather than
+       * relied upon elsewhere: the SCABI translator already rejects a
+       * non-scalar call-scoped payload, so no manifest can reach this — but
+       * this validator is the backstop for a FRONTEND bug, and a backstop that
+       * only holds while another layer is correct is not one. The distinction
+       * matters: a guard covering a defect in another component is meant to be
+       * uninhabited in a healthy system, which is not the same as a guard whose
+       * subject that component prevents from arising. */
+      if (type.params.some((parameter) => handlePayloadArm(parameter))) {
+        return false;
+      }
       return Object.keys(candidate).sort().join(",") ===
           "allowedInvocationExecutors,owner,sourceArguments,synchronousReturn" &&
         Object.keys(owner).length === 1 &&

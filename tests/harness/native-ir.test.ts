@@ -3460,6 +3460,63 @@ test("Native IR validates exact integer-backed boolean parameters", () => {
   );
 });
 
+test("Native IR refuses a handle payload on a call-scoped delivery", () => {
+  /* The call-scoped trampoline READS its payloads and invokes; it builds no
+   * managed cell, because nothing outlives the call for a cell to own. A
+   * handle payload therefore has no form there — the handler would receive the
+   * foreign pointer where a cell is expected, which is a type confusion no
+   * diagnostic reports.
+   *
+   * The SCABI translator already refuses a non-scalar call-scoped payload, so
+   * no manifest reaches this. That is exactly why it is worth asserting here:
+   * this validator is the backstop for a FRONTEND bug, and a backstop that
+   * holds only while another layer is correct is not one. */
+  const mod = exactI32Module();
+  mod.nativeTypes = [COUNTER_DEFINITION, COUNTER_MIDDLE_DEFINITION, COUNTER_BASE_DEFINITION];
+  mod.nativeBindings = [{
+    id: "scriptc.fixture.c-v1@0.0.0#call_scoped_handle",
+    declaration: { module: nativePackage, name: "callScopedHandle" },
+    sourceAccess: "call",
+    entry: { symbol: "nts_call_scoped" },
+    error: NO_NATIVE_ERROR,
+    arguments: [{
+      name: "callback",
+      type: {
+        ...nativeCallbackArgumentType({ parameters: [COUNTER, CONTEXT], result: I32 }),
+      },
+      callback: {
+        owner: { kind: "call" },
+        allowedInvocationExecutors: ["same-as-caller"],
+        synchronousReturn: true,
+        sourceArguments: [
+          { kind: "callback-parameter", parameter: 0, destructor: COUNTER_DESTROY },
+        ],
+      },
+    }],
+    parameters: [
+      {
+        name: "callback",
+        type: { kind: "nativeCallback", signature: { parameters: [COUNTER, CONTEXT], result: I32 } },
+        passMode: "pointer",
+        ownership: { kind: "callback" },
+        projection: { kind: "callbackFunction", argument: 0 },
+      },
+      {
+        name: "context",
+        type: { kind: "nativeContext", addressSpace: 0 },
+        passMode: "pointer",
+        ownership: { kind: "callback" },
+        projection: { kind: "callbackContext", argument: 0 },
+      },
+    ],
+    result: { type: I32, passMode: "value", ownership: { kind: "value" }, projection: DIRECT_RESULT },
+  }];
+  expect(validateModule(mod).map(({ message }) => message)).toContain(
+    `Native IR binding "scriptc.fixture.c-v1@0.0.0#call_scoped_handle" argument ` +
+      `"callback" has an invalid callback contract`,
+  );
+});
+
 test("Native IR validates explicit identity handle upcast graphs", () => {
   const base = {
     ...COUNTER_DEFINITION,
