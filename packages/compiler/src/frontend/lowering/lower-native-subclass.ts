@@ -32,7 +32,7 @@ import type { IrExpr, IrFunction, IrParam, IrStmt, IrType, SrcLoc } from "../../
 import { nativeCallbackIsOwnerScoped, VOID } from "../../ir/nodes.js";
 import { locOf } from "../program.js";
 import * as ts from "../ts7/adapter.js";
-import { nativeBaseHandleName } from "./lower-classes.js";
+import { nativeBaseHandleName, nativeBaseSymbol } from "./lower-classes.js";
 import { lowerNativeBaseCall } from "./lower-native.js";
 import type { Lowerer } from "./lowerer.js";
 
@@ -96,10 +96,7 @@ export function nativeBaseOf(L: Lowerer, decl: ts.ClassDeclaration): NativeBase 
       subclass: { decl, className: decl.name.text, handleTypeId },
     };
   }
-  const symbol = L.resolveValueSymbol(base);
-  const resolved = symbol !== null && symbol.flags & ts.SymbolFlags.Alias
-    ? L.checker.getAliasedSymbol(symbol)
-    : symbol;
+  const resolved = nativeBaseSymbol(L, base);
   if (resolved === null) return { kind: "managed" };
   const declaredBySurface = L.checker
     .declarationsOf(resolved)

@@ -723,16 +723,28 @@ export function collectClassShape(L: Lowerer, decl: ts.ClassDeclaration): void {
  * value symbol is what the surrounding code already does, so a base that is a
  * declared native class is found the same way an unresolvable one is. */
 export function nativeBaseHandleName(L: Lowerer, base: ts.Identifier): string | null {
-  const symbol = L.resolveValueSymbol(base);
-  if (symbol === null) return null;
-  /* An imported base is an ALIAS symbol, and the map is keyed by the
-   * declaration's own — the same resolution `nativeTypeOf` performs, for the
-   * same reason: every native base worth naming arrives through an import. */
-  const resolved = symbol.flags & ts.SymbolFlags.Alias
-    ? L.checker.getAliasedSymbol(symbol)
-    : symbol;
+  const resolved = nativeBaseSymbol(L, base);
+  if (resolved === null) return null;
   const declared = L.nativeTypesBySymbol.get(resolved);
   return declared?.kind === "nativeHandle" ? declared.typeId : null;
+}
+
+/** The declaration symbol a heritage clause's base identifier names.
+ *
+ * Separate from the lookup above because the refusal path needs the same
+ * symbol to ask a DIFFERENT question — whether the surface declares this class
+ * at all — and resolving it twice would be two spellings of one convention,
+ * which is how the two answers drift apart.
+ *
+ * An imported base is an ALIAS symbol and the map is keyed by the
+ * declaration's own, which is the resolution `nativeTypeOf` performs for the
+ * same reason: every native base worth naming arrives through an import. */
+export function nativeBaseSymbol(L: Lowerer, base: ts.Identifier): ts.Symbol | null {
+  const symbol = L.resolveValueSymbol(base);
+  if (symbol === null) return null;
+  return symbol.flags & ts.SymbolFlags.Alias
+    ? L.checker.getAliasedSymbol(symbol)
+    : symbol;
 }
 
 export function collectClassShapeInner(L: Lowerer, decl: ts.ClassLikeDeclaration, jsNameOverride?: string,
