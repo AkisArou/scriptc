@@ -1024,6 +1024,12 @@ export function nativeResultHandle(
       absent: { unionId: form.unionId, presentTag: form.handleTag, nullTag: form.nullTag },
     };
   }
+  /* ONLY `pointer` interns, and the other arms are not weaker versions of it.
+   * A platform whose references cannot be compared for identity — JNI, where
+   * two global refs to one object are distinct pointers — declares `none` and
+   * gets a fresh cell per arrival. Anything needing managed state to survive
+   * across arrivals must carry its own association; this map will not find
+   * it. */
   const interns = form.definition.identity === "pointer";
   return {
     definition: form.definition,
