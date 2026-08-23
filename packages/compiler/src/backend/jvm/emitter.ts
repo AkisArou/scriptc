@@ -79,11 +79,33 @@ export type JvmDirectBinding =
         readonly bindingId: string;
         readonly nativeEntrySymbol: string;
       };
+    }
+  | {
+      readonly id: string;
+      readonly kind: "class-callback";
+      readonly ownerBinaryName: string;
+      readonly sourceClassName: string;
+      readonly superclassBinaryName: string;
+      readonly interfaceBinaryNames: readonly string[];
+      readonly name: string;
+      readonly descriptor: string;
+      readonly nativeEntrySymbol: string;
+      readonly baseCall: {
+        readonly bindingId: string;
+        readonly name: string;
+        readonly descriptor: string;
+      } | null;
+      readonly terminal: boolean;
     };
 
 type JvmDirectCallbackBinding = Extract<
   JvmDirectBinding,
   { readonly kind: "instance-callback" }
+>;
+
+type JvmDirectClassCallbackBinding = Extract<
+  JvmDirectBinding,
+  { readonly kind: "class-callback" }
 >;
 
 interface JvmDirectCallbackPlan {
@@ -105,6 +127,17 @@ interface JvmDirectCallbackSitePlan {
   readonly registerName: string;
   readonly handlerName: string;
   readonly captures: readonly JvmDirectCallbackCapturePlan[];
+}
+
+interface JvmDirectClassCallbackPlan {
+  readonly binding: JvmDirectClassCallbackBinding;
+  readonly descriptor: JvmMethodDescriptor;
+}
+
+interface JvmDirectClassCallbackSitePlan {
+  readonly callback: JvmDirectClassCallbackPlan;
+  readonly index: number;
+  readonly handlerName: string;
 }
 
 function assertJavaIdentifier(value: string, role: string): void {
@@ -276,6 +309,7 @@ class JavaEmitter {
   readonly #irNativeBindings: ReadonlyMap<string, IrNativeBinding>;
   readonly #jvmNativeBindings: ReadonlyMap<string, JvmDirectBinding>;
   readonly #directCallbacks: readonly JvmDirectCallbackPlan[];
+  readonly #directClassCallbacks: readonly JvmDirectClassCallbackPlan[];
   readonly #directCallbackByOwner: ReadonlyMap<string, JvmDirectCallbackPlan>;
   readonly #directCancellationBindings: ReadonlyMap<string, {
     readonly nativeEntrySymbol: string;
@@ -284,6 +318,7 @@ class JavaEmitter {
   readonly #directConnectionTypeIds: ReadonlySet<string>;
   readonly #machineIntegers: MachineIntegerFacts;
   readonly #directCallbackSites: JvmDirectCallbackSitePlan[] = [];
+  readonly #directClassCallbackSites: JvmDirectClassCallbackSitePlan[] = [];
   #integerLocals: ReadonlySet<string> = new Set();
   #mutableBoxedLocals: ReadonlySet<string> = new Set();
   #currentFunction: IrFunction | null = null;
@@ -318,6 +353,49 @@ class JavaEmitter {
           descriptor: parseJvmMethodDescriptor(binding.descriptor),
         })),
     );
+    this.#directClassCallbacks = Object.freeze(
+      (options.nativeBindings ?? [])
+        .filter((binding): binding is JvmDirectClassCallbackBinding =>
+          binding.kind === "class-callback" &&
+          this.#irNativeBindings.has(binding.id)
+        )
+        .sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0)
+        .map((binding) => Object.freeze({
+          binding,
+          descriptor: parseJvmMethodDescriptor(binding.descriptor),
+        })),
+    );
+    const directSubclass = this.#directClassCallbacks[0]?.binding;
+    if (directSubclass !== undefined) {
+      const emittedBinaryName =
+        (options.packageName === undefined || options.packageName.length === 0
+          ? ""
+          : `${options.packageName.replaceAll(".", "/")}/`) +
+        options.className;
+      if (directSubclass.ownerBinaryName !== emittedBinaryName) {
+        throw new Error(
+          `JVM direct subclass '${directSubclass.ownerBinaryName}' must be emitted ` +
+            `as '${emittedBinaryName}', not as an unrelated wrapper class`,
+        );
+      }
+      for (const callback of this.#directClassCallbacks.slice(1)) {
+        const candidate = callback.binding;
+        if (
+          candidate.ownerBinaryName !== directSubclass.ownerBinaryName ||
+          candidate.sourceClassName !== directSubclass.sourceClassName ||
+          candidate.superclassBinaryName !== directSubclass.superclassBinaryName ||
+          candidate.interfaceBinaryNames.length !==
+            directSubclass.interfaceBinaryNames.length ||
+          candidate.interfaceBinaryNames.some(
+            (name, index) => name !== directSubclass.interfaceBinaryNames[index],
+          )
+        ) {
+          throw new Error(
+            "One JVM Java source can replace exactly one generated native subclass",
+          );
+        }
+      }
+    }
     const callbackByOwner = new Map<string, JvmDirectCallbackPlan>();
     const cancellationBindings = new Map<string, {
       readonly nativeEntrySymbol: string;
@@ -383,7 +461,15 @@ class JavaEmitter {
     if (this.#options.packageName !== undefined && this.#options.packageName.length > 0) {
       lines.push(`package ${this.#options.packageName};`, "");
     }
-    lines.push(`public final class ${this.#options.className} {`);
+    const directSubclass = this.#directClassCallbacks[0]?.binding;
+    const inheritance = directSubclass === undefined
+      ? ""
+      : ` extends ${javaOwner(directSubclass.superclassBinaryName)}${
+          directSubclass.interfaceBinaryNames.length === 0
+            ? ""
+            : ` implements ${directSubclass.interfaceBinaryNames.map(javaOwner).join(", ")}`
+        }`;
+    lines.push(`public final class ${this.#options.className}${inheritance} {`);
     lines.push(
       "  private static long ntsToUint32(double value) {",
       "    if (!Double.isFinite(value) || value == 0.0d) return 0L;",
@@ -420,6 +506,7 @@ class JavaEmitter {
     }
 
     lines.push(...this.#emitDirectCallbackSupport());
+    lines.push(...this.#emitDirectClassCallbackSupport());
 
     for (const exported of this.#options.functionExports ?? []) {
       const fn = this.#functions.get(exported.functionName);
@@ -515,6 +602,10 @@ class JavaEmitter {
   #emitManagedClassSupport(): string[] {
     const lines: string[] = [];
     for (const class_ of this.#classes.values()) {
+      if (class_ === this.#directPeerClass()) {
+        lines.push(...this.#emitDirectPeerSupport(class_));
+        continue;
+      }
       if (class_.genericOf !== undefined) {
         throw new JvmUnsupportedError("generic class families", class_.loc);
       }
@@ -616,6 +707,67 @@ class JavaEmitter {
       }
     }
     return lines;
+  }
+
+  /** A native backend needs a second managed object because the foreign
+   * receiver stores no ScriptC layout. A direct JVM subclass already IS an
+   * ordinary traced Java object, so its TypeScript peer fields live on that
+   * receiver and attach reduces to one-time field initialization. */
+  #emitDirectPeerSupport(class_: IrClassDef): string[] {
+    if (class_.genericOf !== undefined || class_.base !== undefined) {
+      throw new JvmUnsupportedError(
+        `direct native peer class '${class_.name}' with managed inheritance`,
+        class_.loc,
+      );
+    }
+    const constructor = this.#functions.get(`%${class_.name}.constructor`);
+    if (
+      constructor === undefined ||
+      constructor.params.length !== 2 ||
+      constructor.params[0]?.type.kind !== "object" ||
+      constructor.params[0].type.className !== class_.name ||
+      constructor.params[1]?.type.kind !== "nativeHandle" ||
+      constructor.returnType.kind !== "void"
+    ) {
+      throw new Error(
+        `JVM direct peer '${class_.name}' has no exact peer constructor`,
+      );
+    }
+    const lines: string[] = [];
+    for (const field of class_.fields) {
+      lines.push(
+        `  private ${
+          this.#integerField(class_.name, field.name)
+            ? "int"
+            : this.#javaType(field.type, class_.loc)
+        } ${this.#managedFieldName(field.name)};`,
+      );
+    }
+    if (class_.fields.length > 0) lines.push("");
+    lines.push(
+      "  private boolean ntsPeerAttached;",
+      "",
+      `  private ${this.#options.className} ntsPeer() {`,
+      "    if (!this.ntsPeerAttached) {",
+      `      ${encodedIdentifier("f", constructor.name)}(this, this);`,
+      "      this.ntsPeerAttached = true;",
+      "    }",
+      "    return this;",
+      "  }",
+      "",
+      "  private void ntsDetachPeer() {",
+      "    // The peer is this Java receiver; ART owns its reachability.",
+      "  }",
+      "",
+    );
+    return lines;
+  }
+
+  #directPeerClass(): IrClassDef | undefined {
+    const sourceClassName = this.#directClassCallbacks[0]?.binding.sourceClassName;
+    return sourceClassName === undefined
+      ? undefined
+      : this.#classes.get(sourceClassName);
   }
 
   #ancestorDeclaresMethod(class_: IrClassDef, method: string): boolean {
@@ -733,6 +885,75 @@ class JavaEmitter {
         )});`,
         "      }",
         "    }",
+        "  }",
+        "",
+      );
+    }
+    return lines;
+  }
+
+  /** A class-anchored registration is how the native backends connect a
+   * platform-created receiver to a TypeScript override. In a JVM artifact the
+   * generated Java class and the checked implementation are the same class:
+   * emit the virtual override directly and turn the registration expression
+   * in module initialization into an inert, verifiable marker. */
+  #emitDirectClassCallbackSupport(): string[] {
+    if (this.#directClassCallbacks.length === 0) return [];
+    const lines: string[] = [];
+    const emittedBaseCalls = new Set<string>();
+    for (const callback of this.#directClassCallbacks) {
+      const site = this.#directClassCallbackSites.find(
+        (candidate) => candidate.callback.binding.id === callback.binding.id,
+      );
+      if (site === undefined) {
+        throw new Error(
+          `JVM direct class callback '${callback.binding.id}' has no registration site`,
+        );
+      }
+      if (callback.descriptor.result !== "V") {
+        throw new JvmUnsupportedError(
+          `answered direct class callback '${callback.binding.name}'`,
+          this.#functions.get(this.#module.entry)!.loc,
+        );
+      }
+      assertJavaIdentifier(callback.binding.name, "direct class callback name");
+      const parameters = callback.descriptor.parameters.map((descriptor, index) =>
+        `${javaDescriptorType(descriptor)} a${index}`
+      );
+      const arguments_ = callback.descriptor.parameters.map((_, index) => `a${index}`);
+      lines.push(
+        `  private static void ntsRegisterClassCallback${site.index}() {`,
+        "  }",
+        "",
+        "  @Override",
+        `  public void ${callback.binding.name}(${parameters.join(", ")}) {`,
+        `    ${site.handlerName}(this${
+          arguments_.length === 0 ? "" : `, ${arguments_.join(", ")}`
+        });`,
+        "  }",
+        "",
+      );
+
+      const baseCall = callback.binding.baseCall;
+      if (baseCall === null || emittedBaseCalls.has(baseCall.bindingId)) continue;
+      const direct = this.#jvmNativeBindings.get(baseCall.bindingId);
+      if (
+        direct === undefined ||
+        direct.kind !== "instance-method" ||
+        direct.ownerBinaryName !== callback.binding.ownerBinaryName ||
+        direct.name !== baseCall.name ||
+        direct.descriptor !== baseCall.descriptor ||
+        baseCall.descriptor !== callback.binding.descriptor
+      ) {
+        throw new Error(
+          `JVM direct class callback '${callback.binding.id}' has an invalid base-call coordinate`,
+        );
+      }
+      assertJavaIdentifier(baseCall.name, "direct class base-call name");
+      emittedBaseCalls.add(baseCall.bindingId);
+      lines.push(
+        `  public void ${baseCall.name}(${parameters.join(", ")}) {`,
+        `    super.${callback.binding.name}(${arguments_.join(", ")});`,
         "  }",
         "",
       );
@@ -873,6 +1094,48 @@ class JavaEmitter {
         for (const child of stmt.body) lines.push(...this.#stmt(fn, child, depth + 1));
         lines.push(`${pad}}`);
         return lines;
+      }
+      case "tryCatch": {
+        if (
+          stmt.catchBody !== null ||
+          stmt.catchLocalId !== null ||
+          stmt.finallyBody === null
+        ) {
+          throw new JvmUnsupportedError(
+            "try/catch outside a generated native-peer terminal",
+            stmt.loc,
+          );
+        }
+        const lines = [`${pad}try {`];
+        for (const child of stmt.tryBody) {
+          lines.push(...this.#stmt(fn, child, depth + 1));
+        }
+        lines.push(`${pad}} finally {`);
+        for (const child of stmt.finallyBody) {
+          lines.push(...this.#stmt(fn, child, depth + 1));
+        }
+        lines.push(`${pad}}`);
+        return lines;
+      }
+      case "nativePeerDetach": {
+        const peer = this.#directPeerClass();
+        const subclass = this.#directClassCallbacks[0]?.binding;
+        if (
+          peer === undefined ||
+          subclass === undefined ||
+          stmt.className !== peer.name ||
+          stmt.handle.type.kind !== "nativeHandle" ||
+          this.#nativeHandleOwner(stmt.handle.type.typeId, stmt.loc) !==
+            subclass.ownerBinaryName
+        ) {
+          throw new JvmUnsupportedError(
+            `native peer detach for '${stmt.className}' outside its direct JVM subclass`,
+            stmt.loc,
+          );
+        }
+        return [
+          `${pad}((${this.#options.className})(${this.#expr(stmt.handle)})).ntsDetachPeer();`,
+        ];
       }
       default:
         throw new JvmUnsupportedError(`statement '${stmt.kind}'`, stmt.loc);
@@ -1102,6 +1365,8 @@ class JavaEmitter {
           `instanceof over '${expr.value.type.kind}'`,
           expr.loc,
         );
+      case "nativePeerAttach":
+        return this.#directNativePeerAttach(expr);
       case "nativeCall":
         return this.#nativeCall(expr);
       case "intrinsic": {
@@ -1118,6 +1383,29 @@ class JavaEmitter {
       default:
         throw new JvmUnsupportedError(`expression '${expr.kind}'`, expr.loc);
     }
+  }
+
+  #directNativePeerAttach(
+    expr: Extract<IrExpr, { kind: "nativePeerAttach" }>,
+  ): string {
+    const peer = this.#directPeerClass();
+    const subclass = this.#directClassCallbacks[0]?.binding;
+    if (
+      peer === undefined ||
+      subclass === undefined ||
+      peer.name !== expr.className ||
+      expr.type.kind !== "object" ||
+      expr.type.className !== peer.name ||
+      expr.handle.type.kind !== "nativeHandle" ||
+      this.#nativeHandleOwner(expr.handle.type.typeId, expr.loc) !==
+        subclass.ownerBinaryName
+    ) {
+      throw new JvmUnsupportedError(
+        `native peer attach for '${expr.className}' outside its direct JVM subclass`,
+        expr.loc,
+      );
+    }
+    return `((${this.#options.className})(${this.#expr(expr.handle)})).ntsPeer()`;
   }
 
   #nativeCall(expr: Extract<IrExpr, { kind: "nativeCall" }>): string {
@@ -1150,6 +1438,9 @@ class JavaEmitter {
           `'${direct.nativeEntrySymbol}', but Native IR names ` +
           `'${semantic.entry.symbol}'`,
       );
+    }
+    if (direct.kind === "class-callback") {
+      return this.#directClassCallback(expr, direct, semantic);
     }
     if (direct.kind === "instance-callback") {
       return this.#directCallback(expr, direct, semantic);
@@ -1200,6 +1491,90 @@ class JavaEmitter {
       return `(${this.#expr(receiver)}).${direct.name}(${args})`;
     }
     return `${owner}.${direct.name}(${args})`;
+  }
+
+  #directClassCallback(
+    expr: Extract<IrExpr, { kind: "nativeCall" }>,
+    direct: JvmDirectClassCallbackBinding,
+    semantic: IrNativeBinding,
+  ): string {
+    const plan = this.#directClassCallbacks.find(
+      ({ binding }) => binding.id === direct.id,
+    );
+    if (plan === undefined) {
+      throw new Error(`JVM direct class callback '${direct.id}' has no emission plan`);
+    }
+    if (expr.args.length !== 1 || expr.type.kind !== "void") {
+      throw new Error(
+        `JVM direct class callback '${direct.id}' is not a void registration over one handler`,
+      );
+    }
+    if (semantic.result.type.kind !== "void") {
+      throw new Error(`JVM direct class callback '${direct.id}' has a non-void registration`);
+    }
+    const closure = expr.args[0]!;
+    if (closure.kind !== "closure") {
+      throw new JvmUnsupportedError(
+        `non-literal direct class callback '${direct.id}'`,
+        closure.loc,
+      );
+    }
+    if (closure.captures.length !== 0) {
+      throw new Error(
+        `JVM direct class callback '${direct.id}' unexpectedly captures module initialization`,
+      );
+    }
+    const handler = this.#functions.get(closure.fnName);
+    if (handler === undefined) {
+      throw new Error(
+        `JVM direct class callback '${direct.id}' names missing handler '${closure.fnName}'`,
+      );
+    }
+    if ((handler.captures?.length ?? 0) !== 0) {
+      throw new Error(`JVM direct class callback '${direct.id}' handler is not capture-free`);
+    }
+    if (handler.params.length !== plan.descriptor.parameters.length + 1) {
+      throw new Error(
+        `JVM direct class callback '${direct.id}' handler does not receive its exact receiver and payloads`,
+      );
+    }
+    const receiver = handler.params[0]!;
+    if (
+      receiver.type.kind !== "nativeHandle" ||
+      this.#nativeHandleOwner(receiver.type.typeId, handler.loc) !== direct.ownerBinaryName
+    ) {
+      throw new Error(`JVM direct class callback '${direct.id}' has the wrong receiver`);
+    }
+    handler.params.slice(1).forEach((parameter, index) => {
+      if (!this.#directValueMatches(
+        parameter.type,
+        plan.descriptor.parameters[index]!,
+        handler.loc,
+      )) {
+        throw new Error(
+          `JVM direct class callback '${direct.id}' payload ${index} does not match ` +
+            `'${plan.descriptor.parameters[index]}'`,
+        );
+      }
+    });
+    if (!this.#directValueMatches(handler.returnType, plan.descriptor.result, handler.loc)) {
+      throw new Error(
+        `JVM direct class callback '${direct.id}' result does not match ` +
+          `'${plan.descriptor.result}'`,
+      );
+    }
+    if (this.#directClassCallbackSites.some(
+      (site) => site.callback.binding.id === direct.id,
+    )) {
+      throw new Error(`JVM direct class callback '${direct.id}' is registered twice`);
+    }
+    const site = Object.freeze({
+      callback: plan,
+      index: this.#directClassCallbackSites.length,
+      handlerName: encodedIdentifier("f", handler.name),
+    });
+    this.#directClassCallbackSites.push(site);
+    return `ntsRegisterClassCallback${site.index}()`;
   }
 
   #directCallback(
@@ -1641,6 +2016,9 @@ class JavaEmitter {
   #managedClassName(className: string, loc: SrcLoc): string {
     if (!this.#classes.has(className)) {
       throw new JvmUnsupportedError(`managed class '${className}'`, loc);
+    }
+    if (this.#directPeerClass()?.name === className) {
+      return this.#options.className;
     }
     return encodedIdentifier("c", className);
   }
