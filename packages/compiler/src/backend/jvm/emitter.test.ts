@@ -132,12 +132,19 @@ test("the JVM emitter keeps managed class fields and dispatch in ART", () => {
     functionExports: [{
       functionName: "classFields",
       methodName: "classFields",
+    }, {
+      functionName: "integerFieldBitwise",
+      methodName: "integerFieldBitwise",
     }],
   });
 
   expect(source).toContain("private static class");
   expect(source).toContain(" extends ");
   expect(source).toMatch(/\.m_[0-9a-f]+\(/u);
+  expect(source).toMatch(/\n    int m_[0-9a-f]+\(\) \{/u);
+  expect(source.match(/\n    double m_[0-9a-f]+\(double a0\) \{/gu)?.length).toBe(2);
+  expect(source).toMatch(/private static int f_[0-9a-f]+\(\)/u);
+  expect(source).toContain("public static double integerFieldBitwise()");
   expect(source).toMatch(/private int d_[0-9a-f]+;/u);
   expect(source).toContain(" >>> ");
   expect(source).not.toContain("Integer.toUnsignedLong");

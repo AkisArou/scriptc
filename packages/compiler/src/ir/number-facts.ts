@@ -385,6 +385,23 @@ function transferBitwise(op: IrNumBinOp, a: AbsVal, b: AbsVal): AbsVal {
       x >>> y;
     return constVal(r);
   }
+  /* AND with a known non-negative int32 mask cannot set a bit outside
+   * that mask. This is a materially stronger range than the generic
+   * ToInt32 result and is the ordinary source spelling for bounded hash,
+   * table, and ring-buffer state (`value & 1023`). Bit-subset ordering is
+   * numeric ordering for a non-negative mask, so every result is in
+   * [0, mask] regardless of the other operand. */
+  if (op === "&") {
+    const mask = isSingleton(a) ? a.lo : isSingleton(b) ? b.lo : null;
+    if (
+      mask !== null &&
+      Number.isInteger(mask) &&
+      mask >= 0 &&
+      mask <= MACHINE_I32_MAX
+    ) {
+      return absVal(0, mask, true, false);
+    }
+  }
   if (op === ">>>") return absVal(0, 2 ** 32 - 1, true, false);
   return absVal(-(2 ** 31), 2 ** 31 - 1, true, false);
 }
@@ -872,16 +889,21 @@ function isMachineI32(v: AbsVal): boolean {
 
 interface MachineIntegerObserver {
   recordExpression(expr: IrExpr, value: AbsVal): void;
+  recordReturn(value: AbsVal): void;
   recordWrite(localId: string, value: AbsVal): void;
 }
 
 class FunctionMachineIntegerObserver implements MachineIntegerObserver {
   readonly #eligible: ReadonlySet<string>;
+  readonly #returnEligible: boolean;
   readonly #seen = new Set<string>();
   readonly #unsafe = new Set<string>();
-  readonly #expressions = new Map<IrExpr, boolean>();
+  readonly #expressions = new Map<IrExpr, AbsVal>();
+  #returnSeen = false;
+  #returnValue: AbsVal = BOTTOM;
 
   constructor(fn: IrFunction) {
+    this.#returnEligible = fn.returnType.kind === "f64";
     const parameters = new Set(fn.params.map((parameter) => parameter.localId));
     this.#eligible = new Set(
       fn.locals
@@ -897,8 +919,16 @@ class FunctionMachineIntegerObserver implements MachineIntegerObserver {
 
   recordExpression(expr: IrExpr, value: AbsVal): void {
     if (expr.type.kind !== "f64") return;
-    const safe = isMachineI32(value);
-    this.#expressions.set(expr, (this.#expressions.get(expr) ?? true) && safe);
+    this.#expressions.set(
+      expr,
+      join(this.#expressions.get(expr) ?? BOTTOM, value),
+    );
+  }
+
+  recordReturn(value: AbsVal): void {
+    if (!this.#returnEligible) return;
+    this.#returnSeen = true;
+    this.#returnValue = join(this.#returnValue, value);
   }
 
   recordWrite(localId: string, value: AbsVal): void {
@@ -917,10 +947,38 @@ class FunctionMachineIntegerObserver implements MachineIntegerObserver {
 
   expressions(): readonly IrExpr[] {
     return [...this.#expressions]
-      .filter(([, safe]) => safe)
+      .filter(([, value]) => isMachineI32(value))
       .map(([expr]) => expr);
   }
+
+  expressionValues(): ReadonlyMap<IrExpr, AbsVal> {
+    return new Map(this.#expressions);
+  }
+
+  returnsMachineInteger(): boolean {
+    return this.#returnEligible && this.#returnSeen && isMachineI32(this.#returnValue);
+  }
+
+  returnValue(): AbsVal {
+    return this.#returnSeen ? this.#returnValue : { ...TOP };
+  }
 }
+
+interface MachineIntegerAssumptions {
+  readonly fields: ReadonlyMap<string, AbsVal>;
+  readonly methods: ReadonlySet<string>;
+  readonly methodValues: ReadonlyMap<string, AbsVal>;
+  readonly returns: ReadonlySet<string>;
+  readonly returnValues: ReadonlyMap<string, AbsVal>;
+}
+
+const EMPTY_MACHINE_INTEGER_ASSUMPTIONS: MachineIntegerAssumptions = {
+  fields: new Map(),
+  methods: new Set(),
+  methodValues: new Map(),
+  returns: new Set(),
+  returnValues: new Map(),
+};
 
 /** Meet a value with an interval; `clearNaN` when the comparison's truth
  * on this edge excludes NaN operands. */
@@ -987,6 +1045,8 @@ class FnAnalyzer {
     private readonly native: NativeBoundaryContext | null = null,
     private readonly globalSeeds: ReadonlyMap<string, AbsVal> = new Map(),
     private readonly machine: MachineIntegerObserver | null = null,
+    private readonly machineAssumptions: MachineIntegerAssumptions =
+      EMPTY_MACHINE_INTEGER_ASSUMPTIONS,
   ) {}
 
   analyze(fn: IrFunction): void {
@@ -1165,6 +1225,7 @@ class FnAnalyzer {
       case "return": {
         if (s.value !== null) {
           const v = this.evalExpr(s.value, env);
+          if (this.collect) this.machine?.recordReturn(v);
           if (this.retSlot !== null) this.emit(v, this.retSlot.path, this.retSlot.cls, s.loc);
         }
         return null;
@@ -1553,6 +1614,10 @@ class FnAnalyzer {
       }
       case "fieldGet": {
         if (numberCarrierKind(e.type, this.mod) === null) return { ...TOP };
+        const fieldValue = this.machineAssumptions.fields.get(
+          machineIntegerFieldKey(e.className, e.field),
+        );
+        if (fieldValue !== undefined) return fieldValue;
         const key = this.pathKey(e, null);
         return key === null ? { ...TOP } : envGet(env, key);
       }
@@ -1836,6 +1901,10 @@ class FnAnalyzer {
         }
         this.havocCall(e.callee, env);
         if (slots?.ret != null) return classSeed(slots.ret);
+        if (this.machineAssumptions.returns.has(e.callee)) {
+          return this.machineAssumptions.returnValues.get(e.callee) ??
+            classSeed("i32");
+        }
         return { ...TOP };
       }
       case "unionWrap": {
@@ -1884,11 +1953,20 @@ class FnAnalyzer {
         clearPathFacts(env);
         return { ...TOP };
       }
+      case "virtualCall": {
+        for (const v of childExprs(e)) this.evalExpr(v, env);
+        this.havocAllGlobals(env);
+        const methodKey = machineIntegerMethodKey(e.className, e.method);
+        const methodValue = this.machineAssumptions.methodValues.get(methodKey);
+        if (methodValue !== undefined) return methodValue;
+        return this.machineAssumptions.methods.has(methodKey)
+          ? classSeed("i32")
+          : { ...TOP };
+      }
       case "callValue":
       case "newValue":
       case "dynCall":
       case "dynInvoke":
-      case "virtualCall":
       case "new":
       case "nativePeerAttach":
       case "intrinsic": {
@@ -1951,6 +2029,10 @@ class FnAnalyzer {
       case "fieldGet": {
         this.evalExpr(e.obj, env);
         if (numberCarrierKind(e.type, this.mod) === null) return { ...TOP };
+        const fieldValue = this.machineAssumptions.fields.get(
+          machineIntegerFieldKey(e.className, e.field),
+        );
+        if (fieldValue !== undefined) return fieldValue;
         const key = this.pathKey(e, null);
         return key === null ? { ...TOP } : envGet(env, key);
       }
@@ -2210,6 +2292,15 @@ export interface MachineIntegerFacts {
   readonly locals: ReadonlyMap<string, ReadonlySet<string>>;
   /** f64 expressions proved to have the same representation-safe range. */
   readonly expressions: ReadonlySet<IrExpr>;
+  /** Internal f64-returning functions whose every reachable return is
+   * proved to fit the signed-int32 carrier. Source-visible number ABIs stay
+   * f64; a backend may use this only between generated implementation
+   * bodies and widen at an external boundary. */
+  readonly returns: ReadonlySet<string>;
+  /** Static class views whose complete override family has an integer
+   * return. A virtual descriptor is specialized only as a family: one
+   * fractional override keeps every dispatch through that slot on f64. */
+  readonly methods: ReadonlySet<string>;
 }
 
 const machineIntegerFactsByModule = new WeakMap<IrModule, MachineIntegerFacts>();
@@ -2218,10 +2309,14 @@ export function machineIntegerFieldKey(className: string, field: string): string
   return JSON.stringify([className, field]);
 }
 
-function machineIntegerFields(
+export function machineIntegerMethodKey(className: string, method: string): string {
+  return JSON.stringify([className, method]);
+}
+
+function machineIntegerFieldValues(
   mod: IrModule,
-  expressions: ReadonlySet<IrExpr>,
-): ReadonlySet<string> {
+  expressions: ReadonlyMap<IrExpr, AbsVal>,
+): ReadonlyMap<string, AbsVal> {
   const classes = new Map(
     (mod.classes ?? [])
       .filter((class_) => class_.runtime !== true)
@@ -2253,13 +2348,23 @@ function machineIntegerFields(
     }
   }
   const unsafe = new Set<string>();
+  const declarationValues = new Map<string, AbsVal>();
   walkBodyNodes(mod.functions, (node) => {
     if (node.kind === "fieldSet") {
       const write = node as Extract<IrStmt, { kind: "fieldSet" }>;
       const owner = declaredOwner(write.className, write.field);
       if (owner === null) return;
       const key = machineIntegerFieldKey(owner, write.field);
-      if (eligible.has(key) && !expressions.has(write.value)) unsafe.add(key);
+      if (!eligible.has(key)) return;
+      const value = expressions.get(write.value) ?? TOP;
+      if (!isMachineI32(value)) {
+        unsafe.add(key);
+      } else {
+        declarationValues.set(
+          key,
+          join(declarationValues.get(key) ?? BOTTOM, value),
+        );
+      }
       return;
     }
     if (node.kind === "fieldIncDec") {
@@ -2272,7 +2377,7 @@ function machineIntegerFields(
   const safeDeclarations = new Set(
     [...eligible].filter((key) => !unsafe.has(key)),
   );
-  const fields = new Set<string>();
+  const fields = new Map<string, AbsVal>();
   for (const class_ of classes.values()) {
     for (const field of class_.fields) {
       const owner = declaredOwner(class_.name, field.name);
@@ -2280,31 +2385,261 @@ function machineIntegerFields(
         owner !== null &&
         safeDeclarations.has(machineIntegerFieldKey(owner, field.name))
       ) {
-        fields.add(machineIntegerFieldKey(class_.name, field.name));
+        const ownerKey = machineIntegerFieldKey(owner, field.name);
+        fields.set(
+          machineIntegerFieldKey(class_.name, field.name),
+          declarationValues.get(ownerKey) ?? classSeed("i32"),
+        );
       }
     }
   }
   return fields;
 }
 
-/** Proved storage choices for backends that have a cheaper signed-integer
- * representation. JavaScript's public number type remains f64: parameters,
- * returns, overflow, fractions, NaN, infinities, and -0 keep that carrier. */
-export function machineIntegerFacts(mod: IrModule): MachineIntegerFacts {
-  const cached = machineIntegerFactsByModule.get(mod);
-  if (cached !== undefined) return cached;
+function sameStringSet(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  return left.size === right.size && [...left].every((value) => right.has(value));
+}
 
-  const effects = globalEffectsOf(mod);
-  const cfg: IntSlotConfig = { fns: new Map(), records: new Map() };
-  const globalSeeds = constantNumberGlobals(mod);
-  const globals = new Set(
-    [...globalSeeds]
-      .filter(([, value]) => isMachineI32(value))
-      .map(([id]) => id),
+function sameAbsValMap(
+  left: ReadonlyMap<string, AbsVal>,
+  right: ReadonlyMap<string, AbsVal>,
+): boolean {
+  return left.size === right.size && [...left].every(([key, value]) => {
+    const other = right.get(key);
+    return other !== undefined && sameVal(value, other);
+  });
+}
+
+function joinAbsValMaps(
+  left: ReadonlyMap<string, AbsVal>,
+  right: ReadonlyMap<string, AbsVal>,
+): ReadonlyMap<string, AbsVal> {
+  const result = new Map(left);
+  for (const [key, value] of right) {
+    result.set(key, join(result.get(key) ?? BOTTOM, value));
+  }
+  return result;
+}
+
+/** Resolve one virtual slot to the oldest declaration in its inheritance
+ * chain. That declaration owns the Java descriptor all overrides must share. */
+function machineMethodSlotOwner(
+  classes: ReadonlyMap<string, NonNullable<IrModule["classes"]>[number]>,
+  className: string,
+  method: string,
+): string | null {
+  let current = classes.get(className);
+  let owner: string | null = null;
+  const seen = new Set<string>();
+  while (current !== undefined && !seen.has(current.name)) {
+    seen.add(current.name);
+    if (current.methods?.includes(method) === true) owner = current.name;
+    current = current.base === undefined ? undefined : classes.get(current.base);
+  }
+  return owner;
+}
+
+/** A Java virtual method's result descriptor belongs to the whole override
+ * family, not to one body. Publish a class-view fact only when every concrete
+ * declaration in the slot already has a proved integer implementation. */
+function machineIntegerMethodFacts(
+  mod: IrModule,
+  returns: ReadonlySet<string>,
+  returnValues: ReadonlyMap<string, AbsVal>,
+): {
+  readonly methods: ReadonlySet<string>;
+  readonly values: ReadonlyMap<string, AbsVal>;
+} {
+  const classes = new Map(
+    (mod.classes ?? [])
+      .filter((class_) => class_.runtime !== true)
+      .map((class_) => [class_.name, class_]),
   );
-  const native = nativeBoundaryContext(mod);
+  const functionNames = new Set(mod.functions.map((fn) => fn.name));
+  const implementations = new Map<string, Set<string>>();
+  const incomplete = new Set<string>();
+  for (const class_ of classes.values()) {
+    for (const method of class_.methods ?? []) {
+      const owner = machineMethodSlotOwner(classes, class_.name, method);
+      if (owner === null) continue;
+      const slot = machineIntegerMethodKey(owner, method);
+      if (class_.abstractMethods?.includes(method) === true) continue;
+      const implementation = `%${class_.name}.${method}`;
+      if (!functionNames.has(implementation)) {
+        incomplete.add(slot);
+        continue;
+      }
+      let members = implementations.get(slot);
+      if (members === undefined) {
+        members = new Set();
+        implementations.set(slot, members);
+      }
+      members.add(implementation);
+    }
+  }
+  const safeSlots = new Set(
+    [...implementations]
+      .filter(([slot, members]) =>
+        !incomplete.has(slot) && [...members].every((fn) => returns.has(fn))
+      )
+      .map(([slot]) => slot),
+  );
+  const slotValues = new Map<string, AbsVal>();
+  for (const slot of safeSlots) {
+    let value = BOTTOM;
+    for (const implementation of implementations.get(slot) ?? []) {
+      value = join(
+        value,
+        returnValues.get(implementation) ?? classSeed("i32"),
+      );
+    }
+    slotValues.set(slot, value);
+  }
+  const methods = new Set<string>();
+  const values = new Map<string, AbsVal>();
+  for (const class_ of classes.values()) {
+    const visible = new Set<string>();
+    let current: typeof class_ | undefined = class_;
+    const seen = new Set<string>();
+    while (current !== undefined && !seen.has(current.name)) {
+      seen.add(current.name);
+      for (const method of current.methods ?? []) visible.add(method);
+      current = current.base === undefined ? undefined : classes.get(current.base);
+    }
+    for (const method of visible) {
+      const owner = machineMethodSlotOwner(classes, class_.name, method);
+      if (
+        owner !== null &&
+        safeSlots.has(machineIntegerMethodKey(owner, method))
+      ) {
+        const view = machineIntegerMethodKey(class_.name, method);
+        methods.add(view);
+        values.set(
+          view,
+          slotValues.get(machineIntegerMethodKey(owner, method)) ??
+            classSeed("i32"),
+        );
+      }
+    }
+  }
+  return { methods, values };
+}
+
+function inferMachineIntegerReturns(
+  mod: IrModule,
+  effects: GlobalEffects,
+  native: NativeBoundaryContext,
+  globalSeeds: ReadonlyMap<string, AbsVal>,
+  fields: ReadonlyMap<string, AbsVal>,
+  returnValues: ReadonlyMap<string, AbsVal>,
+): ReadonlySet<string> {
+  let candidates: ReadonlySet<string> = new Set(
+    mod.functions
+      .filter((fn) => fn.returnType.kind === "f64")
+      .map((fn) => fn.name),
+  );
+  while (true) {
+    const methodFacts = machineIntegerMethodFacts(mod, candidates, returnValues);
+    const assumptions: MachineIntegerAssumptions = {
+      fields,
+      methods: methodFacts.methods,
+      methodValues: methodFacts.values,
+      returns: candidates,
+      returnValues,
+    };
+    const next = new Set<string>();
+    for (const fn of mod.functions) {
+      if (!candidates.has(fn.name)) continue;
+      const observer = new FunctionMachineIntegerObserver(fn);
+      const analyzer = new FnAnalyzer(
+        mod,
+        { fns: new Map(), records: new Map() },
+        effects,
+        [],
+        native,
+        globalSeeds,
+        observer,
+        assumptions,
+      );
+      analyzer.seedBindings(fn, mod);
+      analyzer.analyze(fn);
+      if (observer.returnsMachineInteger()) next.add(fn.name);
+    }
+    if (sameStringSet(candidates, next)) {
+      return next;
+    }
+    candidates = next;
+  }
+}
+
+/** Recover the useful interval behind each proved return. The descriptor
+ * decision needs only the set above, but callers such as `super.m() + 1`
+ * must see the base's actual `0..1023` result rather than the entire int32
+ * carrier or they would conservatively manufacture an overflow. */
+function summarizeMachineIntegerReturns(
+  mod: IrModule,
+  effects: GlobalEffects,
+  native: NativeBoundaryContext,
+  globalSeeds: ReadonlyMap<string, AbsVal>,
+  fields: ReadonlyMap<string, AbsVal>,
+  returns: ReadonlySet<string>,
+): ReadonlyMap<string, AbsVal> {
+  let values: ReadonlyMap<string, AbsVal> = new Map(
+    [...returns].map((fn) => [fn, BOTTOM]),
+  );
+  for (let iteration = 0; iteration < LOOP_CAP; iteration++) {
+    const methodFacts = machineIntegerMethodFacts(mod, returns, values);
+    const assumptions: MachineIntegerAssumptions = {
+      fields,
+      methods: methodFacts.methods,
+      methodValues: methodFacts.values,
+      returns,
+      returnValues: values,
+    };
+    const next = new Map<string, AbsVal>();
+    for (const fn of mod.functions) {
+      if (!returns.has(fn.name)) continue;
+      const observer = new FunctionMachineIntegerObserver(fn);
+      const analyzer = new FnAnalyzer(
+        mod,
+        { fns: new Map(), records: new Map() },
+        effects,
+        [],
+        native,
+        globalSeeds,
+        observer,
+        assumptions,
+      );
+      analyzer.seedBindings(fn, mod);
+      analyzer.analyze(fn);
+      const previous = values.get(fn.name) ?? BOTTOM;
+      const joined = join(previous, observer.returnValue());
+      next.set(
+        fn.name,
+        iteration < WIDEN_AFTER ? joined : widen(previous, joined),
+      );
+    }
+    if (sameAbsValMap(values, next)) return next;
+    values = next;
+  }
+  return values;
+}
+
+function observeMachineIntegers(
+  mod: IrModule,
+  effects: GlobalEffects,
+  native: NativeBoundaryContext,
+  globalSeeds: ReadonlyMap<string, AbsVal>,
+  assumptions: MachineIntegerAssumptions,
+): {
+  readonly expressionValues: ReadonlyMap<IrExpr, AbsVal>;
+  readonly expressions: ReadonlySet<IrExpr>;
+  readonly locals: ReadonlyMap<string, ReadonlySet<string>>;
+} {
+  const cfg: IntSlotConfig = { fns: new Map(), records: new Map() };
   const locals = new Map<string, ReadonlySet<string>>();
   const expressions = new Set<IrExpr>();
+  const expressionValues = new Map<IrExpr, AbsVal>();
   for (const fn of mod.functions) {
     const observer = new FunctionMachineIntegerObserver(fn);
     const analyzer = new FnAnalyzer(
@@ -2315,15 +2650,112 @@ export function machineIntegerFacts(mod: IrModule): MachineIntegerFacts {
       native,
       globalSeeds,
       observer,
+      assumptions,
     );
     analyzer.seedBindings(fn, mod);
     analyzer.analyze(fn);
     const functionLocals = observer.locals();
     if (functionLocals.size > 0) locals.set(fn.name, functionLocals);
     for (const expression of observer.expressions()) expressions.add(expression);
+    for (const [expression, value] of observer.expressionValues()) {
+      expressionValues.set(
+        expression,
+        join(expressionValues.get(expression) ?? BOTTOM, value),
+      );
+    }
   }
-  const fields = machineIntegerFields(mod, expressions);
-  const facts = Object.freeze({ globals, fields, locals, expressions });
+  return { expressionValues, expressions, locals };
+}
+
+/** Proved storage choices for backends that have a cheaper signed-integer
+ * representation. JavaScript's public number type remains f64: external
+ * parameters and returns widen at their boundary, while overflow, fractions,
+ * NaN, infinities, and -0 keep that carrier everywhere. */
+export function machineIntegerFacts(mod: IrModule): MachineIntegerFacts {
+  const cached = machineIntegerFactsByModule.get(mod);
+  if (cached !== undefined) return cached;
+
+  const effects = globalEffectsOf(mod);
+  const globalSeeds = constantNumberGlobals(mod);
+  const globals = new Set(
+    [...globalSeeds]
+      .filter(([, value]) => isMachineI32(value))
+      .map(([id]) => id),
+  );
+  const native = nativeBoundaryContext(mod);
+  let observed = observeMachineIntegers(
+    mod,
+    effects,
+    native,
+    globalSeeds,
+    EMPTY_MACHINE_INTEGER_ASSUMPTIONS,
+  );
+  let fieldValues: ReadonlyMap<string, AbsVal> = machineIntegerFieldValues(
+    mod,
+    observed.expressionValues,
+  );
+  let returns: ReadonlySet<string> = new Set();
+  let returnValues: ReadonlyMap<string, AbsVal> = new Map();
+  let methods: ReadonlySet<string> = new Set();
+  while (true) {
+    const inferredReturns = inferMachineIntegerReturns(
+      mod,
+      effects,
+      native,
+      globalSeeds,
+      fieldValues,
+      returnValues,
+    );
+    const nextReturnValues = summarizeMachineIntegerReturns(
+      mod,
+      effects,
+      native,
+      globalSeeds,
+      fieldValues,
+      inferredReturns,
+    );
+    const methodFacts = machineIntegerMethodFacts(
+      mod,
+      inferredReturns,
+      nextReturnValues,
+    );
+    const assumptions: MachineIntegerAssumptions = {
+      fields: fieldValues,
+      methods: methodFacts.methods,
+      methodValues: methodFacts.values,
+      returns: inferredReturns,
+      returnValues: nextReturnValues,
+    };
+    const nextObserved = observeMachineIntegers(
+      mod,
+      effects,
+      native,
+      globalSeeds,
+      assumptions,
+    );
+    const nextFieldValues = joinAbsValMaps(
+      fieldValues,
+      machineIntegerFieldValues(mod, nextObserved.expressionValues),
+    );
+    const stable =
+      sameStringSet(returns, inferredReturns) &&
+      sameAbsValMap(returnValues, nextReturnValues) &&
+      sameAbsValMap(fieldValues, nextFieldValues);
+    returns = inferredReturns;
+    returnValues = nextReturnValues;
+    methods = methodFacts.methods;
+    fieldValues = nextFieldValues;
+    observed = nextObserved;
+    if (stable) break;
+  }
+  const facts = Object.freeze({
+    globals,
+    fields: new Set(fieldValues.keys()),
+    locals: observed.locals,
+    expressions: observed.expressions,
+    returns,
+    methods,
+  });
   machineIntegerFactsByModule.set(mod, facts);
   return facts;
 }

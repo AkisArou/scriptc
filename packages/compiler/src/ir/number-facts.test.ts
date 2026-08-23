@@ -15,6 +15,7 @@ import {
   checkLibraryIntegerSlots,
   machineIntegerFieldKey,
   machineIntegerFacts,
+  machineIntegerMethodKey,
   type IntSlotConfig,
   numberBoundaryFacts,
   type IntVerdict,
@@ -1176,6 +1177,222 @@ describe("the native checked-number boundary", () => {
     const fields = machineIntegerFacts(mod).fields;
     expect(fields.has(machineIntegerFieldKey("Counter", "value"))).toBe(true);
     expect(fields.has(machineIntegerFieldKey("Counter", "fraction"))).toBe(false);
+  });
+
+  test("internal returns specialize transitively but virtual slots agree as a family", () => {
+    const objectType = (className: string) => ({ kind: "object", className } as const);
+    const method = (className: string, value: IrExpr): IrFunction => ({
+      name: `%${className}.step`,
+      params: [{ localId: "this.0", name: "this", type: objectType(className) }],
+      returnType: F64,
+      locals: [{
+        id: "this.0",
+        name: "this",
+        type: objectType(className),
+        mutable: false,
+      }],
+      body: [{ kind: "return", value, loc }],
+      loc,
+    });
+    const mod: IrModule = {
+      irVersion: IR_VERSION,
+      sourceFile: "returns.ts",
+      classes: [{
+        name: "IntegerBase",
+        fields: [],
+        methods: ["step"],
+        loc,
+      }, {
+        name: "IntegerDerived",
+        base: "IntegerBase",
+        fields: [],
+        methods: ["step"],
+        loc,
+      }, {
+        name: "MixedBase",
+        fields: [],
+        methods: ["step"],
+        loc,
+      }, {
+        name: "MixedDerived",
+        base: "MixedBase",
+        fields: [],
+        methods: ["step"],
+        loc,
+      }],
+      functions: [
+        method("IntegerBase", num(7)),
+        method("IntegerDerived", num(9)),
+        method("MixedBase", num(11)),
+        method("MixedDerived", num(0.5)),
+        {
+          name: "integer",
+          params: [],
+          returnType: F64,
+          locals: [],
+          body: [{ kind: "return", value: num(13), loc }],
+          loc,
+        },
+        {
+          name: "relay",
+          params: [],
+          returnType: F64,
+          locals: [],
+          body: [{
+            kind: "return",
+            value: {
+              kind: "call",
+              callee: "integer",
+              args: [],
+              type: F64,
+              loc,
+            },
+            loc,
+          }],
+          loc,
+        },
+      ],
+      entry: "relay",
+    };
+
+    const facts = machineIntegerFacts(mod);
+    expect(facts.returns.has("%IntegerBase.step")).toBe(true);
+    expect(facts.returns.has("%IntegerDerived.step")).toBe(true);
+    expect(facts.returns.has("relay")).toBe(true);
+    expect(facts.returns.has("%MixedBase.step")).toBe(true);
+    expect(facts.returns.has("%MixedDerived.step")).toBe(false);
+    expect(
+      facts.methods.has(machineIntegerMethodKey("IntegerBase", "step")),
+    ).toBe(true);
+    expect(
+      facts.methods.has(machineIntegerMethodKey("IntegerDerived", "step")),
+    ).toBe(true);
+    expect(facts.methods.has(machineIntegerMethodKey("MixedBase", "step"))).toBe(false);
+    expect(facts.methods.has(machineIntegerMethodKey("MixedDerived", "step"))).toBe(false);
+  });
+
+  test("a masked base result keeps an integer override family through super", () => {
+    const baseType = { kind: "object", className: "MaskedBase" } as const;
+    const derivedType = { kind: "object", className: "MaskedDerived" } as const;
+    const baseReceiver: IrExpr = {
+      kind: "varRef",
+      localId: "this.base",
+      type: baseType,
+      loc,
+    };
+    const derivedReceiver: IrExpr = {
+      kind: "varRef",
+      localId: "this.derived",
+      type: derivedType,
+      loc,
+    };
+    const baseRead = (): IrExpr => ({
+      kind: "fieldGet",
+      obj: baseReceiver,
+      className: "MaskedBase",
+      field: "value",
+      type: F64,
+      loc,
+    });
+    const bonusRead: IrExpr = {
+      kind: "fieldGet",
+      obj: derivedReceiver,
+      className: "MaskedDerived",
+      field: "bonus",
+      type: F64,
+      loc,
+    };
+    const mod: IrModule = {
+      irVersion: IR_VERSION,
+      sourceFile: "masked-super.ts",
+      classes: [{
+        name: "MaskedBase",
+        fields: [{ name: "value", type: F64 }],
+        methods: ["step"],
+        loc,
+      }, {
+        name: "MaskedDerived",
+        base: "MaskedBase",
+        fields: [
+          { name: "value", type: F64 },
+          { name: "bonus", type: F64 },
+        ],
+        methods: ["step"],
+        loc,
+      }],
+      functions: [{
+        name: "%MaskedBase.step",
+        params: [{ localId: "this.base", name: "this", type: baseType }],
+        returnType: F64,
+        locals: [{
+          id: "this.base",
+          name: "this",
+          type: baseType,
+          mutable: false,
+        }],
+        body: [{
+          kind: "fieldSet",
+          obj: baseReceiver,
+          className: "MaskedBase",
+          field: "value",
+          value: bin("&", bin("^", baseRead(), num(17)), num(1023)),
+          loc,
+        }, {
+          kind: "return",
+          value: baseRead(),
+          loc,
+        }],
+        loc,
+      }, {
+        name: "%MaskedDerived.initialize",
+        params: [{ localId: "this.derived", name: "this", type: derivedType }],
+        returnType: VOID,
+        locals: [{
+          id: "this.derived",
+          name: "this",
+          type: derivedType,
+          mutable: false,
+        }],
+        body: [{
+          kind: "fieldSet",
+          obj: derivedReceiver,
+          className: "MaskedDerived",
+          field: "bonus",
+          value: num(1),
+          loc,
+        }],
+        loc,
+      }, {
+        name: "%MaskedDerived.step",
+        params: [{ localId: "this.derived", name: "this", type: derivedType }],
+        returnType: F64,
+        locals: [{
+          id: "this.derived",
+          name: "this",
+          type: derivedType,
+          mutable: false,
+        }],
+        body: [{
+          kind: "return",
+          value: bin("+", {
+            kind: "call",
+            callee: "%MaskedBase.step",
+            args: [derivedReceiver],
+            type: F64,
+            loc,
+          }, bonusRead),
+          loc,
+        }],
+        loc,
+      }],
+      entry: "%MaskedDerived.step",
+    };
+
+    const facts = machineIntegerFacts(mod);
+    expect(facts.returns.has("%MaskedBase.step")).toBe(true);
+    expect(facts.returns.has("%MaskedDerived.step")).toBe(true);
+    expect(facts.methods.has(machineIntegerMethodKey("MaskedBase", "step"))).toBe(true);
+    expect(facts.methods.has(machineIntegerMethodKey("MaskedDerived", "step"))).toBe(true);
   });
 
   test("arithmetic that can leave the slot keeps its check", () => {

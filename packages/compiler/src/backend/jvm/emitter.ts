@@ -12,6 +12,7 @@ import { nullableNativeHandleUnion } from "../../ir/nodes.js";
 import {
   machineIntegerFieldKey,
   machineIntegerFacts,
+  machineIntegerMethodKey,
   type MachineIntegerFacts,
 } from "../../ir/number-facts.js";
 import { deserializeModule } from "../../ir/serialize.js";
@@ -570,8 +571,11 @@ class JavaEmitter {
         if (this.#ancestorDeclaresMethod(class_, method)) {
           lines.push("    @Override");
         }
+        const integerReturn = this.#machineIntegers.methods.has(
+          machineIntegerMethodKey(class_.name, method),
+        );
         lines.push(
-          `    ${this.#javaType(implementation.returnType, implementation.loc)} ${this.#managedMethodName(method)}(${params.join(", ")}) {`,
+          `    ${integerReturn ? "int" : this.#javaType(implementation.returnType, implementation.loc)} ${this.#managedMethodName(method)}(${params.join(", ")}) {`,
           implementation.returnType.kind === "void"
             ? `      ${call};`
             : `      return ${call};`,
@@ -772,7 +776,7 @@ class JavaEmitter {
       }`;
     });
     const lines = [
-      `  private static ${this.#javaType(fn.returnType, fn.loc)} ${encodedIdentifier("f", fn.name)}(${[
+      `  private static ${this.#machineIntegers.returns.has(fn.name) ? "int" : this.#javaType(fn.returnType, fn.loc)} ${encodedIdentifier("f", fn.name)}(${[
         ...captures,
         ...params,
       ].join(", ")}) {`,
@@ -838,7 +842,17 @@ class JavaEmitter {
       case "exprStmt":
         return [`${pad}${this.#expr(stmt.expr)};`];
       case "return":
-        return [`${pad}return${stmt.value === null ? "" : ` ${this.#expr(stmt.value)}`};`];
+        return [
+          `${pad}return${
+            stmt.value === null
+              ? ""
+              : ` ${
+                this.#machineIntegers.returns.has(fn.name)
+                  ? this.#intExpr(stmt.value)
+                  : this.#expr(stmt.value)
+              }`
+          };`,
+        ];
       case "if": {
         const lines = [`${pad}if (${this.#expr(stmt.cond)}) {`];
         for (const child of stmt.then) lines.push(...this.#stmt(fn, child, depth + 1));
@@ -1418,6 +1432,16 @@ class JavaEmitter {
           : null;
       case "fieldGet":
         return this.#integerField(expr.className, expr.field)
+          ? this.#expr(expr)
+          : null;
+      case "call":
+        return this.#machineIntegers.returns.has(expr.callee)
+          ? this.#expr(expr)
+          : null;
+      case "virtualCall":
+        return this.#machineIntegers.methods.has(
+            machineIntegerMethodKey(expr.className, expr.method)
+          )
           ? this.#expr(expr)
           : null;
       case "bin": {
