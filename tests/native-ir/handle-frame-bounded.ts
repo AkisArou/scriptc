@@ -1,5 +1,6 @@
 import {
   createFrameCounter,
+  createFrameCounterMaybe,
   frameExpectedManagedCells,
   frameGlobalPromotions,
   frameLocalReleases,
@@ -40,7 +41,52 @@ function escaping(): i32 {
   return 0 as i32;
 }
 
+function nullableNonEscapingPresent(): i32 {
+  frameResourceReset();
+  {
+    const counter = createFrameCounterMaybe(40 as i32);
+    if (counter === null) return 30 as i32;
+    if (counter.add(2 as i32) !== (42 as i32)) return 31 as i32;
+  }
+  if (frameGlobalPromotions() !== (0 as i32)) return 32 as i32;
+  if (frameLocalReleases() !== (1 as i32)) return 33 as i32;
+  if (frameManagedCells() !== frameExpectedManagedCells(0 as i32)) return 34 as i32;
+  return 0 as i32;
+}
+
+function nullableNonEscapingAbsent(): i32 {
+  frameResourceReset();
+  {
+    const counter = createFrameCounterMaybe(-1 as i32);
+    if (counter !== null) return 40 as i32;
+  }
+  if (frameGlobalPromotions() !== (0 as i32)) return 41 as i32;
+  if (frameLocalReleases() !== (0 as i32)) return 42 as i32;
+  if (frameManagedCells() !== frameExpectedManagedCells(0 as i32)) return 43 as i32;
+  return 0 as i32;
+}
+
+function nullableEscaping(): i32 {
+  frameResourceReset();
+  {
+    const counter = createFrameCounterMaybe(41 as i32);
+    if (counter === null) return 50 as i32;
+    const retained = [counter];
+    if (retained[0]!.add(1 as i32) !== (42 as i32)) return 51 as i32;
+  }
+  if (frameGlobalPromotions() !== (1 as i32)) return 52 as i32;
+  if (frameLocalReleases() !== (1 as i32)) return 53 as i32;
+  if (frameManagedCells() !== frameExpectedManagedCells(1 as i32)) return 54 as i32;
+  return 0 as i32;
+}
+
 const local = nonEscaping();
 if (local !== (0 as i32)) exit(local);
 const stable = escaping();
-exit(stable === (0 as i32) ? (42 as i32) : stable);
+if (stable !== (0 as i32)) exit(stable);
+const nullablePresent = nullableNonEscapingPresent();
+if (nullablePresent !== (0 as i32)) exit(nullablePresent);
+const nullableAbsent = nullableNonEscapingAbsent();
+if (nullableAbsent !== (0 as i32)) exit(nullableAbsent);
+const nullableStable = nullableEscaping();
+exit(nullableStable === (0 as i32) ? (42 as i32) : nullableStable);

@@ -689,7 +689,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         }
         const name = mangleLocal(e.localId);
         if (local?.nativeFrame !== undefined) {
-          return E.newBorrowedNativeFrameTemp(e.type, name, local.nativeFrame.release);
+          return E.newBorrowedNativeFrameTemp(e.type, name, local.nativeFrame);
         }
         if (local?.boxed) {
           // Reads go through the shared binding; ref kinds come out +1.
@@ -2859,6 +2859,12 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
            * a throw, so a container with no child has answered rather than
            * failed. A present object still goes through the identity map, so
            * two reads of one object name one cell. */
+          if (acquisition.kind === "frameBounded") {
+            const result = E.newNativeFrameTemp(e.type, call, acquisition.resource);
+            E.emitPendingCheck();
+            releaseArguments();
+            return result;
+          }
           const plan = nativeResultHandle(
             resultForm,
             binding.error.detect.kind === "resultIsNull",
@@ -2912,7 +2918,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             lifecycle.registrationOwner,
           );
           if (acquisition.kind === "frameBounded") {
-            const result = E.newNativeFrameTemp(e.type, call, acquisition.release);
+            const result = E.newNativeFrameTemp(e.type, call, acquisition.resource);
             if (plan.onNull !== "unchecked") {
               E.line(`if (${result.name} == NULL) {`);
               E.indent++;
@@ -3488,6 +3494,18 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         const u = E.emitExpr(e.value);
         const arm = e.type;
         if (isUnitType(arm)) throw new Error(`emitter bug: unionNarrow to unit arm ${arm.kind}`);
+        if (u.nativeFrame !== undefined) {
+          const nullable = u.nativeFrame.nullable;
+          if (
+            nullable === undefined ||
+            nullable.unionId !== e.unionId ||
+            nullable.handleTag !== e.tag ||
+            arm.kind !== "nativeHandle"
+          ) {
+            throw new Error("emitter bug: invalid nullable frame-bounded handle narrowing");
+          }
+          return E.newBorrowedNativeFrameTemp(arm, u.name, u.nativeFrame);
+        }
         if (arm.kind === "f64") return E.newTemp(arm, `scr_union_get_f64(${u.name})`);
         if (arm.kind === "bool") return E.newTemp(arm, `scr_union_get_bool(${u.name})`);
         if (arm.kind === "nativeScalar") {
@@ -3629,6 +3647,19 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
       case "unionIsTag": {
         // A pure tag compare — the box is borrowed, no payload is touched.
         const u = E.emitExpr(e.value);
+        if (u.nativeFrame !== undefined) {
+          const nullable = u.nativeFrame.nullable;
+          if (
+            nullable === undefined ||
+            nullable.unionId !== e.unionId ||
+            (e.tag !== nullable.handleTag && e.tag !== nullable.nullTag)
+          ) {
+            throw new Error("emitter bug: invalid nullable frame-bounded handle tag test");
+          }
+          const present = e.tag === nullable.handleTag;
+          const matches = `${u.name} ${present ? "!=" : "=="} NULL`;
+          return E.newTemp(e.type, e.negated ? `!(${matches})` : matches);
+        }
         return E.newTemp(e.type, `${u.name}->tag ${e.negated ? "!=" : "=="} ${e.tag}`);
       }
       case "dynKeyGet": {

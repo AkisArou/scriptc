@@ -75,6 +75,7 @@ import type {
   IrLocal,
   IrModule,
   IrNativeBinding,
+  IrNativeFrameResource,
   IrNativeCallbackArgumentType,
   IrNativeCallbackSignature,
   IrNativePhysicalAbiType,
@@ -169,7 +170,7 @@ interface LlValue {
   name: string;
   type: IrType;
   slot?: boolean;
-  nativeFrame?: { release: string };
+  nativeFrame?: IrNativeFrameResource;
 }
 
 /** A scope entry: a refcounted local held in an alloca slot — releases
@@ -180,7 +181,7 @@ interface LlScopeEntry {
   slot: string;
   type: IrType;
   boxed?: boolean;
-  nativeFrame?: { release: string };
+  nativeFrame?: IrNativeFrameResource;
 }
 
 export interface LlvmTargetOptions {
@@ -6571,6 +6572,18 @@ class LlEmitter {
         const u = this.emitExpr(e.value);
         const arm = e.type;
         if (isUnitType(arm)) throw new Error(`llvm emitter bug: unionNarrow to unit arm ${arm.kind}`);
+        if (u.nativeFrame !== undefined) {
+          const nullable = u.nativeFrame.nullable;
+          if (
+            nullable === undefined ||
+            nullable.unionId !== e.unionId ||
+            nullable.handleTag !== e.tag ||
+            arm.kind !== "nativeHandle"
+          ) {
+            throw new Error("llvm emitter bug: invalid nullable frame-bounded handle narrowing");
+          }
+          return { name: u.name, type: arm, nativeFrame: u.nativeFrame };
+        }
         const v = this.unionExtract(u.name, arm);
         return this.own({ name: v, type: arm });
       }
@@ -6607,6 +6620,25 @@ class LlEmitter {
       case "unionIsTag": {
         // A pure tag compare — the box is borrowed, no payload is touched.
         const u = this.emitExpr(e.value);
+        if (u.nativeFrame !== undefined) {
+          const nullable = u.nativeFrame.nullable;
+          if (
+            nullable === undefined ||
+            nullable.unionId !== e.unionId ||
+            (e.tag !== nullable.handleTag && e.tag !== nullable.nullTag)
+          ) {
+            throw new Error("llvm emitter bug: invalid nullable frame-bounded handle tag test");
+          }
+          const present = e.tag === nullable.handleTag;
+          const matches = this.B.tmp();
+          this.B.line(
+            `${matches} = icmp ${present ? "ne" : "eq"} ptr ${u.name}, null`,
+          );
+          if (!e.negated) return { name: matches, type: e.type };
+          const negated = this.B.tmp();
+          this.B.line(`${negated} = xor i1 ${matches}, true`);
+          return { name: negated, type: e.type };
+        }
         const tag = this.unionTag(u.name);
         const t = B.tmp();
         B.line(`${t} = icmp ${e.negated ? "ne" : "eq"} i32 ${tag}, ${e.tag}`);
@@ -8389,6 +8421,18 @@ class LlEmitter {
         if (resultForm.kind === "handleOrNull") {
           /* Absence is a value: NULL becomes the union's null arm rather than
            * a throw. A present object still goes through the identity map. */
+          if (acquisition.kind === "frameBounded") {
+            const raw = B.tmp();
+            B.line(`${raw} = ${call}`);
+            const value = this.own({
+              name: raw,
+              type: e.type,
+              nativeFrame: acquisition.resource,
+            });
+            this.emitPendingCheck();
+            releaseArguments();
+            return value;
+          }
           const plan = nativeResultHandle(
             resultForm,
             binding.error.detect.kind === "resultIsNull",
@@ -8470,7 +8514,7 @@ class LlEmitter {
             const value = this.own({
               name: raw,
               type: e.type,
-              nativeFrame: { release: acquisition.release },
+              nativeFrame: acquisition.resource,
             });
             if (plan.onNull === "throw") {
               const isNull = B.tmp();

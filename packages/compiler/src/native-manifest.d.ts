@@ -697,7 +697,9 @@ export interface IrNativeBinding {
      * belong to the compiler, which records the selected representation on
      * the call and its local storage in Native IR. This is a result capability
      * rather than a second binding because both entries implement one source
-     * operation with one failure and argument contract. */
+     * operation with one failure and argument contract. `release` must accept
+     * NULL: failed acquisitions and nullable absence both join ordinary scope
+     * cleanup before the program may inspect the result. */
     frameBounded?: {
       entry: { symbol: string };
       release: { symbol: string };

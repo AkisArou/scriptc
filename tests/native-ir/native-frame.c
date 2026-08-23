@@ -33,6 +33,16 @@ NtsCounter *nts_frame_counter_create_local(int32_t initial_value) {
   return nts_counter_create(initial_value);
 }
 
+NtsCounter *nts_frame_counter_create_maybe_stable(int32_t initial_value) {
+  if (initial_value < 0) return NULL;
+  return nts_frame_counter_create_stable(initial_value);
+}
+
+NtsCounter *nts_frame_counter_create_maybe_local(int32_t initial_value) {
+  if (initial_value < 0) return NULL;
+  return nts_frame_counter_create_local(initial_value);
+}
+
 void nts_frame_counter_release_local(NtsCounter *counter) {
   if (counter == NULL) return;
   nts_frame_local_releases++;

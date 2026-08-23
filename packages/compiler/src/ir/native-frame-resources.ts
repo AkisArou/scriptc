@@ -1,14 +1,24 @@
-import type { IrExpr, IrFunction, IrModule, IrNativeBinding, IrStmt, SrcLoc } from "./nodes.js";
+import {
+  nullableNativeHandleUnion,
+  type IrExpr,
+  type IrFunction,
+  type IrModule,
+  type IrNativeBinding,
+  type IrNativeFrameResource,
+  type IrStmt,
+  type SrcLoc,
+} from "./nodes.js";
 
 interface FrameCandidate {
   readonly localId: string;
   readonly declaration: Extract<IrStmt, { kind: "varDecl" }>;
   readonly call: Extract<IrExpr, { kind: "nativeCall" }>;
-  readonly release: string;
+  readonly resource: IrNativeFrameResource;
 }
 
 interface WalkParent {
   readonly node: { readonly kind: string };
+  readonly parent: WalkParent | null;
 }
 
 /** Walk executable IR while treating type and location records as leaves.
@@ -27,7 +37,9 @@ function walkExecutable(
   }
   const record = value as Record<string, unknown>;
   const kind = record["kind"];
-  const owner = typeof kind === "string" ? { node: record as { kind: string } } : parent;
+  const owner = typeof kind === "string"
+    ? { node: record as { kind: string }, parent }
+    : parent;
   if (typeof kind === "string") visit(record as { kind: string }, parent);
   for (const [key, child] of Object.entries(record)) {
     if (key === "type" || key === "loc" || key === "nativeFrame") continue;
@@ -68,6 +80,7 @@ function borrowedHandleArgument(
 function candidatesFor(
   fn: IrFunction,
   bindings: ReadonlyMap<string, IrNativeBinding>,
+  mod: Pick<IrModule, "unions">,
 ): Map<string, FrameCandidate> {
   const candidates = new Map<string, FrameCandidate>();
   if (fn.async === true || fn.generator !== undefined) return candidates;
@@ -87,12 +100,11 @@ function candidatesFor(
     const declaration = list.length === 1 ? list[0] : undefined;
     const init = declaration?.init;
     if (
-      local?.type.kind !== "nativeHandle" ||
+      local === undefined ||
       local.mutable ||
       local.boxed === true ||
       init?.kind !== "nativeCall" ||
-      init.type.kind !== "nativeHandle" ||
-      init.type.typeId !== local.type.typeId
+      init.type.kind !== local.type.kind
     ) {
       continue;
     }
@@ -102,19 +114,41 @@ function candidatesFor(
     if (
       frame === undefined ||
       binding.result.type.kind !== "nativeHandle" ||
-      binding.result.type.typeId !== local.type.typeId ||
       binding.result.ownership.kind !== "owned" ||
       binding.result.ownership.transfer !== "to-runtime" ||
-      binding.result.projection.kind !== "direct" ||
       binding.arguments.some((argument) => argument.callback?.owner.kind === "result")
     ) {
+      continue;
+    }
+    let resource: IrNativeFrameResource;
+    if (
+      binding.result.projection.kind === "direct" &&
+      local.type.kind === "nativeHandle" &&
+      init.type.kind === "nativeHandle" &&
+      binding.result.type.typeId === local.type.typeId &&
+      init.type.typeId === local.type.typeId
+    ) {
+      resource = { release: frame.release.symbol };
+    } else if (
+      binding.result.projection.kind === "nullableHandle" &&
+      local.type.kind === "union" &&
+      init.type.kind === "union" &&
+      init.type.unionId === local.type.unionId
+    ) {
+      const nullable = nullableNativeHandleUnion(
+        mod.unions ?? [],
+        binding.result.type.typeId,
+      );
+      if (nullable === null || nullable.unionId !== local.type.unionId) continue;
+      resource = { release: frame.release.symbol, nullable };
+    } else {
       continue;
     }
     candidates.set(localId, {
       localId,
       declaration: declaration!,
       call: init,
-      release: frame.release.symbol,
+      resource,
     });
   }
 
@@ -123,6 +157,38 @@ function candidatesFor(
     if (node.kind !== "varRef") return;
     const localId = (node as Extract<IrExpr, { kind: "varRef" }>).localId;
     if (!candidates.has(localId)) return;
+    const candidate = candidates.get(localId)!;
+    const nullable = candidate.resource.nullable;
+    if (nullable !== undefined) {
+      const use = parent?.node;
+      if (
+        use?.kind === "unionIsTag" &&
+        (use as Extract<IrExpr, { kind: "unionIsTag" }>).value === node &&
+        (use as Extract<IrExpr, { kind: "unionIsTag" }>).unionId === nullable.unionId &&
+        ((use as Extract<IrExpr, { kind: "unionIsTag" }>).tag === nullable.handleTag ||
+          (use as Extract<IrExpr, { kind: "unionIsTag" }>).tag === nullable.nullTag)
+      ) {
+        return;
+      }
+      if (use?.kind === "unionNarrow") {
+        const narrow = use as Extract<IrExpr, { kind: "unionNarrow" }>;
+        const call = parent?.parent?.node.kind === "nativeCall"
+          ? parent.parent.node as Extract<IrExpr, { kind: "nativeCall" }>
+          : null;
+        const argumentIndex = call?.args.indexOf(narrow) ?? -1;
+        if (
+          narrow.value === node &&
+          narrow.unionId === nullable.unionId &&
+          narrow.tag === nullable.handleTag &&
+          argumentIndex >= 0 &&
+          borrowedHandleArgument(bindings.get(call!.binding), argumentIndex)
+        ) {
+          return;
+        }
+      }
+      escaped.add(localId);
+      return;
+    }
     const call = parent?.node.kind === "nativeCall"
       ? parent.node as Extract<IrExpr, { kind: "nativeCall" }>
       : null;
@@ -135,16 +201,16 @@ function candidatesFor(
   return candidates;
 }
 
-/** Select the first conservative frame-bounded slice: immutable, unboxed
- * locals initialized directly by a capable handle result, with every use as
- * a whole synchronous borrowed native argument. Everything else remains on
- * the stable path. */
+/** Select the conservative frame-bounded slice: immutable, unboxed locals
+ * initialized directly by a capable handle result, with every use as a whole
+ * synchronous borrowed native argument or, for nullable handles, an exact
+ * null/handle tag test. Everything else remains on the stable path. */
 export function specializeNativeFrameResources(mod: IrModule): void {
   const bindings = new Map((mod.nativeBindings ?? []).map((binding) => [binding.id, binding]));
   for (const fn of mod.functions) {
     const locals = new Map(fn.locals.map((local) => [local.id, local]));
-    for (const candidate of candidatesFor(fn, bindings).values()) {
-      locals.get(candidate.localId)!.nativeFrame = { release: candidate.release };
+    for (const candidate of candidatesFor(fn, bindings, mod).values()) {
+      locals.get(candidate.localId)!.nativeFrame = candidate.resource;
       candidate.call.resultMode = "frameBounded";
     }
   }
@@ -160,9 +226,10 @@ export interface NativeFrameResourceIssue {
 export function validateNativeFrameResources(
   fn: IrFunction,
   bindings: ReadonlyMap<string, IrNativeBinding>,
+  mod: Pick<IrModule, "unions">,
 ): NativeFrameResourceIssue[] {
   const issues: NativeFrameResourceIssue[] = [];
-  const candidates = candidatesFor(fn, bindings);
+  const candidates = candidatesFor(fn, bindings, mod);
   const annotatedCalls = new Set<Extract<IrExpr, { kind: "nativeCall" }>>();
   walkExecutable(fn.body, (node) => {
     if (node.kind !== "nativeCall") return;
@@ -174,7 +241,10 @@ export function validateNativeFrameResources(
     const candidate = candidates.get(local.id);
     if (
       candidate === undefined ||
-      candidate.release !== local.nativeFrame.release ||
+      candidate.resource.release !== local.nativeFrame.release ||
+      candidate.resource.nullable?.unionId !== local.nativeFrame.nullable?.unionId ||
+      candidate.resource.nullable?.handleTag !== local.nativeFrame.nullable?.handleTag ||
+      candidate.resource.nullable?.nullTag !== local.nativeFrame.nullable?.nullTag ||
       candidate.call.resultMode !== "frameBounded"
     ) {
       issues.push({

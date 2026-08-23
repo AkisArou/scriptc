@@ -1755,6 +1755,19 @@ export interface IrGlobal {
   mutable: boolean;
 }
 
+/** Compiler-selected storage for an owned handle whose lifetime is bounded
+ * by the current synchronous function frame. A nullable source value stays a
+ * raw pointer too: NULL is its null arm and a present pointer is its handle
+ * arm, so neither case needs a managed union box. */
+export interface IrNativeFrameResource {
+  release: string;
+  nullable?: {
+    unionId: string;
+    handleTag: number;
+    nullTag: number;
+  };
+}
+
 export interface IrLocal {
   id: string;
   name: string;
@@ -1774,11 +1787,12 @@ export interface IrLocal {
    * IS the TDZ sentinel). Capture entries inherit the flag. */
   tdz?: true;
   /** This local owns a frame-bounded foreign handle rather than an ordinary
-   * managed handle cell. Its source type remains `nativeHandle`; the storage
-   * fact is compiler-only and validated so the value can appear solely in
-   * synchronous borrowed native arguments. Scope cleanup calls `release`
-   * exactly once on every exit. */
-  nativeFrame?: { release: string };
+   * managed handle cell. Its source type remains `nativeHandle` or the exact
+   * `nativeHandle | null` union; the storage fact is compiler-only and
+   * validated so the value can appear solely in null tests and synchronous
+   * borrowed native arguments. Scope cleanup calls `release` exactly once on
+   * every exit; release entries are NULL-tolerant. */
+  nativeFrame?: IrNativeFrameResource;
 }
 
 /* ── statements ────────────────────────────────────────────────────────── */

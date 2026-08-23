@@ -2068,7 +2068,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           binding.result.type.kind === "nativeHandle" &&
           binding.result.passMode === "pointer" &&
           binding.result.ownership.kind === "owned" &&
-          binding.result.projection.kind === "direct";
+          (binding.result.projection.kind === "direct" ||
+            binding.result.projection.kind === "nullableHandle");
         if (!valid) {
           errors.push({
             message: `Native IR binding "${binding.id}" has an invalid frame-bounded result capability`,
@@ -4090,7 +4091,9 @@ function validateFunction(
   for (const l of fn.locals) {
     if (isUnitType(l.type)) err(`local "${l.name}" has bare unit type ${l.type.kind}`, fn.loc);
   }
-  for (const issue of validateNativeFrameResources(fn, nativeById)) {
+  for (const issue of validateNativeFrameResources(fn, nativeById, {
+    unions: [...unions.values()],
+  })) {
     err(issue.message, issue.loc);
   }
   if (isUnitType(fn.returnType)) {

@@ -26,6 +26,7 @@ import type {
   IrModule,
   IrExpr,
   IrNativeBinding,
+  IrNativeFrameResource,
   IrNativeHandleDef,
   IrNativeScalarType,
   IrNativeSpanElem,
@@ -983,7 +984,7 @@ export type NativeResultAcquisition =
   | {
       readonly kind: "frameBounded";
       readonly symbol: string;
-      readonly release: string;
+      readonly resource: IrNativeFrameResource;
     };
 
 export function nativeResultAcquisition(
@@ -993,13 +994,28 @@ export function nativeResultAcquisition(
 ): NativeResultAcquisition {
   if (mode === undefined) return { kind: "stable", symbol: binding.entry.symbol };
   const frame = binding.result.frameBounded;
-  if (mode !== "frameBounded" || form.kind !== "handle" || frame === undefined) {
+  if (
+    mode !== "frameBounded" ||
+    (form.kind !== "handle" && form.kind !== "handleOrNull") ||
+    frame === undefined
+  ) {
     throw new NativeCallPlanError(binding.id, "invalid frame-bounded result selection");
   }
   return {
     kind: "frameBounded",
     symbol: frame.entry.symbol,
-    release: frame.release.symbol,
+    resource: {
+      release: frame.release.symbol,
+      ...(form.kind === "handleOrNull"
+        ? {
+            nullable: {
+              unionId: form.unionId,
+              handleTag: form.handleTag,
+              nullTag: form.nullTag,
+            },
+          }
+        : {}),
+    },
   };
 }
 

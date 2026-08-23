@@ -35,6 +35,7 @@ import type {
   IrLocal,
   IrModule,
   IrNativeBinding,
+  IrNativeFrameResource,
   IrNativeScalarType,
   IrNativeCallbackArgumentType,
   IrNativeCallbackSignature,
@@ -104,7 +105,7 @@ export interface Temp {
   type: IrType;
   /** Raw frame-bounded foreign resource, owned when present on a statement
    * frame or scope entry and borrowed on a varRef temp. */
-  nativeFrame?: { release: string };
+  nativeFrame?: IrNativeFrameResource;
 }
 
 /** A scope entry: a refcounted local, either held directly or through a
@@ -1857,18 +1858,26 @@ export class CEmitter {
   /** A raw foreign pointer whose exact release is part of the legalized
    * result plan. It joins the statement frame before any pending check, just
    * like an ordinary owned temp, but never allocates a managed handle cell. */
-  newNativeFrameTemp(type: IrType, init: string, release: string): Temp {
+  newNativeFrameTemp(
+    type: IrType,
+    init: string,
+    nativeFrame: IrNativeFrameResource,
+  ): Temp {
     const name = `sc_t${this.tempCounter++}`;
     this.line(`void *${name} = ${init};`);
-    const temp = { name, type, nativeFrame: { release } };
+    const temp = { name, type, nativeFrame };
     this.currentFrame().push(temp);
     return temp;
   }
 
-  newBorrowedNativeFrameTemp(type: IrType, init: string, release: string): Temp {
+  newBorrowedNativeFrameTemp(
+    type: IrType,
+    init: string,
+    nativeFrame: IrNativeFrameResource,
+  ): Temp {
     const name = `sc_t${this.tempCounter++}`;
     this.line(`void *${name} = ${init};`);
-    return { name, type, nativeFrame: { release } };
+    return { name, type, nativeFrame };
   }
 
   /** newTemp for a MAY-THROW runtime call: the result joins its frame

@@ -2647,6 +2647,33 @@ const localNativeInput: NativeFrontendInput = {
         },
       },
     },
+    {
+      /* The same capability with absence as a successful result. The raw
+       * frame representation uses NULL for the absent source arm; only a
+       * present pointer owns a resource that the release entry must end. */
+      id: "scriptc.fixture.c-v1@0.0.0#frame_counter_create_maybe",
+      declaration: { module: nativePackage, name: "createFrameCounterMaybe" },
+      entry: { symbol: "nts_frame_counter_create_maybe_stable" },
+      sourceCall: { kind: "function" },
+      error: NO_NATIVE_ERROR,
+      ...directSignature([
+        { name: "initial_value", type: I32, passMode: "value", ownership: { kind: "value" } },
+      ]),
+      result: {
+        type: COUNTER,
+        passMode: "pointer",
+        ownership: {
+          kind: "owned",
+          transfer: "to-runtime",
+          destructor: "scriptc.fixture.c-v1@0.0.0#counter_destroy",
+        },
+        projection: { kind: "nullableHandle" },
+        frameBounded: {
+          entry: { symbol: "nts_frame_counter_create_maybe_local" },
+          release: { symbol: "nts_frame_counter_release_local" },
+        },
+      },
+    },
     ...([
       ["frameResourceReset", "nts_frame_resource_reset", NATIVE_VOID],
       ["frameGlobalPromotions", "nts_frame_global_promotion_count", I32],

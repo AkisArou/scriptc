@@ -245,6 +245,9 @@ export declare function createCounter(initialValue: i32): Counter;
  * reference or a frame-bounded one. The source type deliberately does not
  * expose that representation choice. */
 export declare function createFrameCounter(initialValue: i32): Counter;
+/* The nullable sibling exercises the same representation choice when absence
+ * is a successful result rather than a boundary failure. */
+export declare function createFrameCounterMaybe(initialValue: i32): Counter | null;
 export declare function frameResourceReset(): void;
 export declare function frameGlobalPromotions(): i32;
 export declare function frameLocalReleases(): i32;
