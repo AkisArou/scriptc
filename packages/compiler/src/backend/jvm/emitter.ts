@@ -85,9 +85,23 @@ type JvmDirectCallbackBinding = Extract<
 
 interface JvmDirectCallbackPlan {
   readonly binding: JvmDirectCallbackBinding;
-  readonly handlerName: string;
   readonly adapterName: string;
   readonly descriptor: JvmMethodDescriptor;
+}
+
+interface JvmDirectCallbackCapturePlan {
+  readonly fieldName: string;
+  readonly javaType: string;
+  readonly argument: string;
+  readonly clearOnCancel: boolean;
+}
+
+interface JvmDirectCallbackSitePlan {
+  readonly callback: JvmDirectCallbackPlan;
+  readonly index: number;
+  readonly registerName: string;
+  readonly handlerName: string;
+  readonly captures: readonly JvmDirectCallbackCapturePlan[];
 }
 
 function assertJavaIdentifier(value: string, role: string): void {
@@ -262,7 +276,10 @@ class JavaEmitter {
   }>;
   readonly #directConnectionTypeIds: ReadonlySet<string>;
   readonly #machineIntegers: MachineIntegerFacts;
+  readonly #directCallbackSites: JvmDirectCallbackSitePlan[] = [];
   #integerLocals: ReadonlySet<string> = new Set();
+  #mutableBoxedLocals: ReadonlySet<string> = new Set();
+  #currentFunction: IrFunction | null = null;
 
   constructor(module: IrModule, options: JvmEmissionOptions) {
     this.#module = module;
@@ -285,7 +302,6 @@ class JavaEmitter {
         .sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0)
         .map((binding, index) => Object.freeze({
           binding,
-          handlerName: `NtsCallback${index}`,
           adapterName: `NtsCallbackAdapter${index}`,
           descriptor: parseJvmMethodDescriptor(binding.descriptor),
         })),
@@ -375,7 +391,7 @@ class JavaEmitter {
       "",
     );
 
-    lines.push(...this.#emitDirectCallbackSupport());
+    lines.push(...this.#emitBoxSupport());
 
     for (const global of this.#module.globals ?? []) {
       const integer = this.#machineIntegers.globals.has(global.id);
@@ -388,6 +404,8 @@ class JavaEmitter {
     for (const fn of this.#module.functions) {
       lines.push(...this.#emitFunction(fn), "");
     }
+
+    lines.push(...this.#emitDirectCallbackSupport());
 
     for (const exported of this.#options.functionExports ?? []) {
       const fn = this.#functions.get(exported.functionName);
@@ -423,6 +441,58 @@ class JavaEmitter {
     return lines.join("\n");
   }
 
+  #emitBoxSupport(): string[] {
+    const kinds = new Set<"boolean" | "double" | "reference">();
+    for (const fn of this.#module.functions) {
+      for (const local of fn.locals) {
+        if (local.boxed === true && local.mutable) {
+          if (local.tdz === true) {
+            throw new JvmUnsupportedError("captured temporal-dead-zone bindings", fn.loc);
+          }
+          kinds.add(this.#boxKind(local.type, fn.loc));
+        }
+      }
+    }
+    const lines: string[] = [];
+    if (kinds.has("double")) {
+      lines.push(
+        "  private static final class NtsDoubleBox {",
+        "    private double value;",
+        "",
+        "    private NtsDoubleBox(double value) {",
+        "      this.value = value;",
+        "    }",
+        "  }",
+        "",
+      );
+    }
+    if (kinds.has("boolean")) {
+      lines.push(
+        "  private static final class NtsBooleanBox {",
+        "    private boolean value;",
+        "",
+        "    private NtsBooleanBox(boolean value) {",
+        "      this.value = value;",
+        "    }",
+        "  }",
+        "",
+      );
+    }
+    if (kinds.has("reference")) {
+      lines.push(
+        "  private static final class NtsReferenceBox<T> {",
+        "    private T value;",
+        "",
+        "    private NtsReferenceBox(T value) {",
+        "      this.value = value;",
+        "    }",
+        "  }",
+        "",
+      );
+    }
+    return lines;
+  }
+
   #emitDirectCallbackSupport(): string[] {
     if (this.#directCallbacks.length === 0) return [];
     const lines = [
@@ -454,37 +524,78 @@ class JavaEmitter {
       );
       const arguments_ = callback.descriptor.parameters.map((_, index) => `a${index}`);
       const interfaceName = callback.binding.interfaceBinaryName.replace(/[/$]/gu, ".");
+      const sites = this.#directCallbackSites.filter(
+        (site) => site.callback.binding.id === callback.binding.id,
+      );
       assertJavaIdentifier(callback.binding.name, "direct callback name");
       lines.push(
-        `  private interface ${callback.handlerName} {`,
-        `    void invoke(${parameters.join(", ")});`,
-        "  }",
-        "",
         `  private static final class ${callback.adapterName} implements ${interfaceName} {`,
-        `    private ${callback.handlerName} ntsHandler;`,
-        "",
-        `    private NtsConnection ntsRegister(${callback.handlerName} handler) {`,
-        "      if (handler == null) throw new NullPointerException(\"callback\");",
-        "      if (this.ntsHandler != null) {",
-        `        throw new IllegalStateException(${javaString(
-          `A callback is already registered for ${callback.binding.ownerBinaryName}.${callback.binding.name}`,
-        )});`,
-        "      }",
-        "      this.ntsHandler = handler;",
-        "      return new NtsConnection(() -> {",
-        "        if (this.ntsHandler == handler) this.ntsHandler = null;",
-        "      });",
-        "    }",
-        "",
+        "    private int ntsHandlerKind;",
+      );
+      for (const site of sites) {
+        for (const capture of site.captures) {
+          lines.push(`    private ${capture.javaType} ${capture.fieldName};`);
+        }
+      }
+      lines.push("");
+      for (const site of sites) {
+        const captureParameters = site.captures.map(
+          (capture, index) => `${capture.javaType} c${index}`,
+        );
+        const kind = site.index + 1;
+        lines.push(
+          `    private NtsConnection ${site.registerName}(${captureParameters.join(", ")}) {`,
+          "      if (this.ntsHandlerKind != 0) {",
+          `        throw new IllegalStateException(${javaString(
+            `A callback is already registered for ${callback.binding.ownerBinaryName}.${callback.binding.name}`,
+          )});`,
+          "      }",
+        );
+        site.captures.forEach((capture, index) => {
+          lines.push(`      this.${capture.fieldName} = c${index};`);
+        });
+        lines.push(
+          `      this.ntsHandlerKind = ${kind};`,
+          "      return new NtsConnection(() -> {",
+          `        if (this.ntsHandlerKind != ${kind}) return;`,
+          "        this.ntsHandlerKind = 0;",
+        );
+        for (const capture of site.captures) {
+          if (capture.clearOnCancel) {
+            lines.push(`        this.${capture.fieldName} = null;`);
+          }
+        }
+        lines.push(
+          "      });",
+          "    }",
+          "",
+        );
+      }
+      lines.push(
         "    @Override",
         `    public void ${callback.binding.name}(${parameters.join(", ")}) {`,
-        `      ${callback.handlerName} handler = this.ntsHandler;`,
-        "      if (handler == null) {",
+        "      switch (this.ntsHandlerKind) {",
+      );
+      for (const site of sites) {
+        const kind = site.index + 1;
+        const captures = site.captures.map(
+          (capture) => `this.${capture.fieldName}`,
+        );
+        lines.push(
+          `        case ${kind}:`,
+          `          ${site.handlerName}(${[
+            ...captures,
+            ...arguments_,
+          ].join(", ")});`,
+          "          return;",
+        );
+      }
+      lines.push(
+        "        default:",
         `        throw new IllegalStateException(${javaString(
           `No callback is registered for ${callback.binding.ownerBinaryName}.${callback.binding.name}`,
         )});`,
         "      }",
-        `      handler.invoke(${arguments_.join(", ")});`,
         "    }",
         "  }",
         "",
@@ -496,9 +607,10 @@ class JavaEmitter {
   #emitFunction(fn: IrFunction): string[] {
     if (fn.async === true) throw new JvmUnsupportedError("async functions", fn.loc);
     if (fn.generator !== undefined) throw new JvmUnsupportedError("generator functions", fn.loc);
-    if ((fn.captures?.length ?? 0) !== 0) throw new JvmUnsupportedError("capturing functions", fn.loc);
     for (const local of fn.locals) {
-      if (local.boxed === true) throw new JvmUnsupportedError("boxed locals", fn.loc);
+      if (local.boxed === true && local.tdz === true) {
+        throw new JvmUnsupportedError("captured temporal-dead-zone bindings", fn.loc);
+      }
       if (
         local.nativeFrame !== undefined &&
         local.type.kind !== "nativeHandle" &&
@@ -510,12 +622,38 @@ class JavaEmitter {
     }
 
     this.#integerLocals = this.#machineIntegers.locals.get(fn.name) ?? new Set();
-    const params = fn.params.map((param) =>
-      `${this.#javaType(param.type, fn.loc)} ${encodedIdentifier("l", param.localId)}`
-    ).join(", ");
+    this.#mutableBoxedLocals = new Set(
+      fn.locals
+        .filter((local) => local.boxed === true && local.mutable)
+        .map((local) => local.id),
+    );
+    this.#currentFunction = fn;
+    const captures = (fn.captures ?? []).map((capture) => {
+      const local = this.#local(fn, capture.localId, fn.loc);
+      return `${this.#storageJavaType(local, fn.loc)} ${encodedIdentifier("l", capture.localId)}`;
+    });
+    const params = fn.params.map((param) => {
+      const local = this.#local(fn, param.localId, fn.loc);
+      const name = encodedIdentifier("l", param.localId);
+      return `${this.#javaType(param.type, fn.loc)} ${
+        this.#isMutableBox(local) ? `${name}_input` : name
+      }`;
+    });
     const lines = [
-      `  private static ${this.#javaType(fn.returnType, fn.loc)} ${encodedIdentifier("f", fn.name)}(${params}) {`,
+      `  private static ${this.#javaType(fn.returnType, fn.loc)} ${encodedIdentifier("f", fn.name)}(${[
+        ...captures,
+        ...params,
+      ].join(", ")}) {`,
     ];
+    for (const param of fn.params) {
+      const local = this.#local(fn, param.localId, fn.loc);
+      if (!this.#isMutableBox(local)) continue;
+      const name = encodedIdentifier("l", param.localId);
+      lines.push(
+        `    ${this.#boxJavaType(local.type, fn.loc)} ${name} = ` +
+          `new ${this.#boxJavaType(local.type, fn.loc)}(${name}_input);`,
+      );
+    }
     for (const stmt of fn.body) lines.push(...this.#stmt(fn, stmt, 2));
     lines.push("  }");
     return lines;
@@ -526,10 +664,24 @@ class JavaEmitter {
     switch (stmt.kind) {
       case "varDecl": {
         const local = this.#local(fn, stmt.localId, stmt.loc);
+        if (this.#isMutableBox(local)) {
+          const initial = stmt.init === null
+            ? this.#defaultJavaValue(local.type, stmt.loc)
+            : this.#expr(stmt.init);
+          const boxType = this.#boxJavaType(local.type, stmt.loc);
+          return [
+            `${pad}${boxType} ${encodedIdentifier("l", local.id)} = ` +
+              `new ${boxType}(${initial});`,
+          ];
+        }
         const integer = this.#integerBinding(local.id);
         const init = stmt.init === null
           ? ""
-          : ` = ${integer ? this.#intExpr(stmt.init) : this.#expr(stmt.init)}`;
+          : ` = ${
+            integer
+              ? this.#intExpr(stmt.init)
+              : this.#expr(stmt.init)
+          }`;
         const type = integer ? "int" : this.#javaType(local.type, stmt.loc);
         return [`${pad}${type} ${encodedIdentifier("l", local.id)}${init};`];
       }
@@ -834,7 +986,7 @@ class JavaEmitter {
       if (resultOwner !== direct.ownerBinaryName) {
         throw new Error(
           `JVM constructor binding '${expr.binding}' constructs '${direct.ownerBinaryName}', ` +
-            `but Native IR returns '${resultOwner}'`,
+          `but Native IR returns '${resultOwner}'`,
         );
       }
       return `new ${owner}(${args})`;
@@ -885,8 +1037,8 @@ class JavaEmitter {
       throw new Error(`JVM direct callback '${direct.id}' has no exact connection result`);
     }
     const closure = expr.args[1]!;
-    if (closure.kind !== "closure" || closure.captures.length !== 0) {
-      throw new JvmUnsupportedError("capturing direct JVM callbacks", closure.loc);
+    if (closure.kind !== "closure") {
+      throw new JvmUnsupportedError("non-literal direct JVM callback values", closure.loc);
     }
     const handler = this.#functions.get(closure.fnName);
     if (handler === undefined) {
@@ -894,8 +1046,10 @@ class JavaEmitter {
         `JVM direct callback '${direct.id}' names missing handler '${closure.fnName}'`,
       );
     }
-    if ((handler.captures?.length ?? 0) !== 0) {
-      throw new JvmUnsupportedError("capturing direct JVM callbacks", closure.loc);
+    if (closure.captures.length !== (handler.captures?.length ?? 0)) {
+      throw new Error(
+        `JVM direct callback '${direct.id}' closure capture count does not match its handler`,
+      );
     }
     if (
       handler.returnType.kind !== "void" ||
@@ -918,8 +1072,38 @@ class JavaEmitter {
         );
       }
     });
-    return `(${this.#expr(receiver)}).ntsRegister(` +
-      `${this.#options.className}::${encodedIdentifier("f", handler.name)})`;
+    const creator = this.#currentFunction;
+    if (creator === null) {
+      throw new Error(`JVM direct callback '${direct.id}' has no creating function`);
+    }
+    const siteIndex = this.#directCallbackSites.length;
+    const captures = closure.captures.map((id, captureIndex) => {
+      const local = this.#local(creator, id, closure.loc);
+      return Object.freeze({
+        fieldName: `ntsCapture${siteIndex}_${captureIndex}`,
+        javaType: this.#storageJavaType(local, closure.loc),
+        argument: this.#captureBinding(id, closure.loc),
+        clearOnCancel: this.#isMutableBox(local) ||
+          this.#boxKind(local.type, closure.loc) === "reference",
+      });
+    });
+    const site = Object.freeze({
+      callback: plan,
+      index: siteIndex,
+      registerName: `ntsRegister${siteIndex}`,
+      handlerName: encodedIdentifier("f", handler.name),
+      captures: Object.freeze(captures),
+    });
+    this.#directCallbackSites.push(site);
+    return this.#renderDirectCallbackSite(expr, site);
+  }
+
+  #renderDirectCallbackSite(
+    expr: Extract<IrExpr, { kind: "nativeCall" }>,
+    site: JvmDirectCallbackSitePlan,
+  ): string {
+    return `(${this.#expr(expr.args[0]!)}).${site.registerName}(` +
+      `${site.captures.map(({ argument }) => argument).join(", ")})`;
   }
 
   #directCancellation(
@@ -1103,9 +1287,22 @@ class JavaEmitter {
   }
 
   #binding(id: string): string {
-    return id.startsWith("%g.")
+    const binding = id.startsWith("%g.")
       ? encodedIdentifier("g", id)
       : encodedIdentifier("l", id);
+    return this.#mutableBoxedLocals.has(id) ? `${binding}.value` : binding;
+  }
+
+  #captureBinding(id: string, loc: SrcLoc): string {
+    const fn = this.#currentFunction;
+    if (fn === null) {
+      throw new Error("JVM direct callback capture has no creating function");
+    }
+    const local = this.#local(fn, id, loc);
+    if (local.boxed !== true) {
+      throw new Error(`JVM direct callback capture '${id}' is not a boxed local`);
+    }
+    return encodedIdentifier("l", id);
   }
 
   #integerBinding(id: string): boolean {
@@ -1123,6 +1320,45 @@ class JavaEmitter {
       return this.#javaHandleType(nullable.typeId, loc);
     }
     return scalarJavaType(type, loc);
+  }
+
+  #isMutableBox(local: IrFunction["locals"][number]): boolean {
+    return local.boxed === true && local.mutable;
+  }
+
+  #boxKind(type: IrType, loc: SrcLoc): "boolean" | "double" | "reference" {
+    if (type.kind === "f64") return "double";
+    if (type.kind === "bool") return "boolean";
+    const javaType = this.#javaType(type, loc);
+    if (javaType === "void" || javaType === "double" || javaType === "boolean") {
+      throw new JvmUnsupportedError(`mutable capture type '${type.kind}'`, loc);
+    }
+    return "reference";
+  }
+
+  #boxJavaType(type: IrType, loc: SrcLoc): string {
+    switch (this.#boxKind(type, loc)) {
+      case "double": return "NtsDoubleBox";
+      case "boolean": return "NtsBooleanBox";
+      case "reference": return `NtsReferenceBox<${this.#javaType(type, loc)}>`;
+    }
+  }
+
+  #storageJavaType(
+    local: IrFunction["locals"][number],
+    loc: SrcLoc,
+  ): string {
+    return this.#isMutableBox(local)
+      ? this.#boxJavaType(local.type, loc)
+      : this.#javaType(local.type, loc);
+  }
+
+  #defaultJavaValue(type: IrType, loc: SrcLoc): string {
+    switch (this.#boxKind(type, loc)) {
+      case "double": return "0.0d";
+      case "boolean": return "false";
+      case "reference": return "null";
+    }
   }
 
   #javaHandleType(typeId: string, loc: SrcLoc): string {
