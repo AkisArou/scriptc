@@ -2,6 +2,7 @@ import type {
   IrExpr,
   IrFunction,
   IrModule,
+  IrNativeBinding,
   IrStmt,
   IrType,
   SrcLoc,
@@ -30,7 +31,34 @@ export interface JvmEmissionOptions {
   /** Simple Java class name. Package qualification is supplied separately. */
   readonly className: string;
   readonly packageName?: string;
+  /** Exact target coordinates joined to Native IR binding ids by the JVM
+   * binding generator. This is target evidence, not a naming convention. */
+  readonly nativeBindings?: readonly JvmDirectBinding[];
+  /** Public Java wrappers a platform-owned harness may call after module
+   * initialization. The IR function remains the semantic implementation. */
+  readonly functionExports?: readonly {
+    readonly functionName: string;
+    readonly methodName: string;
+  }[];
 }
+
+export type JvmDirectBinding =
+  | {
+      readonly id: string;
+      readonly kind: "constructor";
+      readonly ownerBinaryName: string;
+      readonly name: "<init>";
+      readonly descriptor: string;
+      readonly nativeEntrySymbol: string;
+    }
+  | {
+      readonly id: string;
+      readonly kind: "static-method" | "instance-method";
+      readonly ownerBinaryName: string;
+      readonly name: string;
+      readonly descriptor: string;
+      readonly nativeEntrySymbol: string;
+    };
 
 function assertJavaIdentifier(value: string, role: string): void {
   if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(value)) {
@@ -40,9 +68,18 @@ function assertJavaIdentifier(value: string, role: string): void {
 
 function validateOptions(options: JvmEmissionOptions): void {
   assertJavaIdentifier(options.className, "class name");
-  if (options.packageName === undefined || options.packageName.length === 0) return;
-  for (const segment of options.packageName.split(".")) {
-    assertJavaIdentifier(segment, "package segment");
+  if (options.packageName !== undefined && options.packageName.length > 0) {
+    for (const segment of options.packageName.split(".")) {
+      assertJavaIdentifier(segment, "package segment");
+    }
+  }
+  const exportedNames = new Set<string>();
+  for (const exported of options.functionExports ?? []) {
+    assertJavaIdentifier(exported.methodName, "exported method name");
+    if (exportedNames.has(exported.methodName)) {
+      throw new Error(`Duplicate JVM exported method '${exported.methodName}'`);
+    }
+    exportedNames.add(exported.methodName);
   }
 }
 
@@ -93,15 +130,79 @@ function numberLiteral(value: number): string {
   return `${String(value)}d`;
 }
 
+interface JvmMethodDescriptor {
+  readonly parameters: readonly string[];
+  readonly result: string;
+}
+
+function parseJvmMethodDescriptor(descriptor: string): JvmMethodDescriptor {
+  let cursor = 0;
+  function type(allowVoid: boolean): string {
+    const start = cursor;
+    while (descriptor[cursor] === "[") cursor++;
+    const head = descriptor[cursor++];
+    if (head === undefined) throw new Error(`Malformed JVM descriptor '${descriptor}'`);
+    if (head === "L") {
+      const end = descriptor.indexOf(";", cursor);
+      if (end < 0 || end === cursor) {
+        throw new Error(`Malformed JVM descriptor '${descriptor}'`);
+      }
+      cursor = end + 1;
+    } else if (!"ZBCSIJFD".includes(head) && !(allowVoid && head === "V")) {
+      throw new Error(`Malformed JVM descriptor '${descriptor}'`);
+    }
+    return descriptor.slice(start, cursor);
+  }
+  if (descriptor[cursor++] !== "(") {
+    throw new Error(`Malformed JVM method descriptor '${descriptor}'`);
+  }
+  const parameters: string[] = [];
+  while (descriptor[cursor] !== ")") {
+    if (cursor >= descriptor.length) {
+      throw new Error(`Malformed JVM method descriptor '${descriptor}'`);
+    }
+    parameters.push(type(false));
+  }
+  cursor++;
+  const result = type(true);
+  if (cursor !== descriptor.length) {
+    throw new Error(`Malformed JVM descriptor '${descriptor}'`);
+  }
+  return { parameters, result };
+}
+
+function javaOwner(binaryName: string): string {
+  if (
+    binaryName.length === 0 ||
+    binaryName.split("/").some((segment) =>
+      !/^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(segment)
+    )
+  ) {
+    throw new Error(`JVM direct binding has non-Java owner '${binaryName}'`);
+  }
+  return binaryName.replaceAll("/", ".");
+}
+
 class JavaEmitter {
   readonly #module: IrModule;
   readonly #options: JvmEmissionOptions;
   readonly #functions: ReadonlyMap<string, IrFunction>;
+  readonly #irNativeBindings: ReadonlyMap<string, IrNativeBinding>;
+  readonly #jvmNativeBindings: ReadonlyMap<string, JvmDirectBinding>;
 
   constructor(module: IrModule, options: JvmEmissionOptions) {
     this.#module = module;
     this.#options = options;
     this.#functions = new Map(module.functions.map((fn) => [fn.name, fn]));
+    this.#irNativeBindings = new Map(
+      (module.nativeBindings ?? []).map((binding) => [binding.id, binding]),
+    );
+    this.#jvmNativeBindings = new Map(
+      (options.nativeBindings ?? []).map((binding) => [binding.id, binding]),
+    );
+    if (this.#jvmNativeBindings.size !== (options.nativeBindings?.length ?? 0)) {
+      throw new Error("JVM emission received duplicate direct binding ids");
+    }
   }
 
   emit(): string {
@@ -118,6 +219,24 @@ class JavaEmitter {
       lines.push(`package ${this.#options.packageName};`, "");
     }
     lines.push(`public final class ${this.#options.className} {`);
+    lines.push(
+      "  private static long ntsToUint32(double value) {",
+      "    if (!Double.isFinite(value) || value == 0.0d) return 0L;",
+      "    double whole = value < 0.0d ? Math.ceil(value) : Math.floor(value);",
+      "    double modulo = whole % 4294967296.0d;",
+      "    if (modulo < 0.0d) modulo += 4294967296.0d;",
+      "    return (long)modulo;",
+      "  }",
+      "",
+      "  private static int ntsToInt32(double value) {",
+      "    return (int)ntsToUint32(value);",
+      "  }",
+      "",
+      "  private static boolean ntsToBool(double value) {",
+      "    return value != 0.0d && !Double.isNaN(value);",
+      "  }",
+      "",
+    );
 
     for (const global of this.#module.globals ?? []) {
       lines.push(
@@ -130,9 +249,33 @@ class JavaEmitter {
       lines.push(...this.#emitFunction(fn), "");
     }
 
+    for (const exported of this.#options.functionExports ?? []) {
+      const fn = this.#functions.get(exported.functionName);
+      if (fn === undefined) {
+        throw new Error(
+          `JVM emission found no exported function '${exported.functionName}' ` +
+            `(available: ${[...this.#functions.keys()].join(", ")})`,
+        );
+      }
+      const params = fn.params.map((param, index) =>
+        `${javaType(param.type, fn.loc)} a${index}`
+      ).join(", ");
+      const args = fn.params.map((_, index) => `a${index}`).join(", ");
+      const call = `${encodedIdentifier("f", fn.name)}(${args})`;
+      lines.push(
+        `  public static ${javaType(fn.returnType, fn.loc)} ${exported.methodName}(${params}) {`,
+        fn.returnType.kind === "void" ? `    ${call};` : `    return ${call};`,
+        "  }",
+        "",
+      );
+    }
+
     lines.push(
-      "  public static void main(String[] args) {",
+      "  static {",
       `    ${encodedIdentifier("f", entry.name)}();`,
+      "  }",
+      "",
+      "  public static void main(String[] args) {",
       "  }",
       "}",
       "",
@@ -188,6 +331,15 @@ class JavaEmitter {
         }
         return lines;
       }
+      case "while": {
+        if ((stmt.labels?.length ?? 0) !== 0) {
+          throw new JvmUnsupportedError("labeled while loops", stmt.loc);
+        }
+        const lines = [`${pad}while (${this.#expr(stmt.cond)}) {`];
+        for (const child of stmt.body) lines.push(...this.#stmt(fn, child, depth + 1));
+        lines.push(`${pad}}`);
+        return lines;
+      }
       default:
         throw new JvmUnsupportedError(`statement '${stmt.kind}'`, stmt.loc);
     }
@@ -219,7 +371,18 @@ class JavaEmitter {
         const right = this.#expr(expr.right);
         if (expr.op === "**") return `Math.pow(${left}, ${right})`;
         if (["&", "|", "^", "<<", ">>", ">>>"].includes(expr.op)) {
-          throw new JvmUnsupportedError(`numeric operator '${expr.op}'`, expr.loc);
+          const signedLeft = `ntsToInt32(${left})`;
+          const signedRight = `ntsToInt32(${right})`;
+          const shift = `(int)(ntsToUint32(${right}) & 31L)`;
+          switch (expr.op) {
+            case "&": return `(double)(${signedLeft} & ${signedRight})`;
+            case "|": return `(double)(${signedLeft} | ${signedRight})`;
+            case "^": return `(double)(${signedLeft} ^ ${signedRight})`;
+            case "<<": return `(double)(${signedLeft} << ${shift})`;
+            case ">>": return `(double)(${signedLeft} >> ${shift})`;
+            case ">>>": return `(double)Integer.toUnsignedLong(${signedLeft} >>> ${shift})`;
+            default: throw new Error("unreachable JVM bitwise operator");
+          }
         }
         const operator = expr.op === "===" ? "==" : expr.op === "!==" ? "!=" : expr.op;
         return `(${left} ${operator} ${right})`;
@@ -237,6 +400,19 @@ class JavaEmitter {
         }
         return `(${expr.op}${this.#expr(expr.operand)})`;
       }
+      case "toBool": {
+        const operand = this.#expr(expr.operand);
+        if (expr.operand.type.kind === "f64") return `ntsToBool(${operand})`;
+        if (expr.operand.type.kind === "string") return `!(${operand}).isEmpty()`;
+        throw new JvmUnsupportedError(
+          `truthiness over '${expr.operand.type.kind}'`,
+          expr.loc,
+        );
+      }
+      case "ternary":
+        return `(${this.#expr(expr.cond)} ? ${this.#expr(expr.then)} : ${this.#expr(expr.else_)})`;
+      case "nativeCall":
+        return this.#nativeCall(expr);
       case "intrinsic": {
         if (
           (expr.name === "console.log" || expr.name === "console.error") &&
@@ -250,6 +426,92 @@ class JavaEmitter {
       }
       default:
         throw new JvmUnsupportedError(`expression '${expr.kind}'`, expr.loc);
+    }
+  }
+
+  #nativeCall(expr: Extract<IrExpr, { kind: "nativeCall" }>): string {
+    if (expr.resultMode !== undefined) {
+      throw new JvmUnsupportedError("frame-bounded native call results", expr.loc);
+    }
+    const direct = this.#jvmNativeBindings.get(expr.binding);
+    if (direct === undefined) {
+      throw new JvmUnsupportedError(
+        `native binding '${expr.binding}' without JVM coordinates`,
+        expr.loc,
+      );
+    }
+    const semantic = this.#irNativeBindings.get(expr.binding);
+    if (semantic === undefined) {
+      throw new Error(`JVM direct binding '${expr.binding}' has no Native IR binding`);
+    }
+    if (semantic.entry.symbol !== direct.nativeEntrySymbol) {
+      throw new Error(
+        `JVM direct binding '${expr.binding}' names native entry ` +
+          `'${direct.nativeEntrySymbol}', but Native IR names ` +
+          `'${semantic.entry.symbol}'`,
+      );
+    }
+    if (direct.kind !== "static-method") {
+      throw new JvmUnsupportedError(
+        `direct ${direct.kind} '${direct.ownerBinaryName}.${direct.name}${direct.descriptor}'`,
+        expr.loc,
+      );
+    }
+    assertJavaIdentifier(direct.name, "direct method name");
+    const descriptor = parseJvmMethodDescriptor(direct.descriptor);
+    if (descriptor.parameters.length !== expr.args.length) {
+      throw new Error(
+        `JVM direct binding '${expr.binding}' descriptor takes ` +
+          `${descriptor.parameters.length} arguments, but IR supplies ${expr.args.length}`,
+      );
+    }
+    if (
+      (expr.type.kind === "bool" && descriptor.result !== "Z") ||
+      (expr.type.kind === "void" && descriptor.result !== "V") ||
+      (expr.type.kind === "f64" && !"BCSIFD".includes(descriptor.result))
+    ) {
+      throw new Error(
+        `JVM direct binding '${expr.binding}' result '${descriptor.result}' ` +
+          `does not implement IR type '${expr.type.kind}'`,
+      );
+    }
+    const args = expr.args.map((arg, index) =>
+      this.#directArgument(arg, descriptor.parameters[index]!)
+    ).join(", ");
+    return `${javaOwner(direct.ownerBinaryName)}.${direct.name}(${args})`;
+  }
+
+  #directArgument(expr: IrExpr, descriptor: string): string {
+    if (expr.kind === "unionWrap") {
+      return expr.value.kind === "unitLit" ? "null" : this.#directArgument(expr.value, descriptor);
+    }
+    if (expr.kind === "unitLit") return "null";
+    if (descriptor.startsWith("L") || descriptor.startsWith("[")) {
+      if (expr.type.kind !== "string") {
+        throw new JvmUnsupportedError(
+          `direct reference argument from '${expr.type.kind}'`,
+          expr.loc,
+        );
+      }
+      return this.#expr(expr);
+    }
+    if (descriptor === "Z" && expr.type.kind === "bool") return this.#expr(expr);
+    if (expr.type.kind !== "f64") {
+      throw new JvmUnsupportedError(
+        `direct scalar '${descriptor}' from '${expr.type.kind}'`,
+        expr.loc,
+      );
+    }
+    const value = this.#expr(expr);
+    switch (descriptor) {
+      case "B": return `(byte)ntsToInt32(${value})`;
+      case "C": return `(char)ntsToUint32(${value})`;
+      case "S": return `(short)ntsToInt32(${value})`;
+      case "I": return `ntsToInt32(${value})`;
+      case "F": return `(float)(${value})`;
+      case "D": return value;
+      default:
+        throw new JvmUnsupportedError(`direct scalar descriptor '${descriptor}'`, expr.loc);
     }
   }
 

@@ -76,6 +76,7 @@ export {
   emitJvmModule,
   emitJvmSerializedModule,
   JvmUnsupportedError,
+  type JvmDirectBinding,
   type JvmEmissionOptions,
 } from "./backend/jvm/emitter.js";
 export type { ScrDiagnostic } from "./diagnostics/diagnostic.js";
