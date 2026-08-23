@@ -117,12 +117,19 @@ function javaString(value: string): string {
   return `${out}"`;
 }
 
+function isJvmByteArray(type: IrType): boolean {
+  return type.kind === "bytes" && type.elem === "u8";
+}
+
 function scalarJavaType(type: IrType, loc: SrcLoc): string {
   switch (type.kind) {
     case "void": return "void";
     case "f64": return "double";
     case "bool": return "boolean";
     case "string": return "String";
+    case "bytes":
+      if (type.elem === "u8") return "byte[]";
+      throw new JvmUnsupportedError(`bytes element '${type.elem}'`, loc);
     default: throw new JvmUnsupportedError(`type '${type.kind}'`, loc);
   }
 }
@@ -305,6 +312,7 @@ class JavaEmitter {
       if (
         local.nativeFrame !== undefined &&
         local.type.kind !== "nativeHandle" &&
+        !isJvmByteArray(local.type) &&
         this.#nullableHandle(local.type) === null
       ) {
         throw new JvmUnsupportedError("frame-bounded non-handle locals", fn.loc);
@@ -394,6 +402,24 @@ class JavaEmitter {
          * Java length() and JavaScript length both count UTF-16 code units,
          * so no encoding bridge or temporary representation is needed. */
         return `(double)((${this.#expr(expr.receiver)}).length())`;
+      }
+      case "bytesIntrinsic": {
+        if (
+          (expr.method !== "length" && expr.method !== "byteLength") ||
+          !isJvmByteArray(expr.receiver.type) ||
+          expr.args.length !== 0 ||
+          expr.type.kind !== "f64"
+        ) {
+          throw new JvmUnsupportedError(
+            `byte-array intrinsic '${expr.method}'`,
+            expr.loc,
+          );
+        }
+        /* Java byte[] and Uint8Array have the same fixed element count.
+         * The signedness of Java's byte element is irrelevant to length;
+         * element reads remain refused until their 0..255 widening is
+         * lowered explicitly. */
+        return `(double)((${this.#expr(expr.receiver)}).length)`;
       }
       case "varRef": return this.#binding(expr.localId);
       case "call":
@@ -556,6 +582,7 @@ class JavaEmitter {
     if (
       expr.resultMode !== undefined &&
       expr.type.kind !== "nativeHandle" &&
+      !isJvmByteArray(expr.type) &&
       this.#nullableHandle(expr.type) === null
     ) {
       throw new JvmUnsupportedError("frame-bounded native call results", expr.loc);
@@ -637,6 +664,7 @@ class JavaEmitter {
     if (type.kind === "void") return descriptor === "V";
     if (type.kind === "f64") return "BCSIFD".includes(descriptor);
     if (type.kind === "string") return descriptor === "Ljava/lang/String;";
+    if (isJvmByteArray(type)) return descriptor === "[B";
     if (type.kind === "nativeHandle") {
       return descriptor === `L${this.#nativeHandleOwner(type.typeId, loc)};`;
     }
@@ -652,7 +680,16 @@ class JavaEmitter {
       return expr.value.kind === "unitLit" ? "null" : this.#directArgument(expr.value, descriptor);
     }
     if (expr.kind === "unitLit") return "null";
-    if (descriptor.startsWith("L") || descriptor.startsWith("[")) {
+    if (descriptor.startsWith("[")) {
+      if (descriptor !== "[B" || !isJvmByteArray(expr.type)) {
+        throw new JvmUnsupportedError(
+          `direct array '${descriptor}' from '${expr.type.kind}'`,
+          expr.loc,
+        );
+      }
+      return this.#expr(expr);
+    }
+    if (descriptor.startsWith("L")) {
       if (
         expr.type.kind !== "string" &&
         expr.type.kind !== "nativeHandle" &&

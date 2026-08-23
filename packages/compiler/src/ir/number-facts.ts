@@ -1516,6 +1516,10 @@ class FnAnalyzer {
         return this.isPure(e.value);
       case "strIntrinsic":
         return this.isPure(e.receiver) && e.args.every((argument) => this.isPure(argument));
+      case "bytesIntrinsic":
+        return (e.method === "length" || e.method === "byteLength") &&
+          this.isPure(e.receiver) &&
+          e.args.every((argument) => this.isPure(argument));
       case "bin":
       case "strEq":
       case "strCmp":
@@ -1855,6 +1859,17 @@ class FnAnalyzer {
          * user code, so observing one must not erase immutable-global or
          * induction facts around it. */
         return e.method === "length" && e.type.kind === "f64"
+          ? absVal(0, SAFE_MAX, true, false)
+          : { ...TOP };
+      }
+      case "bytesIntrinsic": {
+        this.evalExpr(e.receiver, env);
+        for (const argument of e.args) this.evalExpr(argument, env);
+        /* Typed-array length observations cannot invoke user code. Their
+         * result is an integral safe length just like a string length, so
+         * they preserve surrounding immutable-global and induction facts. */
+        return (e.method === "length" || e.method === "byteLength") &&
+            e.type.kind === "f64"
           ? absVal(0, SAFE_MAX, true, false)
           : { ...TOP };
       }

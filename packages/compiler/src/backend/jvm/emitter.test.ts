@@ -74,10 +74,10 @@ test("the JVM emitter specializes only proved signed-integer locals", () => {
   expect(source).toMatch(/\bdouble l_[0-9a-f]+ = -0\.0d;/u);
 });
 
-test("the JVM emitter keeps strings as direct Java references", () => {
+test("the JVM emitter keeps strings and byte arrays as direct Java references", () => {
   const planned = planExecutableCompilation(referenceValues, {
     backend: "c",
-    externalFunctionRoots: ["utf16Length"],
+    externalFunctionRoots: ["utf16Length", "byteLength"],
   });
   expect(planned.ok).toBe(true);
   if (!planned.ok) return;
@@ -87,11 +87,31 @@ test("the JVM emitter keeps strings as direct Java references", () => {
     functionExports: [{
       functionName: "utf16Length",
       methodName: "utf16Length",
+    }, {
+      functionName: "byteLength",
+      methodName: "byteLength",
     }],
   });
 
   expect(source).toContain("public static double utf16Length(String a0)");
+  expect(source).toContain("public static double byteLength(byte[] a0)");
   expect(source).toMatch(/\.length\(\)/u);
+  expect(source).toMatch(/\.length\)/u);
   expect(source).not.toContain("UTF");
   expect(source).not.toContain("JNI");
+});
+
+test("the JVM emitter refuses unsigned byte element access until it is explicit", () => {
+  const planned = planExecutableCompilation(referenceValues, {
+    backend: "c",
+    externalFunctionRoots: ["firstByte"],
+  });
+  expect(planned.ok).toBe(true);
+  if (!planned.ok) return;
+
+  expect(() => emitJvmSerializedModule(planned.plan.ir, { className: "Refusal" }))
+    .toThrowError(new JvmUnsupportedError(
+      "byte-array intrinsic 'get'",
+      { file: "110-jvm-reference-values.ts", start: 225, end: 233 },
+    ));
 });
