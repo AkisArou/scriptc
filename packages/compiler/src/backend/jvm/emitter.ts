@@ -112,7 +112,7 @@ function javaString(value: string): string {
   return `${out}"`;
 }
 
-function javaType(type: IrType, loc: SrcLoc): string {
+function scalarJavaType(type: IrType, loc: SrcLoc): string {
   switch (type.kind) {
     case "void": return "void";
     case "f64": return "double";
@@ -187,6 +187,7 @@ class JavaEmitter {
   readonly #module: IrModule;
   readonly #options: JvmEmissionOptions;
   readonly #functions: ReadonlyMap<string, IrFunction>;
+  readonly #nativeTypes: ReadonlyMap<string, NonNullable<IrModule["nativeTypes"]>[number]>;
   readonly #irNativeBindings: ReadonlyMap<string, IrNativeBinding>;
   readonly #jvmNativeBindings: ReadonlyMap<string, JvmDirectBinding>;
 
@@ -194,6 +195,9 @@ class JavaEmitter {
     this.#module = module;
     this.#options = options;
     this.#functions = new Map(module.functions.map((fn) => [fn.name, fn]));
+    this.#nativeTypes = new Map(
+      (module.nativeTypes ?? []).map((type) => [type.id, type]),
+    );
     this.#irNativeBindings = new Map(
       (module.nativeBindings ?? []).map((binding) => [binding.id, binding]),
     );
@@ -240,7 +244,7 @@ class JavaEmitter {
 
     for (const global of this.#module.globals ?? []) {
       lines.push(
-        `  private static ${javaType(global.type, entry.loc)} ${encodedIdentifier("g", global.id)};`,
+        `  private static ${this.#javaType(global.type, entry.loc)} ${encodedIdentifier("g", global.id)};`,
       );
     }
     if ((this.#module.globals?.length ?? 0) > 0) lines.push("");
@@ -258,12 +262,12 @@ class JavaEmitter {
         );
       }
       const params = fn.params.map((param, index) =>
-        `${javaType(param.type, fn.loc)} a${index}`
+        `${this.#javaType(param.type, fn.loc)} a${index}`
       ).join(", ");
       const args = fn.params.map((_, index) => `a${index}`).join(", ");
       const call = `${encodedIdentifier("f", fn.name)}(${args})`;
       lines.push(
-        `  public static ${javaType(fn.returnType, fn.loc)} ${exported.methodName}(${params}) {`,
+        `  public static ${this.#javaType(fn.returnType, fn.loc)} ${exported.methodName}(${params}) {`,
         fn.returnType.kind === "void" ? `    ${call};` : `    return ${call};`,
         "  }",
         "",
@@ -289,16 +293,16 @@ class JavaEmitter {
     if ((fn.captures?.length ?? 0) !== 0) throw new JvmUnsupportedError("capturing functions", fn.loc);
     for (const local of fn.locals) {
       if (local.boxed === true) throw new JvmUnsupportedError("boxed locals", fn.loc);
-      if (local.nativeFrame !== undefined) {
-        throw new JvmUnsupportedError("frame-bounded native handles", fn.loc);
+      if (local.nativeFrame !== undefined && local.type.kind !== "nativeHandle") {
+        throw new JvmUnsupportedError("frame-bounded non-handle locals", fn.loc);
       }
     }
 
     const params = fn.params.map((param) =>
-      `${javaType(param.type, fn.loc)} ${encodedIdentifier("l", param.localId)}`
+      `${this.#javaType(param.type, fn.loc)} ${encodedIdentifier("l", param.localId)}`
     ).join(", ");
     const lines = [
-      `  private static ${javaType(fn.returnType, fn.loc)} ${encodedIdentifier("f", fn.name)}(${params}) {`,
+      `  private static ${this.#javaType(fn.returnType, fn.loc)} ${encodedIdentifier("f", fn.name)}(${params}) {`,
     ];
     for (const stmt of fn.body) lines.push(...this.#stmt(fn, stmt, 2));
     lines.push("  }");
@@ -311,7 +315,7 @@ class JavaEmitter {
       case "varDecl": {
         const local = this.#local(fn, stmt.localId, stmt.loc);
         const init = stmt.init === null ? "" : ` = ${this.#expr(stmt.init)}`;
-        return [`${pad}${javaType(local.type, stmt.loc)} ${encodedIdentifier("l", local.id)}${init};`];
+        return [`${pad}${this.#javaType(local.type, stmt.loc)} ${encodedIdentifier("l", local.id)}${init};`];
       }
       case "assign":
         return [`${pad}${this.#binding(stmt.localId)} = ${this.#expr(stmt.value)};`];
@@ -430,7 +434,7 @@ class JavaEmitter {
   }
 
   #nativeCall(expr: Extract<IrExpr, { kind: "nativeCall" }>): string {
-    if (expr.resultMode !== undefined) {
+    if (expr.resultMode !== undefined && expr.type.kind !== "nativeHandle") {
       throw new JvmUnsupportedError("frame-bounded native call results", expr.loc);
     }
     const direct = this.#jvmNativeBindings.get(expr.binding);
@@ -451,34 +455,69 @@ class JavaEmitter {
           `'${semantic.entry.symbol}'`,
       );
     }
-    if (direct.kind !== "static-method") {
-      throw new JvmUnsupportedError(
-        `direct ${direct.kind} '${direct.ownerBinaryName}.${direct.name}${direct.descriptor}'`,
-        expr.loc,
-      );
-    }
-    assertJavaIdentifier(direct.name, "direct method name");
     const descriptor = parseJvmMethodDescriptor(direct.descriptor);
-    if (descriptor.parameters.length !== expr.args.length) {
+    const receiverCount = direct.kind === "instance-method" ? 1 : 0;
+    if (descriptor.parameters.length + receiverCount !== expr.args.length) {
       throw new Error(
         `JVM direct binding '${expr.binding}' descriptor takes ` +
-          `${descriptor.parameters.length} arguments, but IR supplies ${expr.args.length}`,
+          `${descriptor.parameters.length} arguments${receiverCount === 0 ? "" : " plus a receiver"}, ` +
+          `but IR supplies ${expr.args.length}`,
       );
     }
-    if (
-      (expr.type.kind === "bool" && descriptor.result !== "Z") ||
-      (expr.type.kind === "void" && descriptor.result !== "V") ||
-      (expr.type.kind === "f64" && !"BCSIFD".includes(descriptor.result))
-    ) {
+    if (!this.#directResultMatches(
+      expr.type,
+      descriptor.result,
+      direct.kind,
+      expr.loc,
+    )) {
       throw new Error(
         `JVM direct binding '${expr.binding}' result '${descriptor.result}' ` +
           `does not implement IR type '${expr.type.kind}'`,
       );
     }
-    const args = expr.args.map((arg, index) =>
+    const args = expr.args.slice(receiverCount).map((arg, index) =>
       this.#directArgument(arg, descriptor.parameters[index]!)
     ).join(", ");
-    return `${javaOwner(direct.ownerBinaryName)}.${direct.name}(${args})`;
+    const owner = javaOwner(direct.ownerBinaryName);
+    if (direct.kind === "constructor") {
+      if (expr.type.kind !== "nativeHandle") {
+        throw new Error(`JVM constructor binding '${expr.binding}' has a non-handle IR result`);
+      }
+      const resultOwner = this.#nativeHandleOwner(expr.type.typeId, expr.loc);
+      if (resultOwner !== direct.ownerBinaryName) {
+        throw new Error(
+          `JVM constructor binding '${expr.binding}' constructs '${direct.ownerBinaryName}', ` +
+            `but Native IR returns '${resultOwner}'`,
+        );
+      }
+      return `new ${owner}(${args})`;
+    }
+    assertJavaIdentifier(direct.name, "direct method name");
+    if (direct.kind === "instance-method") {
+      const receiver = expr.args[0]!;
+      if (receiver.type.kind !== "nativeHandle") {
+        throw new Error(`JVM instance binding '${expr.binding}' has a non-handle receiver`);
+      }
+      return `(${this.#expr(receiver)}).${direct.name}(${args})`;
+    }
+    return `${owner}.${direct.name}(${args})`;
+  }
+
+  #directResultMatches(
+    type: IrType,
+    descriptor: string,
+    kind: JvmDirectBinding["kind"],
+    loc: SrcLoc,
+  ): boolean {
+    if (kind === "constructor") return type.kind === "nativeHandle" && descriptor === "V";
+    if (type.kind === "bool") return descriptor === "Z";
+    if (type.kind === "void") return descriptor === "V";
+    if (type.kind === "f64") return "BCSIFD".includes(descriptor);
+    if (type.kind === "string") return descriptor === "Ljava/lang/String;";
+    if (type.kind === "nativeHandle") {
+      return descriptor === `L${this.#nativeHandleOwner(type.typeId, loc)};`;
+    }
+    return false;
   }
 
   #directArgument(expr: IrExpr, descriptor: string): string {
@@ -487,7 +526,7 @@ class JavaEmitter {
     }
     if (expr.kind === "unitLit") return "null";
     if (descriptor.startsWith("L") || descriptor.startsWith("[")) {
-      if (expr.type.kind !== "string") {
+      if (expr.type.kind !== "string" && expr.type.kind !== "nativeHandle") {
         throw new JvmUnsupportedError(
           `direct reference argument from '${expr.type.kind}'`,
           expr.loc,
@@ -519,6 +558,27 @@ class JavaEmitter {
     return id.startsWith("%g.")
       ? encodedIdentifier("g", id)
       : encodedIdentifier("l", id);
+  }
+
+  #javaType(type: IrType, loc: SrcLoc): string {
+    if (type.kind !== "nativeHandle") return scalarJavaType(type, loc);
+    return javaOwner(this.#nativeHandleOwner(type.typeId, loc));
+  }
+
+  #nativeHandleOwner(typeId: string, loc: SrcLoc): string {
+    const definition = this.#nativeTypes.get(typeId);
+    if (definition?.kind !== "handle") {
+      throw new JvmUnsupportedError(`native handle type '${typeId}'`, loc);
+    }
+    const owner = definition.nativeName;
+    if (owner === "jobject") {
+      throw new JvmUnsupportedError(
+        `native handle type '${typeId}' without concrete JVM class coordinates`,
+        loc,
+      );
+    }
+    javaOwner(owner);
+    return owner;
   }
 
   #local(fn: IrFunction, id: string, loc: SrcLoc): IrFunction["locals"][number] {
