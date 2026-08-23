@@ -2103,7 +2103,12 @@ class FnAnalyzer {
   private havocAllGlobals(env: Env): void {
     clearPathFacts(env);
     for (const k of [...env.keys()]) {
-      if (isGlobalId(k)) env.delete(k);
+      /* Re-entrant callbacks may mutate only mutable bindings. Literal
+       * immutable globals are source-level constants, so forgetting their
+       * value here is not conservative—it is simply false, and it can make
+       * one retained callback de-specialize every unrelated loop whose
+       * bound is such a constant. */
+      if (isGlobalId(k) && !this.globalSeeds.has(k)) env.delete(k);
     }
   }
 }

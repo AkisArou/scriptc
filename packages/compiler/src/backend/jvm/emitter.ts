@@ -63,7 +63,32 @@ export type JvmDirectBinding =
       readonly name: string;
       readonly descriptor: string;
       readonly nativeEntrySymbol: string;
+    }
+  | {
+      readonly id: string;
+      readonly kind: "instance-callback";
+      readonly ownerBinaryName: string;
+      readonly name: string;
+      readonly descriptor: string;
+      readonly nativeEntrySymbol: string;
+      readonly interfaceBinaryName: string;
+      readonly cancellation: {
+        readonly bindingId: string;
+        readonly nativeEntrySymbol: string;
+      };
     };
+
+type JvmDirectCallbackBinding = Extract<
+  JvmDirectBinding,
+  { readonly kind: "instance-callback" }
+>;
+
+interface JvmDirectCallbackPlan {
+  readonly binding: JvmDirectCallbackBinding;
+  readonly handlerName: string;
+  readonly adapterName: string;
+  readonly descriptor: JvmMethodDescriptor;
+}
 
 function assertJavaIdentifier(value: string, role: string): void {
   if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(value)) {
@@ -195,6 +220,33 @@ function javaOwner(binaryName: string): string {
   return binaryName.replaceAll("/", ".");
 }
 
+const descriptorJavaTypes: Readonly<Record<string, string>> = Object.freeze({
+  Z: "boolean",
+  B: "byte",
+  C: "char",
+  S: "short",
+  I: "int",
+  J: "long",
+  F: "float",
+  D: "double",
+  V: "void",
+});
+
+/** A descriptor carries a binary nested-class name (`Outer$Inner`), while
+ * Java source names the same declaration `Outer.Inner`. */
+function javaDescriptorType(descriptor: string): string {
+  let dimensions = 0;
+  while (descriptor[dimensions] === "[") dimensions++;
+  const value = descriptor.slice(dimensions);
+  const base = value.startsWith("L") && value.endsWith(";")
+    ? value.slice(1, -1).replace(/[/$]/gu, ".")
+    : descriptorJavaTypes[value];
+  if (base === undefined || (base === "void" && dimensions !== 0)) {
+    throw new Error(`Malformed JVM field descriptor '${descriptor}'`);
+  }
+  return `${base}${"[]".repeat(dimensions)}`;
+}
+
 class JavaEmitter {
   readonly #module: IrModule;
   readonly #options: JvmEmissionOptions;
@@ -202,6 +254,13 @@ class JavaEmitter {
   readonly #nativeTypes: ReadonlyMap<string, NonNullable<IrModule["nativeTypes"]>[number]>;
   readonly #irNativeBindings: ReadonlyMap<string, IrNativeBinding>;
   readonly #jvmNativeBindings: ReadonlyMap<string, JvmDirectBinding>;
+  readonly #directCallbacks: readonly JvmDirectCallbackPlan[];
+  readonly #directCallbackByOwner: ReadonlyMap<string, JvmDirectCallbackPlan>;
+  readonly #directCancellationBindings: ReadonlyMap<string, {
+    readonly nativeEntrySymbol: string;
+    readonly connectionTypeId: string;
+  }>;
+  readonly #directConnectionTypeIds: ReadonlySet<string>;
   readonly #machineIntegers: MachineIntegerFacts;
   #integerLocals: ReadonlySet<string> = new Set();
 
@@ -218,6 +277,65 @@ class JavaEmitter {
     this.#jvmNativeBindings = new Map(
       (options.nativeBindings ?? []).map((binding) => [binding.id, binding]),
     );
+    this.#directCallbacks = Object.freeze(
+      (options.nativeBindings ?? [])
+        .filter((binding): binding is JvmDirectCallbackBinding =>
+          binding.kind === "instance-callback"
+        )
+        .sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0)
+        .map((binding, index) => Object.freeze({
+          binding,
+          handlerName: `NtsCallback${index}`,
+          adapterName: `NtsCallbackAdapter${index}`,
+          descriptor: parseJvmMethodDescriptor(binding.descriptor),
+        })),
+    );
+    const callbackByOwner = new Map<string, JvmDirectCallbackPlan>();
+    const cancellationBindings = new Map<string, {
+      readonly nativeEntrySymbol: string;
+      readonly connectionTypeId: string;
+    }>();
+    const connectionTypeIds = new Set<string>();
+    for (const callback of this.#directCallbacks) {
+      if (callbackByOwner.has(callback.binding.ownerBinaryName)) {
+        throw new Error(
+          `JVM direct callback owner '${callback.binding.ownerBinaryName}' ` +
+            "carries more than one substitutable callback",
+        );
+      }
+      callbackByOwner.set(callback.binding.ownerBinaryName, callback);
+      const semantic = this.#irNativeBindings.get(callback.binding.id);
+      if (semantic === undefined) {
+        /* The full sidecar may contain unreachable entries. Only entries in
+         * this translated Native IR need a representation. */
+        continue;
+      }
+      if (semantic.result.type.kind !== "nativeHandle") {
+        throw new Error(
+          `JVM direct callback '${callback.binding.id}' does not return a connection handle`,
+        );
+      }
+      const connectionTypeId = semantic.result.type.typeId;
+      connectionTypeIds.add(connectionTypeId);
+      const prior = cancellationBindings.get(callback.binding.cancellation.bindingId);
+      if (
+        prior !== undefined &&
+        (prior.connectionTypeId !== connectionTypeId ||
+          prior.nativeEntrySymbol !== callback.binding.cancellation.nativeEntrySymbol)
+      ) {
+        throw new Error(
+          `JVM direct cancellation '${callback.binding.cancellation.bindingId}' ` +
+            "has conflicting callback coordinates",
+        );
+      }
+      cancellationBindings.set(callback.binding.cancellation.bindingId, {
+        nativeEntrySymbol: callback.binding.cancellation.nativeEntrySymbol,
+        connectionTypeId,
+      });
+    }
+    this.#directCallbackByOwner = callbackByOwner;
+    this.#directCancellationBindings = cancellationBindings;
+    this.#directConnectionTypeIds = connectionTypeIds;
     this.#machineIntegers = machineIntegerFacts(module);
     if (this.#jvmNativeBindings.size !== (options.nativeBindings?.length ?? 0)) {
       throw new Error("JVM emission received duplicate direct binding ids");
@@ -256,6 +374,8 @@ class JavaEmitter {
       "  }",
       "",
     );
+
+    lines.push(...this.#emitDirectCallbackSupport());
 
     for (const global of this.#module.globals ?? []) {
       const integer = this.#machineIntegers.globals.has(global.id);
@@ -301,6 +421,76 @@ class JavaEmitter {
       "",
     );
     return lines.join("\n");
+  }
+
+  #emitDirectCallbackSupport(): string[] {
+    if (this.#directCallbacks.length === 0) return [];
+    const lines = [
+      "  private static final class NtsConnection {",
+      "    private Runnable ntsCancel;",
+      "",
+      "    private NtsConnection(Runnable ntsCancel) {",
+      "      this.ntsCancel = ntsCancel;",
+      "    }",
+      "",
+      "    private void disconnect() {",
+      "      Runnable cancel = this.ntsCancel;",
+      "      if (cancel == null) return;",
+      "      this.ntsCancel = null;",
+      "      cancel.run();",
+      "    }",
+      "  }",
+      "",
+    ];
+    for (const callback of this.#directCallbacks) {
+      if (callback.descriptor.result !== "V") {
+        throw new Error(
+          `JVM direct callback '${callback.binding.id}' has non-void ` +
+            `descriptor result '${callback.descriptor.result}'`,
+        );
+      }
+      const parameters = callback.descriptor.parameters.map((descriptor, index) =>
+        `${javaDescriptorType(descriptor)} a${index}`
+      );
+      const arguments_ = callback.descriptor.parameters.map((_, index) => `a${index}`);
+      const interfaceName = callback.binding.interfaceBinaryName.replace(/[/$]/gu, ".");
+      assertJavaIdentifier(callback.binding.name, "direct callback name");
+      lines.push(
+        `  private interface ${callback.handlerName} {`,
+        `    void invoke(${parameters.join(", ")});`,
+        "  }",
+        "",
+        `  private static final class ${callback.adapterName} implements ${interfaceName} {`,
+        `    private ${callback.handlerName} ntsHandler;`,
+        "",
+        `    private NtsConnection ntsRegister(${callback.handlerName} handler) {`,
+        "      if (handler == null) throw new NullPointerException(\"callback\");",
+        "      if (this.ntsHandler != null) {",
+        `        throw new IllegalStateException(${javaString(
+          `A callback is already registered for ${callback.binding.ownerBinaryName}.${callback.binding.name}`,
+        )});`,
+        "      }",
+        "      this.ntsHandler = handler;",
+        "      return new NtsConnection(() -> {",
+        "        if (this.ntsHandler == handler) this.ntsHandler = null;",
+        "      });",
+        "    }",
+        "",
+        "    @Override",
+        `    public void ${callback.binding.name}(${parameters.join(", ")}) {`,
+        `      ${callback.handlerName} handler = this.ntsHandler;`,
+        "      if (handler == null) {",
+        `        throw new IllegalStateException(${javaString(
+          `No callback is registered for ${callback.binding.ownerBinaryName}.${callback.binding.name}`,
+        )});`,
+        "      }",
+        `      handler.invoke(${arguments_.join(", ")});`,
+        "    }",
+        "  }",
+        "",
+      );
+    }
+    return lines;
   }
 
   #emitFunction(fn: IrFunction): string[] {
@@ -587,6 +777,10 @@ class JavaEmitter {
     ) {
       throw new JvmUnsupportedError("frame-bounded native call results", expr.loc);
     }
+    const cancellation = this.#directCancellationBindings.get(expr.binding);
+    if (cancellation !== undefined) {
+      return this.#directCancellation(expr, cancellation);
+    }
     const direct = this.#jvmNativeBindings.get(expr.binding);
     if (direct === undefined) {
       throw new JvmUnsupportedError(
@@ -604,6 +798,9 @@ class JavaEmitter {
           `'${direct.nativeEntrySymbol}', but Native IR names ` +
           `'${semantic.entry.symbol}'`,
       );
+    }
+    if (direct.kind === "instance-callback") {
+      return this.#directCallback(expr, direct, semantic);
     }
     const descriptor = parseJvmMethodDescriptor(direct.descriptor);
     const receiverCount = direct.kind === "instance-method" ? 1 : 0;
@@ -628,7 +825,7 @@ class JavaEmitter {
     const args = expr.args.slice(receiverCount).map((arg, index) =>
       this.#directArgument(arg, descriptor.parameters[index]!)
     ).join(", ");
-    const owner = javaOwner(direct.ownerBinaryName);
+    const owner = this.#directOwnerType(direct.ownerBinaryName);
     if (direct.kind === "constructor") {
       if (expr.type.kind !== "nativeHandle") {
         throw new Error(`JVM constructor binding '${expr.binding}' has a non-handle IR result`);
@@ -653,6 +850,107 @@ class JavaEmitter {
     return `${owner}.${direct.name}(${args})`;
   }
 
+  #directCallback(
+    expr: Extract<IrExpr, { kind: "nativeCall" }>,
+    direct: JvmDirectCallbackBinding,
+    semantic: IrNativeBinding,
+  ): string {
+    const plan = this.#directCallbacks.find(({ binding }) => binding.id === direct.id);
+    if (plan === undefined) {
+      throw new Error(`JVM direct callback '${direct.id}' has no emission plan`);
+    }
+    if (expr.args.length !== 2) {
+      throw new JvmUnsupportedError(
+        `direct callback '${direct.id}' with ${expr.args.length - 1} handler values`,
+        expr.loc,
+      );
+    }
+    const receiver = expr.args[0]!;
+    if (receiver.type.kind !== "nativeHandle") {
+      throw new Error(`JVM direct callback '${direct.id}' has a non-handle receiver`);
+    }
+    const receiverOwner = this.#nativeHandleOwner(receiver.type.typeId, receiver.loc);
+    if (receiverOwner !== direct.ownerBinaryName) {
+      throw new Error(
+        `JVM direct callback '${direct.id}' registers on '${receiverOwner}', ` +
+          `not '${direct.ownerBinaryName}'`,
+      );
+    }
+    if (
+      expr.type.kind !== "nativeHandle" ||
+      !this.#directConnectionTypeIds.has(expr.type.typeId) ||
+      semantic.result.type.kind !== "nativeHandle" ||
+      semantic.result.type.typeId !== expr.type.typeId
+    ) {
+      throw new Error(`JVM direct callback '${direct.id}' has no exact connection result`);
+    }
+    const closure = expr.args[1]!;
+    if (closure.kind !== "closure" || closure.captures.length !== 0) {
+      throw new JvmUnsupportedError("capturing direct JVM callbacks", closure.loc);
+    }
+    const handler = this.#functions.get(closure.fnName);
+    if (handler === undefined) {
+      throw new Error(
+        `JVM direct callback '${direct.id}' names missing handler '${closure.fnName}'`,
+      );
+    }
+    if ((handler.captures?.length ?? 0) !== 0) {
+      throw new JvmUnsupportedError("capturing direct JVM callbacks", closure.loc);
+    }
+    if (
+      handler.returnType.kind !== "void" ||
+      plan.descriptor.result !== "V" ||
+      handler.params.length !== plan.descriptor.parameters.length
+    ) {
+      throw new Error(
+        `JVM direct callback '${direct.id}' handler does not match '${direct.descriptor}'`,
+      );
+    }
+    handler.params.forEach((parameter, index) => {
+      if (!this.#directValueMatches(
+        parameter.type,
+        plan.descriptor.parameters[index]!,
+        closure.loc,
+      )) {
+        throw new Error(
+          `JVM direct callback '${direct.id}' payload ${index} does not match ` +
+            `'${plan.descriptor.parameters[index]}'`,
+        );
+      }
+    });
+    return `(${this.#expr(receiver)}).ntsRegister(` +
+      `${this.#options.className}::${encodedIdentifier("f", handler.name)})`;
+  }
+
+  #directCancellation(
+    expr: Extract<IrExpr, { kind: "nativeCall" }>,
+    cancellation: {
+      readonly nativeEntrySymbol: string;
+      readonly connectionTypeId: string;
+    },
+  ): string {
+    const semantic = this.#irNativeBindings.get(expr.binding);
+    if (semantic === undefined) {
+      throw new Error(`JVM direct cancellation '${expr.binding}' has no Native IR binding`);
+    }
+    if (semantic.entry.symbol !== cancellation.nativeEntrySymbol) {
+      throw new Error(
+        `JVM direct cancellation '${expr.binding}' names native entry ` +
+          `'${cancellation.nativeEntrySymbol}', but Native IR names ` +
+          `'${semantic.entry.symbol}'`,
+      );
+    }
+    if (
+      expr.args.length !== 1 ||
+      expr.args[0]!.type.kind !== "nativeHandle" ||
+      expr.args[0]!.type.typeId !== cancellation.connectionTypeId ||
+      expr.type.kind !== "void"
+    ) {
+      throw new Error(`JVM direct cancellation '${expr.binding}' has the wrong IR shape`);
+    }
+    return `(${this.#expr(expr.args[0]!)}).disconnect()`;
+  }
+
   #directResultMatches(
     type: IrType,
     descriptor: string,
@@ -660,6 +958,15 @@ class JavaEmitter {
     loc: SrcLoc,
   ): boolean {
     if (kind === "constructor") return type.kind === "nativeHandle" && descriptor === "V";
+    if (kind === "instance-callback") return false;
+    return this.#directValueMatches(type, descriptor, loc);
+  }
+
+  #directValueMatches(
+    type: IrType,
+    descriptor: string,
+    loc: SrcLoc,
+  ): boolean {
     if (type.kind === "bool") return descriptor === "Z";
     if (type.kind === "void") return descriptor === "V";
     if (type.kind === "f64") return "BCSIFD".includes(descriptor);
@@ -807,15 +1114,25 @@ class JavaEmitter {
 
   #javaType(type: IrType, loc: SrcLoc): string {
     if (type.kind === "nativeHandle") {
-      return javaOwner(this.#nativeHandleOwner(type.typeId, loc));
+      return this.#javaHandleType(type.typeId, loc);
     }
     const nullable = this.#nullableHandle(type);
     if (nullable !== null) {
       /* Java references already carry null. Keeping T | null unboxed is
        * both the exact representation and what lets javac verify uses. */
-      return javaOwner(this.#nativeHandleOwner(nullable.typeId, loc));
+      return this.#javaHandleType(nullable.typeId, loc);
     }
     return scalarJavaType(type, loc);
+  }
+
+  #javaHandleType(typeId: string, loc: SrcLoc): string {
+    if (this.#directConnectionTypeIds.has(typeId)) return "NtsConnection";
+    return this.#directOwnerType(this.#nativeHandleOwner(typeId, loc));
+  }
+
+  #directOwnerType(ownerBinaryName: string): string {
+    return this.#directCallbackByOwner.get(ownerBinaryName)?.adapterName ??
+      javaOwner(ownerBinaryName);
   }
 
   #nullableHandle(type: IrType): {

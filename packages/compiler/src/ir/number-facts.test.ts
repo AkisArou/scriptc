@@ -13,6 +13,7 @@ import { describe, expect, test } from "vitest";
 import { IR_VERSION, type IrExpr, type IrFunction, type IrModule, type IrNativeBinding, type IrNumBinOp, type IrStmt } from "./nodes.js";
 import {
   checkLibraryIntegerSlots,
+  machineIntegerFacts,
   type IntSlotConfig,
   numberBoundaryFacts,
   type IntVerdict,
@@ -1076,6 +1077,49 @@ describe("the native checked-number boundary", () => {
         [{ kind: "exprStmt", expr: nativeCall("u8_identity", ref("i.0")), loc }],
       ),
     ]))).toEqual(["certified"]);
+  });
+
+  test("retained callbacks do not erase immutable loop bounds", () => {
+    const limit = "%g.limit";
+    const mod = nativeCase(["i"], [
+      forLoop(
+        decl("i.0", num(0)),
+        bin("<", ref("i.0"), {
+          kind: "varRef",
+          localId: limit,
+          type: F64,
+          loc,
+        }),
+        assign("i.0", bin("+", ref("i.0"), num(1))),
+        [{ kind: "exprStmt", expr: nativeCall("u8_identity", ref("i.0")), loc }],
+      ),
+    ]);
+    mod.globals = [{ id: limit, name: "limit", type: F64, mutable: false }];
+    mod.functions.unshift({
+      name: "init",
+      params: [],
+      returnType: VOID,
+      locals: [],
+      body: [assign(limit, num(10))],
+      loc,
+    });
+    mod.entry = "init";
+    mod.ffiImports = [{
+      name: "retain",
+      symbol: "retain",
+      params: [{
+        callback: {
+          id: "handler",
+          params: [],
+          returns: "void",
+          lifetime: "retained",
+          invoke: "script-thread",
+        },
+      }],
+      returns: "void",
+    }];
+
+    expect(machineIntegerFacts(mod).locals.get("case")?.has("i.0")).toBe(true);
   });
 
   test("arithmetic that can leave the slot keeps its check", () => {
