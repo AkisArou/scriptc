@@ -72,6 +72,12 @@ export {
 } from "./backend/cc.js";
 export { ANDROID_MIN_API, IPHONEOS_MIN_VERSION, isAndroidTarget, isIosTarget, isMobileTarget, mobileLibraryTarget, mobileTargetRefusal } from "./backend/cc.js";
 export { emitModule } from "./backend/emission/emitter.js";
+export {
+  emitJvmModule,
+  emitJvmSerializedModule,
+  JvmUnsupportedError,
+  type JvmEmissionOptions,
+} from "./backend/jvm/emitter.js";
 export type { ScrDiagnostic } from "./diagnostics/diagnostic.js";
 export { renderAll, renderDiagnostic } from "./diagnostics/render.js";
 export { renderCoverage, type CoverageInput } from "./coverage/report.js";
