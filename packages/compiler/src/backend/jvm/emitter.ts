@@ -415,6 +415,23 @@ class JavaEmitter {
       }
       case "ternary":
         return `(${this.#expr(expr.cond)} ? ${this.#expr(expr.then)} : ${this.#expr(expr.else_)})`;
+      case "upcast":
+        if (
+          expr.value.type.kind === "nativeHandle" &&
+          expr.type.kind === "nativeHandle"
+        ) {
+          /* Native IR already proves this is an identity edge. Direct JVM
+           * references need no ownership or representation operation; leave
+           * the value in Java's type system so javac still verifies that the
+           * source class is assignable to the target class. */
+          this.#nativeHandleOwner(expr.value.type.typeId, expr.loc);
+          this.#nativeHandleOwner(expr.type.typeId, expr.loc);
+          return this.#expr(expr.value);
+        }
+        throw new JvmUnsupportedError(
+          `upcast from '${expr.value.type.kind}' to '${expr.type.kind}'`,
+          expr.loc,
+        );
       case "nativeCall":
         return this.#nativeCall(expr);
       case "intrinsic": {

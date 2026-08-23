@@ -308,6 +308,11 @@ export type PlanExecutableCompilationOptions = Pick<
   | "sanitize"
 > & {
   readonly backend: "c" | "llvm";
+  /** Entry-file functions an embedder-generated host calls from outside the
+   * ScriptC graph. Ordinary executables still root only at module evaluation;
+   * a target producing another VM's entry class names the exact additional
+   * bodies whose public wrappers it will emit. */
+  readonly externalFunctionRoots?: readonly string[];
   /** Root used to canonicalize every reached IR source identity. Defaults to
    * the entry module's directory. */
   readonly sourceRoot?: string;
@@ -1190,7 +1195,9 @@ type ExecutableLoweringOptions = Pick<
   | "native"
   | "npmStatic"
   | "sanitize"
->;
+> & {
+  readonly externalFunctionRoots?: readonly string[];
+};
 
 type PreparedExecutableCompilation =
   | {
@@ -1306,6 +1313,9 @@ function lowerExecutable(
       lowered = fe.lower({
         dynamic: opts.dynamic ?? false,
         targetPlatform: buildPlatform,
+        ...(opts.externalFunctionRoots === undefined
+          ? {}
+          : { libRoots: opts.externalFunctionRoots }),
         ...(ffi !== null ? { ffiImports: ffi.functions } : {}),
       });
     } catch (e) {

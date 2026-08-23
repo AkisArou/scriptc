@@ -147,6 +147,32 @@ test("emission rejects an unknown backend before reading IR", () => {
   ).toThrowError(/invalid backend/u);
 });
 
+test("an embedder can root an entry function called from outside the graph", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "scriptc-external-root-"));
+  temporaryDirectories.push(directory);
+  const entryPath = join(directory, "main.ts");
+  await writeFile(
+    entryPath,
+    "export function calledFromHost(value: number): number {\n" +
+      "  return value + 1;\n" +
+      "}\n" +
+      "export function deadExport(): number {\n" +
+      "  return 0;\n" +
+      "}\n",
+  );
+  const planned = planExecutableCompilation(entryPath, {
+    backend: "c",
+    externalFunctionRoots: ["calledFromHost"],
+  });
+  expect(planned.ok).toBe(true);
+  if (!planned.ok) return;
+  const module = JSON.parse(planned.plan.ir) as {
+    readonly functions: readonly { readonly name: string }[];
+  };
+  expect(module.functions.map(({ name }) => name)).toContain("calledFromHost");
+  expect(module.functions.map(({ name }) => name)).not.toContain("deadExport");
+});
+
 test("external build planning requires every native link artifact", async () => {
   const directory = await mkdtemp(join(tmpdir(), "scriptc-external-plan-"));
   temporaryDirectories.push(directory);
