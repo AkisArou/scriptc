@@ -3,23 +3,24 @@
  * a boundary slot, or REFUSES with the failed obligation, the observed
  * evidence, and the author's fix.
  *
- * It has two consumers, and they ask the same question of the same domain.
+ * It has three consumers, and they ask the same question of the same domain.
  * The library lane asks it of a profile-declared i64/u64 slot, where a
  * failed proof is an error because the slot has no run-time check. The
  * native lane asks it of a checked-number parameter projection, where a
  * failed proof is merely the ordinary answer — the check stays — and a
- * successful one deletes the check. The domain lives here, in the IR layer,
- * because neither consumer owns it.
+ * successful one deletes the check. The JVM tier asks whether a local and
+ * the expressions feeding it can use a Java int without changing number
+ * semantics. The domain lives here, in the IR layer, because no consumer
+ * owns the proof.
  *
  * The rest of this header describes the library obligation, which is the
  * older and stricter of the two; the native boundary is documented at the
  * bottom of the file.
  *
- * The two-layer model (the ask-4 reference package): Layer 1 —
- * representing provably-integer numbers as machine integers inside
- * compiled code — is an engine-style optimization this module does NOT
- * implement and nothing here constrains; semantics stay f64, byte-exact
- * to Node. Layer 2 — this module — is the boundary: a profile declares
+ * The two-layer model (the ask-4 reference package): Layer 1 represents
+ * provably-integer local values as machine integers inside compiled code;
+ * this module now publishes the conservative facts used by the JVM tier.
+ * Layer 2 is the boundary: a profile declares
  * specific ABI slots i64/u64 (export/helper parameters and returns,
  * message-arm payloads, record fields), and every value that can reach a
  * declared slot must discharge, at compile time:
@@ -43,7 +44,7 @@
  *
  * The abstract domain is an interval over the extended reals joined with
  * a wholeness flag, a may-be-NaN flag (NaN lives OUTSIDE the interval),
- * and the literal spelling. Transfer functions implement JS semantics,
+ * a may-be-negative-zero flag, and the literal spelling. Transfer functions implement JS semantics,
  * never idealized math: the bitwise operators' ToInt32/ToUint32 coercion
  * contract makes `x | 0` a PROOF (whole, int32 range, whatever x was —
  * NaN included); JS remainder's sign follows the dividend; the
@@ -104,11 +105,13 @@ export const SAFE_MAX = 2 ** 53 - 1; // Number.MAX_SAFE_INTEGER
 export const SAFE_MIN = -SAFE_MAX;
 
 /** The set of f64 values a binding may hold at a program point: a closed
- * interval over the extended reals (`-0` normalized to 0 — the interval
- * tracks mathematical value; zero's sign is an f64-interior observation
- * with no boundary consequence), `whole` when every member is a finite
+ * interval over the extended reals (`-0` normalized to 0 because the
+ * interval tracks mathematical value; its observable sign is carried
+ * separately), `whole` when every member is a finite
  * integer-valued f64, `maybeNaN` when NaN may be in the set (NaN lives
- * outside the interval, which describes only the numeric members), and
+ * outside the interval, which describes only the numeric members),
+ * `maybeNegativeZero` when the set may contain the observably distinct
+ * IEEE-754 value -0, and
  * the integer literal's source `spelling` for the representability check
  * (propagates through copies and agreeing joins only; any arithmetic
  * drops it — a computed value is a new number, not the author's
@@ -118,34 +121,70 @@ export interface AbsVal {
   hi: number;
   whole: boolean;
   maybeNaN: boolean;
+  maybeNegativeZero: boolean;
   spelling?: string;
 }
 
 const normZero = (x: number): number => (Object.is(x, -0) ? 0 : x);
 
-export function absVal(lo: number, hi: number, whole: boolean, maybeNaN: boolean, spelling?: string): AbsVal {
+export function absVal(
+  lo: number,
+  hi: number,
+  whole: boolean,
+  maybeNaN: boolean,
+  spelling?: string,
+  maybeNegativeZero = false,
+): AbsVal {
   lo = normZero(lo);
   hi = normZero(hi);
   // Infinities are not integers: a set with a non-finite bound may
   // contain them, so the wholeness claim drops.
   if (whole && !(Number.isFinite(lo) && Number.isFinite(hi))) whole = false;
-  const v: AbsVal = { lo, hi, whole, maybeNaN };
+  if (!(lo <= 0 && hi >= 0)) maybeNegativeZero = false;
+  const v: AbsVal = { lo, hi, whole, maybeNaN, maybeNegativeZero };
   if (spelling !== undefined) v.spelling = spelling;
   return v;
 }
 
 /** Any f64 a caller could pass — unbounded, not whole, NaN included. */
-export const TOP: AbsVal = { lo: -Infinity, hi: Infinity, whole: false, maybeNaN: true };
+export const TOP: AbsVal = {
+  lo: -Infinity,
+  hi: Infinity,
+  whole: false,
+  maybeNaN: true,
+  maybeNegativeZero: true,
+};
 /** The empty set (unreachable): lo > hi and no NaN. */
-export const BOTTOM: AbsVal = { lo: Infinity, hi: -Infinity, whole: true, maybeNaN: false };
+export const BOTTOM: AbsVal = {
+  lo: Infinity,
+  hi: -Infinity,
+  whole: true,
+  maybeNaN: false,
+  maybeNegativeZero: false,
+};
 
 export const isBottom = (v: AbsVal): boolean => v.lo > v.hi && !v.maybeNaN;
 export const isSingleton = (v: AbsVal): boolean => v.lo === v.hi && !v.maybeNaN;
 const hasNumeric = (v: AbsVal): boolean => v.lo <= v.hi;
 
 export function constVal(value: number, spelling?: string): AbsVal {
-  if (Number.isNaN(value)) return { lo: Infinity, hi: -Infinity, whole: false, maybeNaN: true };
-  return absVal(value, value, Number.isInteger(value), false, spelling);
+  if (Number.isNaN(value)) {
+    return {
+      lo: Infinity,
+      hi: -Infinity,
+      whole: false,
+      maybeNaN: true,
+      maybeNegativeZero: false,
+    };
+  }
+  return absVal(
+    value,
+    value,
+    Number.isInteger(value),
+    false,
+    spelling,
+    Object.is(value, -0),
+  );
 }
 
 /** Least upper bound: interval hull, wholeness/NaN pessimism, spelling
@@ -159,11 +198,21 @@ export function join(a: AbsVal, b: AbsVal): AbsVal {
   const hi = numA && numB ? Math.max(a.hi, b.hi) : numA ? a.hi : b.hi;
   const whole = (numA ? a.whole : true) && (numB ? b.whole : true);
   const spelling = a.spelling !== undefined && a.spelling === b.spelling ? a.spelling : undefined;
-  return absVal(lo, hi, whole, a.maybeNaN || b.maybeNaN, spelling);
+  return absVal(
+    lo,
+    hi,
+    whole,
+    a.maybeNaN || b.maybeNaN,
+    spelling,
+    a.maybeNegativeZero || b.maybeNegativeZero,
+  );
 }
 
 export function sameVal(a: AbsVal, b: AbsVal): boolean {
-  return a.lo === b.lo && a.hi === b.hi && a.whole === b.whole && a.maybeNaN === b.maybeNaN && a.spelling === b.spelling;
+  return a.lo === b.lo && a.hi === b.hi && a.whole === b.whole &&
+    a.maybeNaN === b.maybeNaN &&
+    a.maybeNegativeZero === b.maybeNegativeZero &&
+    a.spelling === b.spelling;
 }
 
 /* Threshold widening: when a loop-header join keeps growing, jump each
@@ -180,7 +229,14 @@ export function widen(prev: AbsVal, next: AbsVal): AbsVal {
   let hi = next.hi;
   if (next.lo < prev.lo) lo = WIDEN_THRESHOLDS_NEG.find((t) => t <= next.lo) ?? -Infinity;
   if (next.hi > prev.hi) hi = WIDEN_THRESHOLDS.find((t) => t >= next.hi) ?? Infinity;
-  return absVal(lo, hi, next.whole, next.maybeNaN, next.spelling);
+  return absVal(
+    lo,
+    hi,
+    next.whole,
+    next.maybeNaN,
+    next.spelling,
+    next.maybeNegativeZero,
+  );
 }
 
 /* ── transfer functions (JS semantics, never idealized math) ───────────── */
@@ -198,14 +254,28 @@ function transferAdd(a: AbsVal, b: AbsVal): AbsVal {
   if (!hasNumeric(a) || !hasNumeric(b)) return { ...BOTTOM, maybeNaN };
   // Infinity + -Infinity = NaN: possible when opposite infinities meet.
   if ((a.hi === Infinity && b.lo === -Infinity) || (a.lo === -Infinity && b.hi === Infinity)) maybeNaN = true;
-  return absVal(a.lo + b.lo, a.hi + b.hi, a.whole && b.whole, maybeNaN);
+  return absVal(
+    a.lo + b.lo,
+    a.hi + b.hi,
+    a.whole && b.whole,
+    maybeNaN,
+    undefined,
+    a.maybeNegativeZero && b.maybeNegativeZero,
+  );
 }
 
 function transferSub(a: AbsVal, b: AbsVal): AbsVal {
   let maybeNaN = a.maybeNaN || b.maybeNaN;
   if (!hasNumeric(a) || !hasNumeric(b)) return { ...BOTTOM, maybeNaN };
   if ((a.hi === Infinity && b.hi === Infinity) || (a.lo === -Infinity && b.lo === -Infinity)) maybeNaN = true;
-  return absVal(a.lo - b.hi, a.hi - b.lo, a.whole && b.whole, maybeNaN);
+  return absVal(
+    a.lo - b.hi,
+    a.hi - b.lo,
+    a.whole && b.whole,
+    maybeNaN,
+    undefined,
+    a.maybeNegativeZero && b.lo <= 0 && b.hi >= 0,
+  );
 }
 
 function transferMul(a: AbsVal, b: AbsVal): AbsVal {
@@ -218,7 +288,19 @@ function transferMul(a: AbsVal, b: AbsVal): AbsVal {
   const bInf = b.lo === -Infinity || b.hi === Infinity;
   if ((aHasZero && bInf) || (bHasZero && aInf)) maybeNaN = true;
   const p = [boundMul(a.lo, b.lo), boundMul(a.lo, b.hi), boundMul(a.hi, b.lo), boundMul(a.hi, b.hi)];
-  return absVal(Math.min(...p), Math.max(...p), a.whole && b.whole, maybeNaN);
+  const maybeNegativeZero =
+    (aHasZero && b.lo < 0) ||
+    (bHasZero && a.lo < 0) ||
+    (a.maybeNegativeZero && b.hi > 0) ||
+    (b.maybeNegativeZero && a.hi > 0);
+  return absVal(
+    Math.min(...p),
+    Math.max(...p),
+    a.whole && b.whole,
+    maybeNaN,
+    undefined,
+    maybeNegativeZero,
+  );
 }
 
 function transferDiv(a: AbsVal, b: AbsVal): AbsVal {
@@ -239,7 +321,14 @@ function transferDiv(a: AbsVal, b: AbsVal): AbsVal {
   const hi = Math.max(...q);
   // Division does not preserve wholeness (7 / 2 = 3.5); the one provable
   // case is a singleton landing on an integer.
-  return absVal(lo, hi, lo === hi && Number.isInteger(lo), maybeNaN);
+  return absVal(
+    lo,
+    hi,
+    lo === hi && Number.isInteger(lo),
+    maybeNaN,
+    undefined,
+    lo <= 0 && hi >= 0,
+  );
 }
 
 function transferMod(a: AbsVal, b: AbsVal): AbsVal {
@@ -254,7 +343,14 @@ function transferMod(a: AbsVal, b: AbsVal): AbsVal {
   const bound = a.whole && b.whole && Number.isFinite(dMax) ? dMax - 1 : dMax;
   const lo = a.lo < 0 ? -bound : 0;
   const hi = a.hi > 0 ? bound : 0;
-  return absVal(lo, hi, a.whole && b.whole, maybeNaN);
+  return absVal(
+    lo,
+    hi,
+    a.whole && b.whole,
+    maybeNaN,
+    undefined,
+    a.maybeNegativeZero || a.lo < 0,
+  );
 }
 
 function transferPow(a: AbsVal, b: AbsVal): AbsVal {
@@ -301,7 +397,14 @@ export function transferBitNot(a: AbsVal): AbsVal {
 
 export function transferNeg(a: AbsVal): AbsVal {
   if (!hasNumeric(a)) return { ...BOTTOM, maybeNaN: a.maybeNaN };
-  return absVal(-a.hi, -a.lo, a.whole, a.maybeNaN);
+  return absVal(
+    -a.hi,
+    -a.lo,
+    a.whole,
+    a.maybeNaN,
+    undefined,
+    a.lo <= 0 && a.hi >= 0,
+  );
 }
 
 export function transferBin(op: IrNumBinOp, a: AbsVal, b: AbsVal): AbsVal {
@@ -327,7 +430,16 @@ export function transferBin(op: IrNumBinOp, a: AbsVal, b: AbsVal): AbsVal {
 export function transferMathRound(fn: "trunc" | "floor" | "ceil" | "round", a: AbsVal): AbsVal {
   if (!hasNumeric(a)) return { ...BOTTOM, maybeNaN: a.maybeNaN };
   const f = fn === "trunc" ? Math.trunc : fn === "floor" ? Math.floor : fn === "ceil" ? Math.ceil : Math.round;
-  return absVal(f(a.lo), f(a.hi), true, a.maybeNaN);
+  const lo = f(a.lo);
+  const hi = f(a.hi);
+  return absVal(
+    lo,
+    hi,
+    true,
+    a.maybeNaN,
+    undefined,
+    lo <= 0 && hi >= 0 && (a.lo < 0 || a.maybeNegativeZero),
+  );
 }
 
 export function transferAbs(a: AbsVal): AbsVal {
@@ -342,7 +454,14 @@ export function transferMinMax(fn: "min" | "max", args: AbsVal[]): AbsVal {
   if (args.some((v) => !hasNumeric(v))) return { ...BOTTOM, maybeNaN };
   const lo = fn === "min" ? Math.min(...args.map((v) => v.lo)) : Math.max(...args.map((v) => v.lo));
   const hi = fn === "min" ? Math.min(...args.map((v) => v.hi)) : Math.max(...args.map((v) => v.hi));
-  return absVal(lo, hi, args.every((v) => v.whole), maybeNaN);
+  return absVal(
+    lo,
+    hi,
+    args.every((v) => v.whole),
+    maybeNaN,
+    undefined,
+    args.some((v) => v.maybeNegativeZero),
+  );
 }
 
 /* ── the boundary check: PROVE or REFUSE ───────────────────────────────── */
@@ -738,6 +857,71 @@ const FLIP: Record<string, string> = { "<": ">", "<=": ">=", ">": "<", ">=": "<=
 const CMP_OPS = new Set(["<", "<=", ">", ">=", "===", "!=="]);
 const ORDERED_CMP_OPS = new Set(["<", "<=", ">", ">="]);
 
+const MACHINE_I32_MIN = -(2 ** 31);
+const MACHINE_I32_MAX = 2 ** 31 - 1;
+
+function isMachineI32(v: AbsVal): boolean {
+  return isBottom(v) || (
+    v.whole &&
+    !v.maybeNaN &&
+    !v.maybeNegativeZero &&
+    v.lo >= MACHINE_I32_MIN &&
+    v.hi <= MACHINE_I32_MAX
+  );
+}
+
+interface MachineIntegerObserver {
+  recordExpression(expr: IrExpr, value: AbsVal): void;
+  recordWrite(localId: string, value: AbsVal): void;
+}
+
+class FunctionMachineIntegerObserver implements MachineIntegerObserver {
+  readonly #eligible: ReadonlySet<string>;
+  readonly #seen = new Set<string>();
+  readonly #unsafe = new Set<string>();
+  readonly #expressions = new Map<IrExpr, boolean>();
+
+  constructor(fn: IrFunction) {
+    const parameters = new Set(fn.params.map((parameter) => parameter.localId));
+    this.#eligible = new Set(
+      fn.locals
+        .filter((local) =>
+          local.type.kind === "f64" &&
+          local.boxed !== true &&
+          local.nativeFrame === undefined &&
+          !parameters.has(local.id)
+        )
+        .map((local) => local.id),
+    );
+  }
+
+  recordExpression(expr: IrExpr, value: AbsVal): void {
+    if (expr.type.kind !== "f64") return;
+    const safe = isMachineI32(value);
+    this.#expressions.set(expr, (this.#expressions.get(expr) ?? true) && safe);
+  }
+
+  recordWrite(localId: string, value: AbsVal): void {
+    if (!this.#eligible.has(localId)) return;
+    this.#seen.add(localId);
+    if (!isMachineI32(value)) this.#unsafe.add(localId);
+  }
+
+  locals(): ReadonlySet<string> {
+    return new Set(
+      [...this.#eligible].filter((localId) =>
+        this.#seen.has(localId) && !this.#unsafe.has(localId)
+      ),
+    );
+  }
+
+  expressions(): readonly IrExpr[] {
+    return [...this.#expressions]
+      .filter(([, safe]) => safe)
+      .map(([expr]) => expr);
+  }
+}
+
 /** Meet a value with an interval; `clearNaN` when the comparison's truth
  * on this edge excludes NaN operands. */
 function meetInterval(v: AbsVal, lo: number, hi: number, clearNaN: boolean): AbsVal {
@@ -747,7 +931,14 @@ function meetInterval(v: AbsVal, lo: number, hi: number, clearNaN: boolean): Abs
     // No numeric member survives this edge; NaN may still flow through.
     return { ...BOTTOM, maybeNaN: clearNaN ? false : v.maybeNaN };
   }
-  return absVal(newLo, newHi, v.whole, clearNaN ? false : v.maybeNaN, v.spelling);
+  return absVal(
+    newLo,
+    newHi,
+    v.whole,
+    clearNaN ? false : v.maybeNaN,
+    v.spelling,
+    v.maybeNegativeZero,
+  );
 }
 
 /** Refine `a` under the assumption `a OP b` held. Wholeness sharpens the
@@ -794,10 +985,15 @@ class FnAnalyzer {
     private readonly effects: GlobalEffects,
     private readonly verdicts: IntVerdict[],
     private readonly native: NativeBoundaryContext | null = null,
+    private readonly globalSeeds: ReadonlyMap<string, AbsVal> = new Map(),
+    private readonly machine: MachineIntegerObserver | null = null,
   ) {}
 
   analyze(fn: IrFunction): void {
     const env: Env = new Map();
+    for (const [globalId, value] of this.globalSeeds) {
+      env.set(globalId, { ...value });
+    }
     const slots = this.cfg.fns.get(fn.name);
     const nativeSeeds = this.native?.callbackSeeds.get(fn.name);
     fn.params.forEach((p, i) => {
@@ -845,12 +1041,14 @@ class FnAnalyzer {
       case "varDecl": {
         if (s.init === null) return env;
         const v = this.evalExpr(s.init, env);
+        if (this.collect) this.machine?.recordWrite(s.localId, v);
         this.clearPathsRootedAt(env, s.localId);
         if (this.bindingCarriesNumber(s.localId)) env.set(s.localId, v);
         return env;
       }
       case "assign": {
         const v = this.evalExpr(s.value, env);
+        if (this.collect) this.machine?.recordWrite(s.localId, v);
         this.clearPathsRootedAt(env, s.localId);
         if (this.bindingCarriesNumber(s.localId)) env.set(s.localId, v);
         return env;
@@ -884,6 +1082,7 @@ class FnAnalyzer {
         return this.execLoop(env, { cond: s.cond, body: s.body, labels: s.labels ?? [], doWhile: true });
       case "forOf": {
         this.evalExpr(s.iterable, env);
+        if (this.collect) this.machine?.recordWrite(s.localId, TOP);
         const elemF64 = this.bindingCarriesNumber(s.localId);
         return this.execLoop(env, {
           body: s.body,
@@ -1501,6 +1700,12 @@ class FnAnalyzer {
    * The returned value is meaningful for f64-typed expressions; anything
    * without a modeled transfer is TOP. */
   private evalExpr(e: IrExpr, env: Env): AbsVal {
+    const value = this.evalExprInner(e, env);
+    if (this.collect) this.machine?.recordExpression(e, value);
+    return value;
+  }
+
+  private evalExprInner(e: IrExpr, env: Env): AbsVal {
     switch (e.kind) {
       case "numLit":
         return constVal(e.value, e.spelling);
@@ -1529,8 +1734,21 @@ class FnAnalyzer {
         this.evalExpr(e.left, env);
         this.evalExpr(e.right, env);
         return { ...TOP };
+      case "toBool":
+        /* Numeric truthiness is a pure projection. Treating this ordinary
+         * lowered coercion as an unknown expression used to havoc immutable
+         * global facts inside ternaries, which in turn hid bounded loop
+         * inductions from every number-facts consumer. */
+        this.evalExpr(e.operand, env);
+        return { ...TOP };
       case "unionIsTag":
       case "unionDisc":
+        this.evalExpr(e.value, env);
+        return { ...TOP };
+      case "upcast":
+        /* Upcasts change only the static view of an already-evaluated
+         * value. They cannot run user or foreign code, so numeric facts in
+         * the surrounding environment survive the identity conversion. */
         this.evalExpr(e.value, env);
         return { ...TOP };
       case "unary": {
@@ -1542,11 +1760,13 @@ class FnAnalyzer {
       case "incDec": {
         const old = this.bindingCarriesNumber(e.localId) ? envGet(env, e.localId) : { ...TOP };
         const next = transferAdd(old, constVal(e.op === "+" ? 1 : -1));
+        if (this.collect) this.machine?.recordWrite(e.localId, next);
         if (this.bindingCarriesNumber(e.localId)) env.set(e.localId, next);
         return e.prefix ? next : old;
       }
       case "assignExpr": {
         const v = this.evalExpr(e.value, env);
+        if (this.collect) this.machine?.recordWrite(e.localId, v);
         this.clearPathsRootedAt(env, e.localId);
         if (this.bindingCarriesNumber(e.localId)) env.set(e.localId, v);
         return v;
@@ -1897,6 +2117,95 @@ function childExprs(e: IrExpr): IrExpr[] {
   return out;
 }
 
+/** Immutable numeric globals whose sole write is their literal module
+ * initializer. ScriptC runs module initialization before any exported
+ * function can be entered, so this is a proof seed, not speculative
+ * constant propagation. A second or indirect write drops the seed. */
+function constantNumberGlobals(mod: IrModule): ReadonlyMap<string, AbsVal> {
+  const candidates = new Set(
+    (mod.globals ?? [])
+      .filter((global) => global.type.kind === "f64" && !global.mutable)
+      .map((global) => global.id),
+  );
+  const writes = new Map<string, { count: number; value: AbsVal | null }>();
+  for (const id of candidates) writes.set(id, { count: 0, value: null });
+
+  walkBodyNodes(mod.functions, (node) => {
+    if (
+      node.kind !== "assign" &&
+      node.kind !== "varDecl" &&
+      node.kind !== "assignExpr" &&
+      node.kind !== "incDec" &&
+      node.kind !== "forOf"
+    ) {
+      return;
+    }
+    const write = node as {
+      readonly localId?: string;
+      readonly value?: IrExpr;
+      readonly init?: IrExpr | null;
+    };
+    if (write.localId === undefined || !candidates.has(write.localId)) return;
+    const state = writes.get(write.localId)!;
+    state.count++;
+    const value = write.value ?? write.init;
+    state.value = value?.kind === "numLit"
+      ? constVal(value.value, value.spelling)
+      : null;
+  });
+
+  const constants = new Map<string, AbsVal>();
+  for (const [id, state] of writes) {
+    if (state.count === 1 && state.value !== null) constants.set(id, state.value);
+  }
+  return constants;
+}
+
+export interface MachineIntegerFacts {
+  /** Function name → f64 locals whose every reachable write is proved to
+   * be a signed 32-bit integer and never the observably distinct -0. */
+  readonly locals: ReadonlyMap<string, ReadonlySet<string>>;
+  /** f64 expressions proved to have the same representation-safe range. */
+  readonly expressions: ReadonlySet<IrExpr>;
+}
+
+const machineIntegerFactsByModule = new WeakMap<IrModule, MachineIntegerFacts>();
+
+/** Proved storage choices for backends that have a cheaper signed-integer
+ * representation. JavaScript's public number type remains f64: parameters,
+ * returns, overflow, fractions, NaN, infinities, and -0 keep that carrier. */
+export function machineIntegerFacts(mod: IrModule): MachineIntegerFacts {
+  const cached = machineIntegerFactsByModule.get(mod);
+  if (cached !== undefined) return cached;
+
+  const effects = globalEffectsOf(mod);
+  const cfg: IntSlotConfig = { fns: new Map(), records: new Map() };
+  const globalSeeds = constantNumberGlobals(mod);
+  const native = nativeBoundaryContext(mod);
+  const locals = new Map<string, ReadonlySet<string>>();
+  const expressions = new Set<IrExpr>();
+  for (const fn of mod.functions) {
+    const observer = new FunctionMachineIntegerObserver(fn);
+    const analyzer = new FnAnalyzer(
+      mod,
+      cfg,
+      effects,
+      [],
+      native,
+      globalSeeds,
+      observer,
+    );
+    analyzer.seedBindings(fn, mod);
+    analyzer.analyze(fn);
+    const functionLocals = observer.locals();
+    if (functionLocals.size > 0) locals.set(fn.name, functionLocals);
+    for (const expression of observer.expressions()) expressions.add(expression);
+  }
+  const facts = Object.freeze({ locals, expressions });
+  machineIntegerFactsByModule.set(mod, facts);
+  return facts;
+}
+
 /* ── the entry point ───────────────────────────────────────────────────── */
 
 /** Run the inference over every function of a lowered library module and
@@ -1908,8 +2217,9 @@ export function checkLibraryIntegerSlots(mod: IrModule, cfg: IntSlotConfig): Int
   const verdicts: IntVerdict[] = [];
   if (!hasIntSlots(cfg)) return verdicts;
   const effects = globalEffectsOf(mod);
+  const globalSeeds = constantNumberGlobals(mod);
   for (const fn of mod.functions) {
-    const analyzer = new FnAnalyzer(mod, cfg, effects, verdicts);
+    const analyzer = new FnAnalyzer(mod, cfg, effects, verdicts, null, globalSeeds);
     analyzer.seedBindings(fn, mod);
     analyzer.analyze(fn);
   }
@@ -2156,20 +2466,15 @@ function physicalCallbackSlots(
   });
 }
 
-function computeNumberBoundaryFacts(mod: IrModule): NumberBoundaryFacts {
+function nativeBoundaryContext(mod: IrModule): NativeBoundaryContext {
   const bindings = new Map(
     (mod.nativeBindings ?? []).map((binding) => [binding.id, binding] as const),
   );
-  const projects = [...bindings.values()].some((binding) =>
-    binding.parameters.some((parameter) => parameter.projection.kind === "number")
-  );
-  if (!projects) return EMPTY_BOUNDARY_FACTS;
-
   const structs = new Map<string, IrNativeStructDef>();
   for (const definition of mod.nativeTypes ?? []) {
     if (definition.kind === "struct") structs.set(definition.id, definition);
   }
-  const native: NativeBoundaryContext = {
+  return {
     bindings,
     /* An FFI import taking a function pointer is the same hazard: the C
      * side may keep it and call it back during an unrelated call. */
@@ -2183,10 +2488,21 @@ function computeNumberBoundaryFacts(mod: IrModule): NumberBoundaryFacts {
     unproven: new Map(),
     refusals: [],
   };
+}
+
+function computeNumberBoundaryFacts(mod: IrModule): NumberBoundaryFacts {
+  const native = nativeBoundaryContext(mod);
+  const bindings = native.bindings;
+  const projects = [...bindings.values()].some((binding) =>
+    binding.parameters.some((parameter) => parameter.projection.kind === "number")
+  );
+  if (!projects) return EMPTY_BOUNDARY_FACTS;
+
   const effects = globalEffectsOf(mod);
   const cfg: IntSlotConfig = { fns: new Map(), records: new Map() };
+  const globalSeeds = constantNumberGlobals(mod);
   for (const fn of mod.functions) {
-    const analyzer = new FnAnalyzer(mod, cfg, effects, [], native);
+    const analyzer = new FnAnalyzer(mod, cfg, effects, [], native, globalSeeds);
     analyzer.seedBindings(fn, mod);
     analyzer.analyze(fn);
   }

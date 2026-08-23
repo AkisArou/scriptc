@@ -7,6 +7,10 @@ import type {
   IrType,
   SrcLoc,
 } from "../../ir/nodes.js";
+import {
+  machineIntegerFacts,
+  type MachineIntegerFacts,
+} from "../../ir/number-facts.js";
 import { deserializeModule } from "../../ir/serialize.js";
 import { validateModule } from "../../ir/validate.js";
 
@@ -190,6 +194,8 @@ class JavaEmitter {
   readonly #nativeTypes: ReadonlyMap<string, NonNullable<IrModule["nativeTypes"]>[number]>;
   readonly #irNativeBindings: ReadonlyMap<string, IrNativeBinding>;
   readonly #jvmNativeBindings: ReadonlyMap<string, JvmDirectBinding>;
+  readonly #machineIntegers: MachineIntegerFacts;
+  #integerLocals: ReadonlySet<string> = new Set();
 
   constructor(module: IrModule, options: JvmEmissionOptions) {
     this.#module = module;
@@ -204,6 +210,7 @@ class JavaEmitter {
     this.#jvmNativeBindings = new Map(
       (options.nativeBindings ?? []).map((binding) => [binding.id, binding]),
     );
+    this.#machineIntegers = machineIntegerFacts(module);
     if (this.#jvmNativeBindings.size !== (options.nativeBindings?.length ?? 0)) {
       throw new Error("JVM emission received duplicate direct binding ids");
     }
@@ -298,6 +305,7 @@ class JavaEmitter {
       }
     }
 
+    this.#integerLocals = this.#machineIntegers.locals.get(fn.name) ?? new Set();
     const params = fn.params.map((param) =>
       `${this.#javaType(param.type, fn.loc)} ${encodedIdentifier("l", param.localId)}`
     ).join(", ");
@@ -314,11 +322,21 @@ class JavaEmitter {
     switch (stmt.kind) {
       case "varDecl": {
         const local = this.#local(fn, stmt.localId, stmt.loc);
-        const init = stmt.init === null ? "" : ` = ${this.#expr(stmt.init)}`;
-        return [`${pad}${this.#javaType(local.type, stmt.loc)} ${encodedIdentifier("l", local.id)}${init};`];
+        const integer = this.#integerLocals.has(local.id);
+        const init = stmt.init === null
+          ? ""
+          : ` = ${integer ? this.#intExpr(stmt.init) : this.#expr(stmt.init)}`;
+        const type = integer ? "int" : this.#javaType(local.type, stmt.loc);
+        return [`${pad}${type} ${encodedIdentifier("l", local.id)}${init};`];
       }
       case "assign":
-        return [`${pad}${this.#binding(stmt.localId)} = ${this.#expr(stmt.value)};`];
+        return [
+          `${pad}${this.#binding(stmt.localId)} = ${
+            this.#integerLocals.has(stmt.localId)
+              ? this.#intExpr(stmt.value)
+              : this.#expr(stmt.value)
+          };`,
+        ];
       case "exprStmt":
         return [`${pad}${this.#expr(stmt.expr)};`];
       case "return":
@@ -373,20 +391,23 @@ class JavaEmitter {
         }
         const left = this.#expr(expr.left);
         const right = this.#expr(expr.right);
-        if (expr.op === "**") return `Math.pow(${left}, ${right})`;
+        if (expr.op === "**") {
+          return `Math.pow(${this.#numberExprAsDouble(expr.left)}, ${this.#numberExprAsDouble(expr.right)})`;
+        }
         if (["&", "|", "^", "<<", ">>", ">>>"].includes(expr.op)) {
-          const signedLeft = `ntsToInt32(${left})`;
-          const signedRight = `ntsToInt32(${right})`;
-          const shift = `(int)(ntsToUint32(${right}) & 31L)`;
-          switch (expr.op) {
-            case "&": return `(double)(${signedLeft} & ${signedRight})`;
-            case "|": return `(double)(${signedLeft} | ${signedRight})`;
-            case "^": return `(double)(${signedLeft} ^ ${signedRight})`;
-            case "<<": return `(double)(${signedLeft} << ${shift})`;
-            case ">>": return `(double)(${signedLeft} >> ${shift})`;
-            case ">>>": return `(double)Integer.toUnsignedLong(${signedLeft} >>> ${shift})`;
-            default: throw new Error("unreachable JVM bitwise operator");
-          }
+          const integer = this.#directIntExpr(expr);
+          if (integer !== null) return `(double)(${integer})`;
+          const signedLeft = this.#toInt32Expr(expr.left);
+          const shift = `(${this.#toInt32Expr(expr.right)} & 31)`;
+          return `(double)Integer.toUnsignedLong(${signedLeft} >>> ${shift})`;
+        }
+        if (["+", "-", "*"].includes(expr.op)) {
+          const integer = this.#directIntExpr(expr);
+          if (integer !== null) return integer;
+          return `(${this.#numberExprAsDouble(expr.left)} ${expr.op} ${this.#numberExprAsDouble(expr.right)})`;
+        }
+        if (expr.op === "/" || expr.op === "%") {
+          return `(${this.#numberExprAsDouble(expr.left)} ${expr.op} ${this.#numberExprAsDouble(expr.right)})`;
         }
         const operator = expr.op === "===" ? "==" : expr.op === "!==" ? "!=" : expr.op;
         return `(${left} ${operator} ${right})`;
@@ -402,11 +423,18 @@ class JavaEmitter {
             expr.loc,
           );
         }
+        if (expr.op === "-") {
+          const integer = this.#directIntExpr(expr);
+          return integer ?? `(-${this.#numberExprAsDouble(expr.operand)})`;
+        }
         return `(${expr.op}${this.#expr(expr.operand)})`;
       }
       case "toBool": {
         const operand = this.#expr(expr.operand);
-        if (expr.operand.type.kind === "f64") return `ntsToBool(${operand})`;
+        if (expr.operand.type.kind === "f64") {
+          const integer = this.#directIntExpr(expr.operand);
+          return integer === null ? `ntsToBool(${operand})` : `(${integer} != 0)`;
+        }
         if (expr.operand.type.kind === "string") return `!(${operand}).isEmpty()`;
         throw new JvmUnsupportedError(
           `truthiness over '${expr.operand.type.kind}'`,
@@ -559,16 +587,89 @@ class JavaEmitter {
       );
     }
     const value = this.#expr(expr);
+    const integer = this.#directIntExpr(expr);
     switch (descriptor) {
-      case "B": return `(byte)ntsToInt32(${value})`;
+      case "B": return integer === null ? `(byte)ntsToInt32(${value})` : `(byte)(${integer})`;
       case "C": return `(char)ntsToUint32(${value})`;
-      case "S": return `(short)ntsToInt32(${value})`;
-      case "I": return `ntsToInt32(${value})`;
-      case "F": return `(float)(${value})`;
+      case "S": return integer === null ? `(short)ntsToInt32(${value})` : `(short)(${integer})`;
+      case "I": return integer ?? `ntsToInt32(${value})`;
+      case "F": return `(float)(${integer ?? value})`;
       case "D": return value;
       default:
         throw new JvmUnsupportedError(`direct scalar descriptor '${descriptor}'`, expr.loc);
     }
+  }
+
+  /** A Java int spelling is admitted only when the shared abstract
+   * interpreter proved this expression is an exact signed int32 and cannot
+   * be -0. Returning null preserves the ordinary f64 implementation. */
+  #directIntExpr(expr: IrExpr): string | null {
+    switch (expr.kind) {
+      case "numLit":
+        return Number.isInteger(expr.value) &&
+            !Object.is(expr.value, -0) &&
+            expr.value >= -(2 ** 31) &&
+            expr.value <= 2 ** 31 - 1
+          ? String(expr.value)
+          : null;
+      case "varRef":
+        return this.#integerLocals.has(expr.localId)
+          ? this.#binding(expr.localId)
+          : null;
+      case "bin": {
+        if (["&", "|", "^", "<<", ">>"].includes(expr.op)) {
+          const left = this.#toInt32Expr(expr.left);
+          const right = this.#toInt32Expr(expr.right);
+          const shift = `(${right} & 31)`;
+          switch (expr.op) {
+            case "&": return `(${left} & ${right})`;
+            case "|": return `(${left} | ${right})`;
+            case "^": return `(${left} ^ ${right})`;
+            case "<<": return `(${left} << ${shift})`;
+            case ">>": return `(${left} >> ${shift})`;
+            default: throw new Error("unreachable JVM signed bitwise operator");
+          }
+        }
+        if (!this.#machineIntegers.expressions.has(expr)) return null;
+        if (expr.op === ">>>") {
+          return `(${this.#toInt32Expr(expr.left)} >>> (${this.#toInt32Expr(expr.right)} & 31))`;
+        }
+        if (expr.op !== "+" && expr.op !== "-" && expr.op !== "*") return null;
+        const left = this.#directIntExpr(expr.left);
+        const right = this.#directIntExpr(expr.right);
+        return left === null || right === null
+          ? null
+          : `(${left} ${expr.op} ${right})`;
+      }
+      case "unary": {
+        if (expr.op !== "-" || !this.#machineIntegers.expressions.has(expr)) return null;
+        const operand = this.#directIntExpr(expr.operand);
+        return operand === null ? null : `(-${operand})`;
+      }
+      case "ternary": {
+        if (!this.#machineIntegers.expressions.has(expr)) return null;
+        const then = this.#directIntExpr(expr.then);
+        const else_ = this.#directIntExpr(expr.else_);
+        return then === null || else_ === null
+          ? null
+          : `(${this.#expr(expr.cond)} ? ${then} : ${else_})`;
+      }
+      default:
+        return null;
+    }
+  }
+
+  #intExpr(expr: IrExpr): string {
+    return this.#directIntExpr(expr) ?? `(int)(${this.#expr(expr)})`;
+  }
+
+  #toInt32Expr(expr: IrExpr): string {
+    return this.#directIntExpr(expr) ?? `ntsToInt32(${this.#expr(expr)})`;
+  }
+
+  #numberExprAsDouble(expr: IrExpr): string {
+    const integer = this.#directIntExpr(expr);
+    return integer === null ? this.#expr(expr) : `(double)(${integer})`;
   }
 
   #binding(id: string): string {
