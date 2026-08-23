@@ -285,6 +285,7 @@ export interface Teller {
   dispose(): void;
 }
 export declare function tellWith(callback: (subject: Counter) => void): Teller;
+export declare function tellRetainedWith(callback: (subject: Counter) => void): Teller;
 export declare function tellMark(): void;
 
 /* A registration nothing owns — no handle comes back, and nothing can cancel

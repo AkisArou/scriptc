@@ -1567,7 +1567,17 @@ export function materializeNativeBinding(binding: NativeInputBinding): IrNativeB
 function materializeNativeCallbackContract(
   contract: Readonly<IrNativeCallbackContract>,
 ): IrNativeCallbackContract {
-  const sourceArguments = contract.sourceArguments.map((argument) => ({ ...argument }));
+  const sourceArguments = contract.sourceArguments.map((argument) =>
+    argument.kind !== "callback-parameter" || argument.frameBounded === undefined
+      ? { ...argument }
+      : {
+          ...argument,
+          frameBounded: {
+            promote: { ...argument.frameBounded.promote },
+            release: { ...argument.frameBounded.release },
+          },
+        }
+  );
   if (contract.owner.kind === "call") {
     return {
       owner: { kind: "call" },

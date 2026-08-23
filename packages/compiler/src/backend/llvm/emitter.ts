@@ -1725,6 +1725,7 @@ class LlEmitter {
   private nativePayloadReadLl(
     payload: NativeCallbackPayload,
     prepare: string[],
+    stableHandles: ReadonlyMap<number, string> = new Map(),
   ): string {
     switch (payload.kind) {
       case "registrationOwner":
@@ -1765,6 +1766,9 @@ class LlEmitter {
         return `double %a${payload.slot}.wide`;
       }
       case "ownedHandle": {
+        if (payload.resourceMode === "frameBounded") {
+          return `ptr %a${payload.slot}`;
+        }
         /* The reference the toolkit handed over moves into a managed cell, so
          * the handler receives something that owns its object rather than a
          * pointer about to be reclaimed. The interned branch is not an
@@ -1777,6 +1781,7 @@ class LlEmitter {
         }
         const tag = mangleNativeHandleTag(payload.typeId);
         const slot = payload.slot;
+        const input = stableHandles.get(slot) ?? `%a${slot}`;
         const reuse = `cell${slot}.reuse`;
         const fresh = `cell${slot}.fresh`;
         const done = `cell${slot}.done`;
@@ -1785,16 +1790,16 @@ class LlEmitter {
         this.declare("declare void @scr_native_handle_commit(ptr, ptr)");
         this.declare(`declare void @${payload.free}(ptr)`);
         const cellLines = [
-          `  %existing${slot} = call ptr @scr_native_handle_interned(ptr @${tag}, ptr %a${slot})`,
+          `  %existing${slot} = call ptr @scr_native_handle_interned(ptr @${tag}, ptr ${input})`,
           `  %existing${slot}.found = icmp ne ptr %existing${slot}, null`,
           `  br i1 %existing${slot}.found, label %${reuse}, label %${fresh}`,
           `${reuse}:`,
-          `  call void @${payload.free}(ptr %a${slot})`,
+          `  call void @${payload.free}(ptr ${input})`,
           `  br label %${done}`,
           `${fresh}:`,
           `  %prepared${slot} = call ptr @scr_native_handle_prepare(` +
             `ptr @${payload.free}, ptr @${tag}, ptr ${this.cstr(definition.nativeName)})`,
-          `  call void @scr_native_handle_commit(ptr %prepared${slot}, ptr %a${slot})`,
+          `  call void @scr_native_handle_commit(ptr %prepared${slot}, ptr ${input})`,
           `  br label %${done}`,
           `${done}:`,
           `  %cell${slot} = phi ptr [ %existing${slot}, %${reuse} ], [ %prepared${slot}, %${fresh} ]`,
@@ -1815,7 +1820,7 @@ class LlEmitter {
         const joined = `arg${slot}.done`;
         this.declare(`declare ptr @scr_union_new_ref(i32, ptr, ptr, ptr, ptr)`);
         prepare.push(
-          `  %a${slot}.isnull = icmp eq ptr %a${slot}, null`,
+          `  %a${slot}.isnull = icmp eq ptr ${input}, null`,
           `  br i1 %a${slot}.isnull, label %${absent}, label %${present}`,
           `${present}:`,
           ...cellLines,
@@ -1885,18 +1890,62 @@ class LlEmitter {
          * registration, an already-unwinding turn, a closure already gone. */
         const bailReleases = payloads.flatMap((payload) => {
           if (payload.kind !== "ownedHandle") return [];
-          this.declare(`declare void @${payload.free}(ptr)`);
+          const releaseSymbol = payload.frameBounded?.release ?? payload.free;
+          this.declare(`declare void @${releaseSymbol}(ptr)`);
           /* A withheld payload handed over no reference, so there is nothing
            * to give back — and the destructor must not see the NULL. */
-          const release = payload.absent === null
-            ? payload.free
-            : this.nullableReleaseHelper(payload.free);
-          return [`  call void @${release}(ptr %a${payload.slot})`];
+          const releaseCall = payload.absent === null
+            ? releaseSymbol
+            : this.nullableReleaseHelper(releaseSymbol);
+          return [`  call void @${releaseCall}(ptr %a${payload.slot})`];
         });
         const bail = [
           ...bailReleases,
           voids ? "ret void" : `ret ${rawRet} ${pendingResult}`,
         ].join("\n  ");
+        const promoted = new Map<number, string>();
+        const promotionLines: string[] = [];
+        for (const payload of payloads) {
+          if (
+            payload.kind !== "ownedHandle" ||
+            payload.resourceMode !== "stable" ||
+            payload.frameBounded === null
+          ) {
+            continue;
+          }
+          const stable = `%stable${payload.slot}`;
+          promoted.set(payload.slot, stable);
+          this.declare(`declare ptr @${payload.frameBounded.promote}(ptr)`);
+          promotionLines.push(
+            `  ${stable} = call ptr @${payload.frameBounded.promote}(ptr %a${payload.slot})`,
+            `  %stable${payload.slot}.failed = icmp eq ptr ${stable}, null`,
+            `  %stable${payload.slot}.input = icmp ne ptr %a${payload.slot}, null`,
+            `  %stable${payload.slot}.failure = and i1 %stable${payload.slot}.failed, %stable${payload.slot}.input`,
+            `  br i1 %stable${payload.slot}.failure, label %promote${payload.slot}.fail, label %promote${payload.slot}.ok`,
+            `promote${payload.slot}.fail:`,
+          );
+          for (const other of payloads) {
+            if (other.kind !== "ownedHandle" || other.slot === payload.slot) continue;
+            let pointer = `%a${other.slot}`;
+            let release = other.frameBounded?.release ?? other.free;
+            const earlier = promoted.get(other.slot);
+            if (other.resourceMode === "stable" && earlier !== undefined) {
+              pointer = earlier;
+              release = other.free;
+            } else if (other.resourceMode === "stable" && other.frameBounded === null) {
+              release = other.free;
+            }
+            this.declare(`declare void @${release}(ptr)`);
+            promotionLines.push(
+              `  call void @${this.nullableReleaseHelper(release)}(ptr ${pointer})`,
+            );
+          }
+          promotionLines.push(
+            `  call void @scr_closure_release(ptr %cb)`,
+            voids ? `  ret void` : `  ret ${rawRet} ${pendingResult}`,
+            `promote${payload.slot}.ok:`,
+          );
+        }
         const tok = form.closure.kind === "tokenGlobal" ? "%tok" : "%ctx";
         this.declare(`declare ptr @scr_callback_table_acquire(ptr, ${this.sizeType}, i64, ptr)`);
         this.declare(`declare void @scr_closure_release(ptr)`);
@@ -1935,11 +1984,12 @@ class LlEmitter {
           `invoke:`,
           `  %fnp = getelementptr inbounds %ScrClosure, ptr %cb, i64 0, i32 1`,
           `  %fn = load ptr, ptr %fnp`,
+          ...promotionLines,
         );
         const widenLines: string[] = [];
         const callArgs = [
           "ptr %cb",
-          ...payloads.map((payload) => this.nativePayloadReadLl(payload, widenLines)),
+          ...payloads.map((payload) => this.nativePayloadReadLl(payload, widenLines, promoted)),
         ].join(", ");
         /* A boolean answer is written into the physical result's own
          * representation: the handler says yes or no, and the contract says
@@ -1997,6 +2047,52 @@ class LlEmitter {
          * adapter's parameter kinds — the same answer by construction, reached
          * a second way. */
         const { copiedStrings, ownedHandles } = nativeQueuedPayloadCleanup(payloads);
+        const queuedStable = new Map<number, string>();
+        const queuedPromotions: string[] = [];
+        const queuedOwned = [...ownedHandles.entries()].sort(
+          ([left], [right]) => left - right,
+        );
+        for (const [index, owned] of queuedOwned) {
+          if (owned.frameBounded === null) continue;
+          const payload = payloads.find(
+            (candidate) => candidate.kind === "ownedHandle" && candidate.slot === index,
+          );
+          if (payload?.kind !== "ownedHandle" || payload.resourceMode !== "stable") {
+            throw new Error(
+              `llvm emitter bug: queued callback payload ${index} is frame-bounded`,
+            );
+          }
+          const stable = `%queued.stable${index}`;
+          queuedStable.set(index, stable);
+          this.declare(`declare ptr @${owned.frameBounded.promote}(ptr)`);
+          queuedPromotions.push(
+            `  ${stable} = call ptr @${owned.frameBounded.promote}(ptr %a${index})`,
+            `  %queued.stable${index}.failed = icmp eq ptr ${stable}, null`,
+            `  br i1 %queued.stable${index}.failed, label %queued.promote${index}.fail, label %queued.promote${index}.ok`,
+            `queued.promote${index}.fail:`,
+          );
+          for (const [otherIndex, other] of queuedOwned) {
+            if (otherIndex === index) continue;
+            const earlier = queuedStable.get(otherIndex);
+            const pointer = earlier ?? `%a${otherIndex}`;
+            const release = earlier !== undefined
+              ? other.free
+              : other.frameBounded?.release ?? other.free;
+            this.declare(`declare void @${release}(ptr)`);
+            queuedPromotions.push(
+              `  call void @${this.nullableReleaseHelper(release)}(ptr ${pointer})`,
+            );
+          }
+          queuedPromotions.push(
+            `  ret void`,
+            `queued.promote${index}.ok:`,
+          );
+        }
+        const allocationFailureReleases = queuedOwned.map(([index, owned]) => {
+          const pointer = queuedStable.get(index) ?? `%a${index}`;
+          this.declare(`declare void @${owned.free}(ptr)`);
+          return `  call void @${this.nullableReleaseHelper(owned.free)}(ptr ${pointer})`;
+        });
         const fields = [
           ...Array.from({ length: NATIVE_CALLBACK_INVOCATION_BASE_FIELDS }, () => "ptr"),
           ...(injectsOwner ? ["ptr"] : []),
@@ -2192,9 +2288,13 @@ class LlEmitter {
             `  unreachable`,
             `param_ok${slot}:`,
           ]),
+          ...queuedPromotions,
           `  %record = call ptr @scr_callback_invocation_alloc(ptr %ctx, ${this.sizeType} ptrtoint (ptr getelementptr (${invocationType}, ptr null, i32 1) to ${this.sizeType}))`,
           `  %allocation.failed = icmp eq ptr %record, null`,
-          `  br i1 %allocation.failed, label %return, label %initialize`,
+          `  br i1 %allocation.failed, label %allocation_failed, label %initialize`,
+          `allocation_failed:`,
+          ...allocationFailureReleases,
+          `  ret void`,
           `initialize:`,
           `  %signature.ptr = getelementptr inbounds ${invocationType}, ptr %record, i64 0, i32 3`,
           `  store ptr ${signatureId}, ptr %signature.ptr`,
@@ -2231,7 +2331,7 @@ class LlEmitter {
                 parameter.kind === "nativePointer" || ownedHandles.has(index)
                   ? "ptr"
                   : this.llType(parameter)
-              } %a${index}, ptr %copy${index}.ptr`,
+              } ${queuedStable.get(index) ?? `%a${index}`}, ptr %copy${index}.ptr`,
             );
           }
         });
@@ -4817,7 +4917,11 @@ class LlEmitter {
         continue;
       }
       B.line(`store ${this.llType(p.type)} %p_${mangleLocal(p.localId)}, ptr ${slot}`);
-      if (isRefCounted(p.type)) fnScope.push({ slot, type: p.type });
+      if (local.nativeFrame !== undefined) {
+        fnScope.push({ slot, type: p.type, nativeFrame: local.nativeFrame });
+      } else if (isRefCounted(p.type)) {
+        fnScope.push({ slot, type: p.type });
+      }
     }
     this.scopes.push(fnScope);
     this.emitStmts(fn.body);

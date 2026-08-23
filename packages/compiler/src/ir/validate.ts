@@ -1744,7 +1744,12 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             type.params[index]?.kind === "byteSpan");
       }
       if (
-        (keys !== "kind,parameter" && keys !== "destructor,kind,parameter") ||
+        ![
+          "kind,parameter",
+          "destructor,kind,parameter",
+          "destructor,frameBounded,kind,parameter",
+          "destructor,frameBounded,kind,parameter,resourceMode",
+        ].includes(keys) ||
         source["kind"] !== "callback-parameter" ||
         !Number.isSafeInteger(source["parameter"]) ||
         Number(source["parameter"]) < 0
@@ -1761,12 +1766,40 @@ export function validateModule(mod: IrModule): IrValidationError[] {
        * withhold it: when there IS an object, it arrived owned either way. */
       const payload = type.params[index];
       const owns = payload !== undefined && handlePayloadArm(payload);
-      if (destructor === undefined) return !owns;
-      return owns && typeof destructor === "string" && destructor !== "";
+      const frame = source["frameBounded"];
+      const resourceMode = source["resourceMode"];
+      if (destructor === undefined) return !owns && frame === undefined && resourceMode === undefined;
+      if (!owns || typeof destructor !== "string" || destructor === "") return false;
+      if (frame === undefined) return resourceMode === undefined;
+      if (typeof frame !== "object" || frame === null) return false;
+      const capability = frame as Record<string, unknown>;
+      const promote = capability["promote"];
+      const release = capability["release"];
+      if (
+        Object.keys(capability).sort().join(",") !== "promote,release" ||
+        typeof promote !== "object" || promote === null ||
+        typeof release !== "object" || release === null ||
+        Object.keys(promote).join(",") !== "symbol" ||
+        Object.keys(release).join(",") !== "symbol" ||
+        typeof (promote as { symbol?: unknown }).symbol !== "string" ||
+        typeof (release as { symbol?: unknown }).symbol !== "string" ||
+        !cIdentifier.test((promote as { symbol: string }).symbol) ||
+        !cIdentifier.test((release as { symbol: string }).symbol)
+      ) {
+        return false;
+      }
+      return resourceMode === undefined || resourceMode === "frameBounded";
     });
     if (
       typeof owner !== "object" || owner === null ||
       !Array.isArray(executors) || !validSourceArguments
+    ) {
+      return false;
+    }
+    if (
+      sourceArguments.some(
+        (argument) => (argument as { resourceMode?: unknown }).resourceMode !== undefined,
+      ) && candidate["synchronousReturn"] !== true
     ) {
       return false;
     }
@@ -1871,11 +1904,10 @@ export function validateModule(mod: IrModule): IrValidationError[] {
          * on the queued path, and a handler that keeps the handle keeps a cell
          * that owns its object rather than a pointer the toolkit reclaims.
          *
-         * Where a toolkit only LENDS an object for the frame, promotion is the
-         * adapter's job and not a second contract: a JNI local reference dies
-         * with the native frame, so the adapter promotes it and the cell's
-         * destructor is what gives the promotion back. There is no borrowed
-         * handle form here because there is none in the runtime either.
+         * Where a toolkit supplies an object bounded by the callback frame,
+         * the contract names exact promotion/release mechanics. The compiler
+         * may lend it raw only to a proven synchronous non-escaping handler;
+         * otherwise it promotes before constructing the ordinary stable cell.
          *
          * A copied string still has no arm. That is a length question rather
          * than an ownership one — the copy is what gives a queued payload its
@@ -3968,6 +4000,9 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       }
     }
   }
+  for (const issue of validateNativeFrameResources(mod, nativeById)) {
+    errors.push(issue);
+  }
   for (const fn of mod.functions) {
     validateFunction(
       fn,
@@ -4090,11 +4125,6 @@ function validateFunction(
   // return type is frontend breakage (mapType never produces them).
   for (const l of fn.locals) {
     if (isUnitType(l.type)) err(`local "${l.name}" has bare unit type ${l.type.kind}`, fn.loc);
-  }
-  for (const issue of validateNativeFrameResources(fn, nativeById, {
-    unions: [...unions.values()],
-  })) {
-    err(issue.message, issue.loc);
   }
   if (isUnitType(fn.returnType)) {
     err(`return type is bare unit type ${fn.returnType.kind}`, fn.loc);

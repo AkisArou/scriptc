@@ -214,6 +214,15 @@ export type NativeCallbackPayload =
        * `null` means the payload is always an object, which is the only thing
        * a delivery could assume before this existed. */
       readonly absent: NativeCallbackAbsentPayload | null;
+      /** When this capability is null, the physical payload is already
+       * stable. Otherwise it is a frame-bounded resource that must either be
+       * passed raw to a proven synchronous handler or promoted before
+       * managed-cell construction. */
+      readonly frameBounded: {
+        readonly promote: string;
+        readonly release: string;
+      } | null;
+      readonly resourceMode: "stable" | "frameBounded";
     }
   /** The registration's owner, injected rather than read from a slot. */
   | { readonly kind: "registrationOwner" };
@@ -260,6 +269,15 @@ export function nativeCallbackPayloads(
           ? { kind: "nativeHandle", typeId: source.typeId }
           : { kind: "union", unionId: absent.unionId },
         absent,
+        frameBounded: argument.frameBounded === undefined
+          ? null
+          : {
+              promote: argument.frameBounded.promote.symbol,
+              release: argument.frameBounded.release.symbol,
+            },
+        resourceMode: argument.resourceMode === "frameBounded"
+          ? "frameBounded"
+          : "stable",
       };
     }
     const carrier = physical[slot];
@@ -569,7 +587,14 @@ export interface NativeQueuedPayloadCleanup {
    * that gives that reference back. */
   readonly ownedHandles: ReadonlyMap<
     number,
-    { readonly typeId: string; readonly free: string }
+    {
+      readonly typeId: string;
+      readonly free: string;
+      readonly frameBounded: {
+        readonly promote: string;
+        readonly release: string;
+      } | null;
+    }
   >;
 }
 
@@ -594,11 +619,22 @@ export function nativeQueuedPayloadCleanup(
   payloads: readonly NativeCallbackPayload[],
 ): NativeQueuedPayloadCleanup {
   const copiedStrings = new Set<number>();
-  const ownedHandles = new Map<number, { typeId: string; free: string }>();
+  const ownedHandles = new Map<
+    number,
+    {
+      typeId: string;
+      free: string;
+      frameBounded: { promote: string; release: string } | null;
+    }
+  >();
   for (const payload of payloads) {
     if (payload.kind === "cstring") copiedStrings.add(payload.slot);
     else if (payload.kind === "ownedHandle") {
-      ownedHandles.set(payload.slot, { typeId: payload.typeId, free: payload.free });
+      ownedHandles.set(payload.slot, {
+        typeId: payload.typeId,
+        free: payload.free,
+        frameBounded: payload.frameBounded,
+      });
     }
   }
   return { copiedStrings, ownedHandles };

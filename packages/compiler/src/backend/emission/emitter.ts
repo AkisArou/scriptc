@@ -921,6 +921,17 @@ export class CEmitter {
           `extern void ${binding.result.frameBounded.release.symbol}(void *);`,
         );
       }
+      for (const argument of binding.arguments) {
+        for (const source of argument.callback?.sourceArguments ?? []) {
+          if (source.kind !== "callback-parameter" || source.frameBounded === undefined) {
+            continue;
+          }
+          out.push(
+            `extern void *${source.frameBounded.promote.symbol}(void *);`,
+            `extern void ${source.frameBounded.release.symbol}(void *);`,
+          );
+        }
+      }
       if (binding.error.message.kind === "symbol") {
         // The accessor and release entries the error contract names are
         // foreign symbols too, and their shapes are fixed by the contract.
@@ -2147,6 +2158,48 @@ export class CEmitter {
       if (form.shape === "direct") {
         const signatureId = `${adapter.symbol}_signature`;
         const sourceType = adapter.source;
+        const promoted = new Map<number, string>();
+        const promotionLines: string[] = [];
+        for (const payload of payloads) {
+          if (
+            payload.kind !== "ownedHandle" ||
+            payload.resourceMode !== "stable" ||
+            payload.frameBounded === null
+          ) {
+            continue;
+          }
+          const stable = `sc_stable${payload.slot}`;
+          promoted.set(payload.slot, stable);
+          promotionLines.push(
+            `  void *${stable} = sc_a${payload.slot} == NULL ? NULL : ` +
+              `${payload.frameBounded.promote}(sc_a${payload.slot});`,
+            `  if (${stable} == NULL && sc_a${payload.slot} != NULL) {`,
+          );
+          for (const other of payloads) {
+            if (other.kind !== "ownedHandle" || other.slot === payload.slot) continue;
+            if (other.resourceMode === "frameBounded") {
+              promotionLines.push(
+                `    if (sc_a${other.slot} != NULL) ${other.frameBounded!.release}(sc_a${other.slot});`,
+              );
+              continue;
+            }
+            const earlier = promoted.get(other.slot);
+            if (earlier !== undefined) {
+              promotionLines.push(`    if (${earlier} != NULL) ${other.free}(${earlier});`);
+            } else if (other.frameBounded !== null) {
+              promotionLines.push(
+                `    if (sc_a${other.slot} != NULL) ${other.frameBounded.release}(sc_a${other.slot});`,
+              );
+            } else {
+              promotionLines.push(`    if (sc_a${other.slot} != NULL) ${other.free}(sc_a${other.slot});`);
+            }
+          }
+          promotionLines.push(
+            `    scr_closure_release(sc_cb);`,
+            signature.result.kind === "void" ? `    return;` : `    return 0;`,
+            `  }`,
+          );
+        }
         /* A handle payload arrives with a reference the contract's destructor
          * gives back, so it becomes a managed cell here exactly as it does on
          * the queued path — a handler receives something that owns its object
@@ -2154,14 +2207,16 @@ export class CEmitter {
         const handleCells: string[] = [];
         const args = payloads.map((payload) => {
           if (payload.kind !== "ownedHandle") return nativePayloadReadC(payload);
+          if (payload.resourceMode === "frameBounded") return `sc_a${payload.slot}`;
           const definition = this.nativeTypesById.get(payload.typeId);
           if (definition?.kind !== "handle") {
             throw new Error(`emitter bug: unknown payload handle ${payload.typeId}`);
           }
           const cell = `sc_cell${payload.slot}`;
+          const pointer = promoted.get(payload.slot) ?? `sc_a${payload.slot}`;
           const build = nativeHandleCellC(
             cell,
-            `sc_a${payload.slot}`,
+            pointer,
             mangleNativeHandleTag(payload.typeId),
             payload.free,
             definition.nativeName,
@@ -2206,9 +2261,11 @@ export class CEmitter {
             /* A withheld payload has no reference to give back, and a
              * destructor that tolerates NULL is a property of one library
              * rather than of the contract. */
-            : payload.absent === null
-              ? [`${payload.free}(sc_a${payload.slot}); `]
-              : [`if (sc_a${payload.slot} != NULL) ${payload.free}(sc_a${payload.slot}); `]
+            : payload.frameBounded !== null
+              ? [`if (sc_a${payload.slot} != NULL) ${payload.frameBounded.release}(sc_a${payload.slot}); `]
+              : payload.absent === null
+                ? [`${payload.free}(sc_a${payload.slot}); `]
+                : [`if (sc_a${payload.slot} != NULL) ${payload.free}(sc_a${payload.slot}); `]
         ).join("");
         const call =
           `(${cFnPtrCast(nativeCallbackSourceSignature(sourceType, (typeId) => this.nullableUnionOf(typeId).unionId))}sc_cb->fn)(sc_cb${args.length > 0 ? `, ${args.join(", ")}` : ""})`;
@@ -2259,6 +2316,7 @@ export class CEmitter {
           `      scr_callback_token_slot(sc_token),`,
           `      scr_callback_token_generation(sc_token), &${signatureId});`,
           `  if (sc_cb == NULL) ${bail}`,
+          ...promotionLines,
           ...handleCells,
           ...(voids
             ? [`  ${call};`, `  scr_closure_release(sc_cb);`, `  return;`]
@@ -2285,6 +2343,36 @@ export class CEmitter {
         const injectsOwner = adapter.contract.sourceArguments.some(
           (argument) => argument.kind === "registration-owner",
         );
+        const queuedStable = new Map<number, string>();
+        const queuedPromotions: string[] = [];
+        const queuedOwned = [...ownedHandles.entries()].sort(([left], [right]) => left - right);
+        for (const [index, payload] of queuedOwned) {
+          if (payload.frameBounded === null) continue;
+          const stable = `sc_stable${index}`;
+          queuedStable.set(index, stable);
+          queuedPromotions.push(
+            `  void *${stable} = ${payload.frameBounded.promote}(sc_a${index});`,
+            `  if (${stable} == NULL) {`,
+          );
+          for (const [otherIndex, other] of queuedOwned) {
+            if (otherIndex === index) continue;
+            const earlier = queuedStable.get(otherIndex);
+            if (earlier !== undefined) {
+              queuedPromotions.push(`    if (${earlier} != NULL) ${other.free}(${earlier});`);
+            } else if (other.frameBounded !== null) {
+              queuedPromotions.push(
+                `    if (sc_a${otherIndex} != NULL) ${other.frameBounded.release}(sc_a${otherIndex});`,
+              );
+            } else {
+              queuedPromotions.push(`    if (sc_a${otherIndex} != NULL) ${other.free}(sc_a${otherIndex});`);
+            }
+          }
+          queuedPromotions.push(`    return;`, `  }`);
+        }
+        const allocationFailureReleases = queuedOwned.map(([index, payload]) => {
+          const pointer = queuedStable.get(index) ?? `sc_a${index}`;
+          return `    if (${pointer} != NULL) ${payload.free}(${pointer});`;
+        });
         out.push(
           `static const unsigned char ${signatureId};`,
           `typedef struct {`,
@@ -2377,9 +2465,17 @@ export class CEmitter {
           /* Every invalid payload pointer is rejected before the invocation
            * is allocated, so the trap path cannot strand a half-built one. */
           ...[...copiedStrings].sort((left, right) => left - right).map(cstringNullTrapC),
+          ...queuedPromotions,
           `  ScrCallbackToken *sc_token = (ScrCallbackToken *)sc_ctx;`,
           `  ${invocation} *sc_invocation = (${invocation} *)scr_callback_invocation_alloc(sc_token, sizeof(${invocation}));`,
-          `  if (sc_invocation == NULL) return;`,
+          ...(allocationFailureReleases.length === 0
+            ? [`  if (sc_invocation == NULL) return;`]
+            : [
+                `  if (sc_invocation == NULL) {`,
+                ...allocationFailureReleases,
+                `    return;`,
+                `  }`,
+              ]),
           `  sc_invocation->base.signature = &${signatureId};`,
           `  sc_invocation->base.invoke = &${invoke};`,
           `  sc_invocation->base.payload_destroy = &${destroy};`,
@@ -2392,7 +2488,7 @@ export class CEmitter {
               : [
                   copiedStrings.has(index)
                     ? `  sc_invocation->sc_a${index} = ${cstringDecodeC(index)};`
-                    : `  sc_invocation->sc_a${index} = sc_a${index};`,
+                    : `  sc_invocation->sc_a${index} = ${queuedStable.get(index) ?? `sc_a${index}`};`,
                 ]
           ),
           `  (void)scr_callback_token_admit(sc_token, &sc_invocation->base);`,

@@ -49,6 +49,19 @@ void nts_frame_counter_release_local(NtsCounter *counter) {
   nts_counter_destroy(counter);
 }
 
+/* A callback arrives with the frame-bounded form already in hand. The stable
+ * arm models NewGlobalRef followed by DeleteLocalRef: the pointer is unchanged
+ * in this C falsifier, but the two resource operations remain independently
+ * observable. The eventual managed cell still owns the underlying counter
+ * and releases it through nts_counter_destroy. */
+NtsCounter *nts_frame_callback_promote(NtsCounter *counter) {
+  if (counter != NULL) {
+    nts_frame_global_promotions++;
+    nts_frame_local_releases++;
+  }
+  return counter;
+}
+
 void nts_frame_resource_reset(void) {
   nts_frame_global_promotions = 0;
   nts_frame_local_releases = 0;

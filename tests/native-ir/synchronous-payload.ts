@@ -11,8 +11,14 @@
  * this shape rather than a borrowed one. */
 import {
   counterDestroyedCount,
+  frameExpectedManagedCells,
+  frameGlobalPromotions,
+  frameLocalReleases,
+  frameManagedCells,
+  frameResourceReset,
   judgeWith,
   tellMark,
+  tellRetainedWith,
   tellWith,
   type Counter,
   type i32,
@@ -45,7 +51,11 @@ function runTold(): void {
   const teller = tellWith((subject: Counter): void => {
     if (subject.add(2 as i32) === (42 as i32)) tellMark();
   });
+  frameResourceReset();
   check(teller.tell(40 as i32) === (1 as i32));
+  check(frameGlobalPromotions() === (0 as i32));
+  check(frameLocalReleases() === (1 as i32));
+  check(frameManagedCells() === frameExpectedManagedCells(0 as i32));
   teller.dispose();
 }
 
@@ -56,18 +66,43 @@ function runAsked(): void {
   const judge = judgeWith((code: i32, subject: Counter): boolean =>
     subject.add(code) === (50 as i32)
   );
+  frameResourceReset();
   check(judge.ask(8 as i32, 42 as i32) === (1 as i32));
   check(judge.ask(1 as i32, 42 as i32) === (0 as i32));
+  check(frameGlobalPromotions() === (0 as i32));
+  check(frameLocalReleases() === (2 as i32));
+  check(frameManagedCells() === frameExpectedManagedCells(0 as i32));
   judge.dispose();
+}
+
+/* The disagreeing sibling. A payload stored past delivery cannot remain a
+ * raw callback-frame reference: it must be promoted exactly once, enter one
+ * managed cell, and stay usable after the native call has returned. */
+let retained: Counter | null = null;
+
+function runRetained(): void {
+  const teller = tellRetainedWith((subject: Counter): void => {
+    retained = subject;
+    tellMark();
+  });
+  frameResourceReset();
+  check(teller.tell(42 as i32) === (1 as i32));
+  check(frameGlobalPromotions() === (1 as i32));
+  check(frameLocalReleases() === (1 as i32));
+  check(frameManagedCells() === frameExpectedManagedCells(1 as i32));
+  check(retained !== null && retained.add(0 as i32) === (42 as i32));
+  retained = null;
+  teller.dispose();
 }
 
 runTold();
 runAsked();
+runRetained();
 check(callbacksShutdown() === (1 as i32));
 
 /* Three invocations, three subjects, three releases. This is what would catch
  * a payload reference that was never given back — and the sanitizer lane is
  * what would catch one given back twice. */
-check(counterDestroyedCount() === (3 as i32));
+check(counterDestroyedCount() === (4 as i32));
 
 exit(firstFailure === (0 as i32) ? (42 as i32) : firstFailure);

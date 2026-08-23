@@ -72,6 +72,12 @@ export function emitFunction(E: CEmitter, fn: IrFunction): void {
         E.line(`ScrBox *${box} = ${E.boxNewC(p.type)}; /* ${p.name} (boxed param) */`);
         E.line(`scr_box_set_${boxAccess(p.type)}(${box}, ${mangleRawParam(p.localId)});`);
         fnScope.push({ name: box, type: p.type, boxed: true });
+      } else if (local.nativeFrame !== undefined) {
+        fnScope.push({
+          name: mangleLocal(p.localId),
+          type: p.type,
+          nativeFrame: local.nativeFrame,
+        });
       } else if (isRefCounted(p.type)) {
         fnScope.push({ name: mangleLocal(p.localId), type: p.type });
       }

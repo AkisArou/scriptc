@@ -719,10 +719,10 @@ int32_t nts_counter_destroyed_count(void) { return nts_counter_destroyed; }
  * while the pair they imply is unreachable. `tell` and `judge` are that pair's
  * programs, one per synchronous form.
  *
- * Transfer is FULL in both. The subject is created per invocation and the
- * handler's cell owns it, which is the only spelling JNI has for an object
- * reaching a callback: a local reference dies with the native frame, so the
- * adapter promotes it and the cell's destructor is what gives it back. */
+ * Transfer is FULL in both. The subject is created per invocation and its
+ * physical payload begins frame-bounded. The compiler may release it at the
+ * end of a proven synchronous handler or promote it into the stable cell whose
+ * destructor eventually gives it back. */
 typedef void (*NtsTellCallback)(NtsCounter *subject, void *context);
 
 typedef struct NtsTeller {
@@ -738,6 +738,15 @@ NtsTeller *nts_teller_create(NtsTellCallback callback, void *context) {
   teller->callback = callback;
   teller->context = context;
   return teller;
+}
+
+/* A distinct registration entry lets the frame-resource observer put an
+ * escaping handler beside a non-escaping one. Trampolines are shared per
+ * binding, so one escaping registration must conservatively keep every
+ * payload of THAT binding stable; the sibling binding proves the promotion
+ * arm without disabling the local arm it is meant to disagree with. */
+NtsTeller *nts_teller_create_retained(NtsTellCallback callback, void *context) {
+  return nts_teller_create(callback, context);
 }
 
 /* The handler calls this, so a mark appearing before `tell` returns is what
@@ -929,8 +938,8 @@ typedef struct NtsHost {
   int32_t seed;
   void *peer;
   /* One object, MANY references. With `identity: "none"` each delivery builds
-   * its own managed cell and each cell owns a reference, exactly as a JNI
-   * adapter promotes a local reference to a global one per delivery. A
+   * its own managed cell and each cell owns a stable reference, exactly as a
+   * compiler trampoline promotes an escaping local reference per delivery. A
    * destructor that freed outright would double-free on the second cell, so
    * the count is not fixture bookkeeping — it is the ownership model the arm
    * requires. */

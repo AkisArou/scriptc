@@ -478,7 +478,15 @@ const TELL_CONTRACT = {
   allowedInvocationExecutors: ["same-as-caller"],
   synchronousReturn: true,
   sourceArguments: [
-    { kind: "callback-parameter", parameter: 0, destructor: COUNTER_DESTROY },
+    {
+      kind: "callback-parameter",
+      parameter: 0,
+      destructor: COUNTER_DESTROY,
+      frameBounded: {
+        promote: { symbol: "nts_frame_callback_promote" },
+        release: { symbol: "nts_frame_counter_release_local" },
+      },
+    },
   ],
 } as const satisfies IrNativeCallbackContract;
 
@@ -499,7 +507,15 @@ const JUDGE_CONTRACT = {
   synchronousReturn: true,
   sourceArguments: [
     { kind: "callback-parameter", parameter: 0 },
-    { kind: "callback-parameter", parameter: 1, destructor: COUNTER_DESTROY },
+    {
+      kind: "callback-parameter",
+      parameter: 1,
+      destructor: COUNTER_DESTROY,
+      frameBounded: {
+        promote: { symbol: "nts_frame_callback_promote" },
+        release: { symbol: "nts_frame_counter_release_local" },
+      },
+    },
   ],
 } as const satisfies IrNativeCallbackContract;
 
@@ -2284,6 +2300,42 @@ const localNativeInput: NativeFrontendInput = {
       id: "scriptc.fixture.c-v1@0.0.0#teller_create",
       declaration: { module: nativePackage, name: "tellWith" },
       entry: { symbol: "nts_teller_create" },
+      sourceCall: { kind: "function" },
+      error: NULL_IS_FAILURE,
+      arguments: [
+        { name: "callback", type: TELL_SOURCE, callback: TELL_CONTRACT },
+      ],
+      parameters: [
+        {
+          name: "callback",
+          type: { kind: "nativeCallback", signature: TELL_CALLBACK },
+          passMode: "pointer",
+          ownership: { kind: "callback" },
+          projection: { kind: "callbackFunction", argument: 0 },
+        },
+        {
+          name: "context",
+          type: { kind: "nativeContext", addressSpace: 0 },
+          passMode: "pointer",
+          ownership: { kind: "callback" },
+          projection: { kind: "callbackContext", argument: 0 },
+        },
+      ],
+      result: {
+        type: TELLER,
+        passMode: "pointer",
+        ownership: {
+          kind: "owned",
+          transfer: "to-runtime",
+          destructor: "scriptc.fixture.c-v1@0.0.0#teller_destroy",
+        },
+        projection: DIRECT_RESULT,
+      },
+    },
+    {
+      id: "scriptc.fixture.c-v1@0.0.0#teller_create_retained",
+      declaration: { module: nativePackage, name: "tellRetainedWith" },
+      entry: { symbol: "nts_teller_create_retained" },
       sourceCall: { kind: "function" },
       error: NULL_IS_FAILURE,
       arguments: [
@@ -7019,7 +7071,7 @@ describe.each(["c", "llvm"] as const)(
 describe.each(["c", "llvm"] as const)(
   "Native IR synchronous handle payloads, %s backend",
   (backend) => {
-    test("a handler told and a handler asked both receive a managed cell", async () => {
+    localFixtureTest("keeps synchronous payloads frame-bounded and promotes an escaping sibling", async () => {
       const outDir = join(scratch, `synchronous-payload-${backend}`);
       const result = await compile(
         join(repoRoot, "tests/native-ir/synchronous-payload.ts"),
@@ -7031,7 +7083,12 @@ describe.each(["c", "llvm"] as const)(
           sanitize,
           externalTypes: nativeExternalTypes(),
           native: frontendNativeInput(),
-          nativeLinkInputs: [fixtureObject(), supportObject(), retainedSupportObject()],
+          nativeLinkInputs: [
+            fixtureObject(),
+            frameFixtureObject(),
+            supportObject(),
+            retainedSupportObject(),
+          ],
         },
       );
       expect(result.ok ? [] : result.diagnostics).toEqual([]);

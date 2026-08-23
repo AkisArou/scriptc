@@ -250,6 +250,20 @@ export type IrNativeCallbackSourceArgument =
        * reference before queueing, so the invocation owns one and this gives
        * it back — whether the delivery runs or is dropped at shutdown. */
       destructor?: string;
+      /** Optional mechanics for a payload that physically arrives as a
+       * frame-bounded foreign resource. The adapter supplies that raw form;
+       * the compiler either keeps it within a proven synchronous handler or
+       * calls `promote` before constructing the ordinary managed handle cell.
+       * `release` ends an unpromoted payload. The manifest says HOW; whole-
+       * program analysis alone selects WHEN through `resourceMode`. */
+      frameBounded?: {
+        promote: { symbol: string };
+        release: { symbol: string };
+      };
+      /** Compiler-selected representation for this callback payload across
+       * every reached registration of the binding. Absence selects promotion
+       * to the existing stable representation. */
+      resourceMode?: "frameBounded";
     }
   /** One handler parameter fed by two physical slots: a pointer and the
    * element count beside it. The pairing lives here rather than in the
