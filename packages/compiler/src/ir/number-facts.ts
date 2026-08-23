@@ -1514,6 +1514,8 @@ class FnAnalyzer {
         return this.staticAccessPath(e) !== null;
       case "unionNarrow":
         return this.isPure(e.value);
+      case "strIntrinsic":
+        return this.isPure(e.receiver) && e.args.every((argument) => this.isPure(argument));
       case "bin":
       case "strEq":
       case "strCmp":
@@ -1553,6 +1555,10 @@ class FnAnalyzer {
       case "unionNarrow":
         return e.type.kind === "f64" && numberCarrierKind(e.value.type, this.mod) === "optional"
           ? this.evalPure(e.value, env)
+          : { ...TOP };
+      case "strIntrinsic":
+        return e.method === "length" && e.type.kind === "f64"
+          ? absVal(0, SAFE_MAX, true, false)
           : { ...TOP };
       case "unary":
         if (e.op === "-") return transferNeg(this.evalPure(e.operand, env));
@@ -1839,6 +1845,17 @@ class FnAnalyzer {
         const value = this.evalExpr(e.value, env);
         return e.type.kind === "f64" && numberCarrierKind(e.value.type, this.mod) === "optional"
           ? value
+          : { ...TOP };
+      }
+      case "strIntrinsic": {
+        this.evalExpr(e.receiver, env);
+        for (const argument of e.args) this.evalExpr(argument, env);
+        /* Every ScriptC string has an integral UTF-16 length in the
+         * language's safe-integer range. String intrinsics cannot invoke
+         * user code, so observing one must not erase immutable-global or
+         * induction facts around it. */
+        return e.method === "length" && e.type.kind === "f64"
+          ? absVal(0, SAFE_MAX, true, false)
           : { ...TOP };
       }
       case "libCall": {
@@ -2162,6 +2179,8 @@ function constantNumberGlobals(mod: IrModule): ReadonlyMap<string, AbsVal> {
 }
 
 export interface MachineIntegerFacts {
+  /** Immutable literal module globals proved to fit the same carrier. */
+  readonly globals: ReadonlySet<string>;
   /** Function name → f64 locals whose every reachable write is proved to
    * be a signed 32-bit integer and never the observably distinct -0. */
   readonly locals: ReadonlyMap<string, ReadonlySet<string>>;
@@ -2181,6 +2200,11 @@ export function machineIntegerFacts(mod: IrModule): MachineIntegerFacts {
   const effects = globalEffectsOf(mod);
   const cfg: IntSlotConfig = { fns: new Map(), records: new Map() };
   const globalSeeds = constantNumberGlobals(mod);
+  const globals = new Set(
+    [...globalSeeds]
+      .filter(([, value]) => isMachineI32(value))
+      .map(([id]) => id),
+  );
   const native = nativeBoundaryContext(mod);
   const locals = new Map<string, ReadonlySet<string>>();
   const expressions = new Set<IrExpr>();
@@ -2201,7 +2225,7 @@ export function machineIntegerFacts(mod: IrModule): MachineIntegerFacts {
     if (functionLocals.size > 0) locals.set(fn.name, functionLocals);
     for (const expression of observer.expressions()) expressions.add(expression);
   }
-  const facts = Object.freeze({ locals, expressions });
+  const facts = Object.freeze({ globals, locals, expressions });
   machineIntegerFactsByModule.set(mod, facts);
   return facts;
 }

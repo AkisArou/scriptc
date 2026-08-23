@@ -12,6 +12,9 @@ const arithmetic = fileURLToPath(
 const integerLocals = fileURLToPath(
   new URL("../../../../../tests/corpus/109-jvm-integer-locals.ts", import.meta.url),
 );
+const referenceValues = fileURLToPath(
+  new URL("../../../../../tests/corpus/110-jvm-reference-values.ts", import.meta.url),
+);
 
 test("the JVM emitter consumes checked ScriptC IR and emits a direct Java call", () => {
   const planned = planExecutableCompilation(hello, { backend: "c" });
@@ -50,6 +53,7 @@ test("the JVM emitter specializes only proved signed-integer locals", () => {
       "overflowingNumber",
       "fractionalNumber",
       "negativeZeroNumber",
+      "nonIntegerGlobals",
     ],
   });
   expect(planned.ok).toBe(true);
@@ -62,8 +66,32 @@ test("the JVM emitter specializes only proved signed-integer locals", () => {
 
   expect(integerDeclaration).not.toBeNull();
   if (integerDeclaration === null) return;
+  expect(source).toMatch(/private static int g_[0-9a-f]+;/u);
+  expect(source.match(/private static double g_[0-9a-f]+;/gu)?.length).toBe(3);
   expect(source).not.toContain(`ntsToInt32(${integerDeclaration[1]})`);
   expect(source).toMatch(/\bdouble l_[0-9a-f]+ = 2147483647d;/u);
   expect(source).toMatch(/\bdouble l_[0-9a-f]+ = 0\.5d;/u);
   expect(source).toMatch(/\bdouble l_[0-9a-f]+ = -0\.0d;/u);
+});
+
+test("the JVM emitter keeps strings as direct Java references", () => {
+  const planned = planExecutableCompilation(referenceValues, {
+    backend: "c",
+    externalFunctionRoots: ["utf16Length"],
+  });
+  expect(planned.ok).toBe(true);
+  if (!planned.ok) return;
+
+  const source = emitJvmSerializedModule(planned.plan.ir, {
+    className: "ReferenceValues",
+    functionExports: [{
+      functionName: "utf16Length",
+      methodName: "utf16Length",
+    }],
+  });
+
+  expect(source).toContain("public static double utf16Length(String a0)");
+  expect(source).toMatch(/\.length\(\)/u);
+  expect(source).not.toContain("UTF");
+  expect(source).not.toContain("JNI");
 });

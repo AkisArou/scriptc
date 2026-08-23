@@ -7,6 +7,7 @@ import type {
   IrType,
   SrcLoc,
 } from "../../ir/nodes.js";
+import { nullableNativeHandleUnion } from "../../ir/nodes.js";
 import {
   machineIntegerFacts,
   type MachineIntegerFacts,
@@ -250,8 +251,9 @@ class JavaEmitter {
     );
 
     for (const global of this.#module.globals ?? []) {
+      const integer = this.#machineIntegers.globals.has(global.id);
       lines.push(
-        `  private static ${this.#javaType(global.type, entry.loc)} ${encodedIdentifier("g", global.id)};`,
+        `  private static ${integer ? "int" : this.#javaType(global.type, entry.loc)} ${encodedIdentifier("g", global.id)};`,
       );
     }
     if ((this.#module.globals?.length ?? 0) > 0) lines.push("");
@@ -300,7 +302,11 @@ class JavaEmitter {
     if ((fn.captures?.length ?? 0) !== 0) throw new JvmUnsupportedError("capturing functions", fn.loc);
     for (const local of fn.locals) {
       if (local.boxed === true) throw new JvmUnsupportedError("boxed locals", fn.loc);
-      if (local.nativeFrame !== undefined && local.type.kind !== "nativeHandle") {
+      if (
+        local.nativeFrame !== undefined &&
+        local.type.kind !== "nativeHandle" &&
+        this.#nullableHandle(local.type) === null
+      ) {
         throw new JvmUnsupportedError("frame-bounded non-handle locals", fn.loc);
       }
     }
@@ -322,7 +328,7 @@ class JavaEmitter {
     switch (stmt.kind) {
       case "varDecl": {
         const local = this.#local(fn, stmt.localId, stmt.loc);
-        const integer = this.#integerLocals.has(local.id);
+        const integer = this.#integerBinding(local.id);
         const init = stmt.init === null
           ? ""
           : ` = ${integer ? this.#intExpr(stmt.init) : this.#expr(stmt.init)}`;
@@ -332,7 +338,7 @@ class JavaEmitter {
       case "assign":
         return [
           `${pad}${this.#binding(stmt.localId)} = ${
-            this.#integerLocals.has(stmt.localId)
+            this.#integerBinding(stmt.localId)
               ? this.#intExpr(stmt.value)
               : this.#expr(stmt.value)
           };`,
@@ -372,6 +378,23 @@ class JavaEmitter {
       case "numLit": return numberLiteral(expr.value);
       case "boolLit": return expr.value ? "true" : "false";
       case "strLit": return javaString(expr.value);
+      case "strIntrinsic": {
+        if (
+          expr.method !== "length" ||
+          expr.receiver.type.kind !== "string" ||
+          expr.args.length !== 0 ||
+          expr.type.kind !== "f64"
+        ) {
+          throw new JvmUnsupportedError(
+            `string intrinsic '${expr.method}'`,
+            expr.loc,
+          );
+        }
+        /* A ScriptC string is already java.lang.String in this backend.
+         * Java length() and JavaScript length both count UTF-16 code units,
+         * so no encoding bridge or temporary representation is needed. */
+        return `(double)((${this.#expr(expr.receiver)}).length())`;
+      }
       case "varRef": return this.#binding(expr.localId);
       case "call":
         return `${encodedIdentifier("f", expr.callee)}(${expr.args.map((arg) => this.#expr(arg)).join(", ")})`;
@@ -443,6 +466,57 @@ class JavaEmitter {
       }
       case "ternary":
         return `(${this.#expr(expr.cond)} ? ${this.#expr(expr.then)} : ${this.#expr(expr.else_)})`;
+      case "unionWrap": {
+        const nullable = this.#nullableHandle(expr.type);
+        if (nullable === null || expr.unionId !== nullable.unionId) {
+          throw new JvmUnsupportedError("non-nullable-handle union construction", expr.loc);
+        }
+        if (expr.tag === nullable.nullTag) {
+          if (expr.value.kind !== "unitLit" || expr.value.type.kind !== "nullT") {
+            throw new Error(
+              `JVM nullable-handle union '${expr.unionId}' null arm has a payload`,
+            );
+          }
+          return "null";
+        }
+        if (
+          expr.tag !== nullable.handleTag ||
+          expr.value.type.kind !== "nativeHandle" ||
+          expr.value.type.typeId !== nullable.typeId
+        ) {
+          throw new Error(
+            `JVM nullable-handle union '${expr.unionId}' received the wrong arm`,
+          );
+        }
+        return this.#expr(expr.value);
+      }
+      case "unionNarrow": {
+        const nullable = this.#nullableHandle(expr.value.type);
+        if (
+          nullable === null ||
+          expr.unionId !== nullable.unionId ||
+          expr.tag !== nullable.handleTag ||
+          expr.type.kind !== "nativeHandle" ||
+          expr.type.typeId !== nullable.typeId
+        ) {
+          throw new JvmUnsupportedError("non-nullable-handle union narrowing", expr.loc);
+        }
+        /* The checked IR proves this arm is live. A nullable Java reference
+         * carries the same proof without a tag box or ownership operation. */
+        return this.#expr(expr.value);
+      }
+      case "unionIsTag": {
+        const nullable = this.#nullableHandle(expr.value.type);
+        if (
+          nullable === null ||
+          expr.unionId !== nullable.unionId ||
+          (expr.tag !== nullable.handleTag && expr.tag !== nullable.nullTag)
+        ) {
+          throw new JvmUnsupportedError("non-nullable-handle union tag tests", expr.loc);
+        }
+        const equality = (expr.tag === nullable.nullTag) !== expr.negated;
+        return `(${this.#expr(expr.value)} ${equality ? "==" : "!="} null)`;
+      }
       case "upcast":
         if (
           expr.value.type.kind === "nativeHandle" &&
@@ -479,7 +553,11 @@ class JavaEmitter {
   }
 
   #nativeCall(expr: Extract<IrExpr, { kind: "nativeCall" }>): string {
-    if (expr.resultMode !== undefined && expr.type.kind !== "nativeHandle") {
+    if (
+      expr.resultMode !== undefined &&
+      expr.type.kind !== "nativeHandle" &&
+      this.#nullableHandle(expr.type) === null
+    ) {
       throw new JvmUnsupportedError("frame-bounded native call results", expr.loc);
     }
     const direct = this.#jvmNativeBindings.get(expr.binding);
@@ -562,6 +640,10 @@ class JavaEmitter {
     if (type.kind === "nativeHandle") {
       return descriptor === `L${this.#nativeHandleOwner(type.typeId, loc)};`;
     }
+    const nullable = this.#nullableHandle(type);
+    if (nullable !== null) {
+      return descriptor === `L${this.#nativeHandleOwner(nullable.typeId, loc)};`;
+    }
     return false;
   }
 
@@ -571,7 +653,11 @@ class JavaEmitter {
     }
     if (expr.kind === "unitLit") return "null";
     if (descriptor.startsWith("L") || descriptor.startsWith("[")) {
-      if (expr.type.kind !== "string" && expr.type.kind !== "nativeHandle") {
+      if (
+        expr.type.kind !== "string" &&
+        expr.type.kind !== "nativeHandle" &&
+        this.#nullableHandle(expr.type) === null
+      ) {
         throw new JvmUnsupportedError(
           `direct reference argument from '${expr.type.kind}'`,
           expr.loc,
@@ -613,7 +699,7 @@ class JavaEmitter {
           ? String(expr.value)
           : null;
       case "varRef":
-        return this.#integerLocals.has(expr.localId)
+        return this.#integerBinding(expr.localId)
           ? this.#binding(expr.localId)
           : null;
       case "bin": {
@@ -678,9 +764,46 @@ class JavaEmitter {
       : encodedIdentifier("l", id);
   }
 
+  #integerBinding(id: string): boolean {
+    return this.#integerLocals.has(id) || this.#machineIntegers.globals.has(id);
+  }
+
   #javaType(type: IrType, loc: SrcLoc): string {
-    if (type.kind !== "nativeHandle") return scalarJavaType(type, loc);
-    return javaOwner(this.#nativeHandleOwner(type.typeId, loc));
+    if (type.kind === "nativeHandle") {
+      return javaOwner(this.#nativeHandleOwner(type.typeId, loc));
+    }
+    const nullable = this.#nullableHandle(type);
+    if (nullable !== null) {
+      /* Java references already carry null. Keeping T | null unboxed is
+       * both the exact representation and what lets javac verify uses. */
+      return javaOwner(this.#nativeHandleOwner(nullable.typeId, loc));
+    }
+    return scalarJavaType(type, loc);
+  }
+
+  #nullableHandle(type: IrType): {
+    unionId: string;
+    typeId: string;
+    handleTag: number;
+    nullTag: number;
+  } | null {
+    if (type.kind !== "union") return null;
+    const definition = this.#module.unions?.find(
+      (candidate) => candidate.id === type.unionId,
+    );
+    if (definition === undefined || definition.arms.length !== 2) return null;
+    const handle = definition.arms.find(
+      (arm): arm is Extract<IrType, { kind: "nativeHandle" }> =>
+        arm.kind === "nativeHandle",
+    );
+    if (handle === undefined) return null;
+    const nullable = nullableNativeHandleUnion(
+      this.#module.unions ?? [],
+      handle.typeId,
+    );
+    return nullable?.unionId === type.unionId
+      ? { ...nullable, typeId: handle.typeId }
+      : null;
   }
 
   #nativeHandleOwner(typeId: string, loc: SrcLoc): string {
