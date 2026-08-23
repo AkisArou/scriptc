@@ -1,4 +1,5 @@
 import type {
+  IrClassDef,
   IrExpr,
   IrFunction,
   IrModule,
@@ -9,6 +10,7 @@ import type {
 } from "../../ir/nodes.js";
 import { nullableNativeHandleUnion } from "../../ir/nodes.js";
 import {
+  machineIntegerFieldKey,
   machineIntegerFacts,
   type MachineIntegerFacts,
 } from "../../ir/number-facts.js";
@@ -128,7 +130,10 @@ function validateOptions(options: JvmEmissionOptions): void {
 }
 
 /** Collision-free Java identifier over the UTF-8 spelling of an IR id. */
-function encodedIdentifier(prefix: "f" | "g" | "l", value: string): string {
+function encodedIdentifier(
+  prefix: "c" | "d" | "f" | "g" | "l" | "m" | "n",
+  value: string,
+): string {
   const bytes = new TextEncoder().encode(value);
   let encoded = `${prefix}_`;
   for (const byte of bytes) encoded += byte.toString(16).padStart(2, "0");
@@ -265,6 +270,7 @@ class JavaEmitter {
   readonly #module: IrModule;
   readonly #options: JvmEmissionOptions;
   readonly #functions: ReadonlyMap<string, IrFunction>;
+  readonly #classes: ReadonlyMap<string, IrClassDef>;
   readonly #nativeTypes: ReadonlyMap<string, NonNullable<IrModule["nativeTypes"]>[number]>;
   readonly #irNativeBindings: ReadonlyMap<string, IrNativeBinding>;
   readonly #jvmNativeBindings: ReadonlyMap<string, JvmDirectBinding>;
@@ -285,6 +291,11 @@ class JavaEmitter {
     this.#module = module;
     this.#options = options;
     this.#functions = new Map(module.functions.map((fn) => [fn.name, fn]));
+    this.#classes = new Map(
+      (module.classes ?? [])
+        .filter((class_) => class_.runtime !== true)
+        .map((class_) => [class_.name, class_]),
+    );
     this.#nativeTypes = new Map(
       (module.nativeTypes ?? []).map((type) => [type.id, type]),
     );
@@ -393,6 +404,8 @@ class JavaEmitter {
 
     lines.push(...this.#emitBoxSupport());
 
+    lines.push(...this.#emitManagedClassSupport());
+
     for (const global of this.#module.globals ?? []) {
       const integer = this.#machineIntegers.globals.has(global.id);
       lines.push(
@@ -491,6 +504,125 @@ class JavaEmitter {
       );
     }
     return lines;
+  }
+
+  /** ScriptC's managed objects need no handle cell in a JVM artifact. The
+   * checked class layout becomes an ordinary nested Java class, while the
+   * already-lowered constructor and method functions remain the single
+   * semantic bodies. Thin instance wrappers exist only where Native IR asks
+   * for dynamic dispatch; javac/ART then provide the vtable directly. */
+  #emitManagedClassSupport(): string[] {
+    const lines: string[] = [];
+    for (const class_ of this.#classes.values()) {
+      if (class_.genericOf !== undefined) {
+        throw new JvmUnsupportedError("generic class families", class_.loc);
+      }
+      const base = class_.base === undefined
+        ? undefined
+        : this.#classes.get(class_.base);
+      if (class_.base !== undefined && base === undefined) {
+        throw new JvmUnsupportedError(
+          `managed class '${class_.name}' with runtime base '${class_.base}'`,
+          class_.loc,
+        );
+      }
+      const className = this.#managedClassName(class_.name, class_.loc);
+      lines.push(
+        `  private static ${class_.abstract === true ? "abstract " : ""}class ${className}${
+          base === undefined
+            ? ""
+            : ` extends ${this.#managedClassName(base.name, class_.loc)}`
+        } {`,
+      );
+      const inheritedFieldCount = base?.fields.length ?? 0;
+      for (const field of class_.fields.slice(inheritedFieldCount)) {
+        lines.push(
+          `    private ${
+            this.#integerField(class_.name, field.name)
+              ? "int"
+              : this.#javaType(field.type, class_.loc)
+          } ${this.#managedFieldName(field.name)};`,
+        );
+      }
+      if (class_.fields.length > inheritedFieldCount) lines.push("");
+
+      for (const method of class_.methods ?? []) {
+        if (class_.abstractMethods?.includes(method) === true) continue;
+        const implementation = this.#functions.get(`%${class_.name}.${method}`);
+        if (implementation === undefined) continue;
+        const receiver = implementation.params[0];
+        if (
+          receiver === undefined ||
+          receiver.type.kind !== "object" ||
+          receiver.type.className !== class_.name
+        ) {
+          throw new Error(
+            `JVM managed method '%${class_.name}.${method}' has no exact receiver`,
+          );
+        }
+        const params = implementation.params.slice(1).map((param, index) =>
+          `${this.#javaType(param.type, implementation.loc)} a${index}`
+        );
+        const args = implementation.params.slice(1).map((_, index) => `a${index}`);
+        const call = `${encodedIdentifier("f", implementation.name)}(this${
+          args.length === 0 ? "" : `, ${args.join(", ")}`
+        })`;
+        if (this.#ancestorDeclaresMethod(class_, method)) {
+          lines.push("    @Override");
+        }
+        lines.push(
+          `    ${this.#javaType(implementation.returnType, implementation.loc)} ${this.#managedMethodName(method)}(${params.join(", ")}) {`,
+          implementation.returnType.kind === "void"
+            ? `      ${call};`
+            : `      return ${call};`,
+          "    }",
+          "",
+        );
+      }
+      if (lines.at(-1) === "") lines.pop();
+      lines.push("  }", "");
+
+      const constructor = this.#functions.get(`%${class_.name}.constructor`);
+      if (constructor !== undefined) {
+        const receiver = constructor.params[0];
+        if (
+          receiver === undefined ||
+          receiver.type.kind !== "object" ||
+          receiver.type.className !== class_.name ||
+          constructor.returnType.kind !== "void"
+        ) {
+          throw new Error(
+            `JVM managed constructor '%${class_.name}.constructor' has the wrong ABI`,
+          );
+        }
+        const params = constructor.params.slice(1).map((param, index) =>
+          `${this.#javaType(param.type, constructor.loc)} a${index}`
+        );
+        const args = constructor.params.slice(1).map((_, index) => `a${index}`);
+        lines.push(
+          `  private static ${className} ${this.#managedNewName(class_.name)}(${params.join(", ")}) {`,
+          `    ${className} value = new ${className}();`,
+          `    ${encodedIdentifier("f", constructor.name)}(value${
+            args.length === 0 ? "" : `, ${args.join(", ")}`
+          });`,
+          "    return value;",
+          "  }",
+          "",
+        );
+      }
+    }
+    return lines;
+  }
+
+  #ancestorDeclaresMethod(class_: IrClassDef, method: string): boolean {
+    let baseName = class_.base;
+    while (baseName !== undefined) {
+      const base = this.#classes.get(baseName);
+      if (base === undefined) return false;
+      if (base.methods?.includes(method) === true) return true;
+      baseName = base.base;
+    }
+    return false;
   }
 
   #emitDirectCallbackSupport(): string[] {
@@ -693,6 +825,16 @@ class JavaEmitter {
               : this.#expr(stmt.value)
           };`,
         ];
+      case "fieldSet":
+        return [
+          `${pad}((${this.#managedClassName(stmt.className, stmt.loc)})(${this.#expr(stmt.obj)})).${
+            this.#managedFieldName(stmt.field)
+          } = ${
+            this.#integerField(stmt.className, stmt.field)
+              ? this.#intExpr(stmt.value)
+              : this.#expr(stmt.value)
+          };`,
+        ];
       case "exprStmt":
         return [`${pad}${this.#expr(stmt.expr)};`];
       case "return":
@@ -766,6 +908,23 @@ class JavaEmitter {
       case "varRef": return this.#binding(expr.localId);
       case "call":
         return `${encodedIdentifier("f", expr.callee)}(${expr.args.map((arg) => this.#expr(arg)).join(", ")})`;
+      case "new":
+        return `${this.#managedNewName(expr.className)}(${expr.args.map((arg) => this.#expr(arg)).join(", ")})`;
+      case "virtualCall": {
+        const receiver = expr.args[0];
+        if (receiver === undefined) {
+          throw new Error(
+            `JVM virtual call '${expr.className}.${expr.method}' has no receiver`,
+          );
+        }
+        return `((${this.#managedClassName(expr.className, expr.loc)})(${this.#expr(receiver)})).${
+          this.#managedMethodName(expr.method)
+        }(${expr.args.slice(1).map((arg) => this.#expr(arg)).join(", ")})`;
+      }
+      case "fieldGet":
+        return `((${this.#managedClassName(expr.className, expr.loc)})(${this.#expr(expr.obj)})).${
+          this.#managedFieldName(expr.field)
+        }`;
       case "bin": {
         const operandKind = expr.left.type.kind;
         if (
@@ -887,6 +1046,14 @@ class JavaEmitter {
       }
       case "upcast":
         if (
+          expr.value.type.kind === "object" &&
+          expr.type.kind === "object"
+        ) {
+          this.#managedClassName(expr.value.type.className, expr.loc);
+          this.#managedClassName(expr.type.className, expr.loc);
+          return this.#expr(expr.value);
+        }
+        if (
           expr.value.type.kind === "nativeHandle" &&
           expr.type.kind === "nativeHandle"
         ) {
@@ -900,6 +1067,25 @@ class JavaEmitter {
         }
         throw new JvmUnsupportedError(
           `upcast from '${expr.value.type.kind}' to '${expr.type.kind}'`,
+          expr.loc,
+        );
+      case "downcast":
+        if (
+          expr.value.type.kind === "object" &&
+          expr.type.kind === "object"
+        ) {
+          return `((${this.#managedClassName(expr.type.className, expr.loc)})(${this.#expr(expr.value)}))`;
+        }
+        throw new JvmUnsupportedError(
+          `downcast from '${expr.value.type.kind}' to '${expr.type.kind}'`,
+          expr.loc,
+        );
+      case "instanceOf":
+        if (expr.value.type.kind === "object") {
+          return `(${this.#expr(expr.value)} instanceof ${this.#managedClassName(expr.className, expr.loc)})`;
+        }
+        throw new JvmUnsupportedError(
+          `instanceof over '${expr.value.type.kind}'`,
           expr.loc,
         );
       case "nativeCall":
@@ -1230,6 +1416,10 @@ class JavaEmitter {
         return this.#integerBinding(expr.localId)
           ? this.#binding(expr.localId)
           : null;
+      case "fieldGet":
+        return this.#integerField(expr.className, expr.field)
+          ? this.#expr(expr)
+          : null;
       case "bin": {
         if (["&", "|", "^", "<<", ">>"].includes(expr.op)) {
           const left = this.#toInt32Expr(expr.left);
@@ -1278,6 +1468,15 @@ class JavaEmitter {
   }
 
   #toInt32Expr(expr: IrExpr): string {
+    /* JavaScript's unsigned right shift returns a Number in 0..2^32-1,
+     * which cannot generally stay in a Java int when observed as a Number.
+     * When a surrounding bitwise operator immediately applies ToInt32,
+     * however, the signed Java int carrying the same 32 bits is already the
+     * exact result. Keep that conversion in the integer domain instead of
+     * widening through unsigned long/double and calling the generic helper. */
+    if (expr.kind === "bin" && expr.op === ">>>") {
+      return `(${this.#toInt32Expr(expr.left)} >>> (${this.#toInt32Expr(expr.right)} & 31))`;
+    }
     return this.#directIntExpr(expr) ?? `ntsToInt32(${this.#expr(expr)})`;
   }
 
@@ -1310,6 +1509,9 @@ class JavaEmitter {
   }
 
   #javaType(type: IrType, loc: SrcLoc): string {
+    if (type.kind === "object") {
+      return this.#managedClassName(type.className, loc);
+    }
     if (type.kind === "nativeHandle") {
       return this.#javaHandleType(type.typeId, loc);
     }
@@ -1410,6 +1612,31 @@ class JavaEmitter {
     }
     javaOwner(owner);
     return owner;
+  }
+
+  #managedClassName(className: string, loc: SrcLoc): string {
+    if (!this.#classes.has(className)) {
+      throw new JvmUnsupportedError(`managed class '${className}'`, loc);
+    }
+    return encodedIdentifier("c", className);
+  }
+
+  #managedFieldName(field: string): string {
+    return encodedIdentifier("d", field);
+  }
+
+  #integerField(className: string, field: string): boolean {
+    return this.#machineIntegers.fields.has(
+      machineIntegerFieldKey(className, field),
+    );
+  }
+
+  #managedMethodName(method: string): string {
+    return encodedIdentifier("m", method);
+  }
+
+  #managedNewName(className: string): string {
+    return encodedIdentifier("n", className);
   }
 
   #local(fn: IrFunction, id: string, loc: SrcLoc): IrFunction["locals"][number] {

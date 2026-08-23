@@ -15,6 +15,9 @@ const integerLocals = fileURLToPath(
 const referenceValues = fileURLToPath(
   new URL("../../../../../tests/corpus/110-jvm-reference-values.ts", import.meta.url),
 );
+const classFields = fileURLToPath(
+  new URL("../../../../../tests/corpus/111-jvm-class-fields.ts", import.meta.url),
+);
 
 test("the JVM emitter consumes checked ScriptC IR and emits a direct Java call", () => {
   const planned = planExecutableCompilation(hello, { backend: "c" });
@@ -114,4 +117,29 @@ test("the JVM emitter refuses unsigned byte element access until it is explicit"
       "byte-array intrinsic 'get'",
       { file: "110-jvm-reference-values.ts", start: 225, end: 233 },
     ));
+});
+
+test("the JVM emitter keeps managed class fields and dispatch in ART", () => {
+  const planned = planExecutableCompilation(classFields, {
+    backend: "c",
+    externalFunctionRoots: ["classFields", "integerFieldBitwise"],
+  });
+  expect(planned.ok).toBe(true);
+  if (!planned.ok) return;
+
+  const source = emitJvmSerializedModule(planned.plan.ir, {
+    className: "ClassFields",
+    functionExports: [{
+      functionName: "classFields",
+      methodName: "classFields",
+    }],
+  });
+
+  expect(source).toContain("private static class");
+  expect(source).toContain(" extends ");
+  expect(source).toMatch(/\.m_[0-9a-f]+\(/u);
+  expect(source).toMatch(/private int d_[0-9a-f]+;/u);
+  expect(source).toContain(" >>> ");
+  expect(source).not.toContain("Integer.toUnsignedLong");
+  expect(source).not.toContain("JNI");
 });

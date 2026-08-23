@@ -2201,6 +2201,10 @@ function constantNumberGlobals(mod: IrModule): ReadonlyMap<string, AbsVal> {
 export interface MachineIntegerFacts {
   /** Immutable literal module globals proved to fit the same carrier. */
   readonly globals: ReadonlySet<string>;
+  /** Managed f64 fields whose default value and every whole-program write
+   * fit a signed int32 and can never carry -0. Keys include inherited class
+   * views so a backend need not rediscover the declaring layout owner. */
+  readonly fields: ReadonlySet<string>;
   /** Function name → f64 locals whose every reachable write is proved to
    * be a signed 32-bit integer and never the observably distinct -0. */
   readonly locals: ReadonlyMap<string, ReadonlySet<string>>;
@@ -2209,6 +2213,79 @@ export interface MachineIntegerFacts {
 }
 
 const machineIntegerFactsByModule = new WeakMap<IrModule, MachineIntegerFacts>();
+
+export function machineIntegerFieldKey(className: string, field: string): string {
+  return JSON.stringify([className, field]);
+}
+
+function machineIntegerFields(
+  mod: IrModule,
+  expressions: ReadonlySet<IrExpr>,
+): ReadonlySet<string> {
+  const classes = new Map(
+    (mod.classes ?? [])
+      .filter((class_) => class_.runtime !== true)
+      .map((class_) => [class_.name, class_]),
+  );
+  const declaredOwner = (className: string, field: string): string | null => {
+    const class_ = classes.get(className);
+    if (class_ === undefined) return null;
+    const index = class_.fields.findIndex((candidate) => candidate.name === field);
+    if (index < 0) return null;
+    if (class_.base !== undefined) {
+      const base = classes.get(class_.base);
+      if (base !== undefined && index < base.fields.length) {
+        return declaredOwner(base.name, field);
+      }
+    }
+    return class_.name;
+  };
+
+  const eligible = new Set<string>();
+  for (const class_ of classes.values()) {
+    const inherited = class_.base === undefined
+      ? 0
+      : classes.get(class_.base)?.fields.length ?? 0;
+    for (const field of class_.fields.slice(inherited)) {
+      if (field.type.kind === "f64") {
+        eligible.add(machineIntegerFieldKey(class_.name, field.name));
+      }
+    }
+  }
+  const unsafe = new Set<string>();
+  walkBodyNodes(mod.functions, (node) => {
+    if (node.kind === "fieldSet") {
+      const write = node as Extract<IrStmt, { kind: "fieldSet" }>;
+      const owner = declaredOwner(write.className, write.field);
+      if (owner === null) return;
+      const key = machineIntegerFieldKey(owner, write.field);
+      if (eligible.has(key) && !expressions.has(write.value)) unsafe.add(key);
+      return;
+    }
+    if (node.kind === "fieldIncDec") {
+      const write = node as Extract<IrExpr, { kind: "fieldIncDec" }>;
+      const owner = declaredOwner(write.className, write.field);
+      if (owner !== null) unsafe.add(machineIntegerFieldKey(owner, write.field));
+    }
+  });
+
+  const safeDeclarations = new Set(
+    [...eligible].filter((key) => !unsafe.has(key)),
+  );
+  const fields = new Set<string>();
+  for (const class_ of classes.values()) {
+    for (const field of class_.fields) {
+      const owner = declaredOwner(class_.name, field.name);
+      if (
+        owner !== null &&
+        safeDeclarations.has(machineIntegerFieldKey(owner, field.name))
+      ) {
+        fields.add(machineIntegerFieldKey(class_.name, field.name));
+      }
+    }
+  }
+  return fields;
+}
 
 /** Proved storage choices for backends that have a cheaper signed-integer
  * representation. JavaScript's public number type remains f64: parameters,
@@ -2245,7 +2322,8 @@ export function machineIntegerFacts(mod: IrModule): MachineIntegerFacts {
     if (functionLocals.size > 0) locals.set(fn.name, functionLocals);
     for (const expression of observer.expressions()) expressions.add(expression);
   }
-  const facts = Object.freeze({ globals, locals, expressions });
+  const fields = machineIntegerFields(mod, expressions);
+  const facts = Object.freeze({ globals, fields, locals, expressions });
   machineIntegerFactsByModule.set(mod, facts);
   return facts;
 }

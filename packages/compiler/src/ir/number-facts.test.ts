@@ -13,6 +13,7 @@ import { describe, expect, test } from "vitest";
 import { IR_VERSION, type IrExpr, type IrFunction, type IrModule, type IrNativeBinding, type IrNumBinOp, type IrStmt } from "./nodes.js";
 import {
   checkLibraryIntegerSlots,
+  machineIntegerFieldKey,
   machineIntegerFacts,
   type IntSlotConfig,
   numberBoundaryFacts,
@@ -1120,6 +1121,61 @@ describe("the native checked-number boundary", () => {
     }];
 
     expect(machineIntegerFacts(mod).locals.get("case")?.has("i.0")).toBe(true);
+  });
+
+  test("managed fields use int storage only when every write proves it", () => {
+    const objectType = { kind: "object", className: "Counter" } as const;
+    const receiver: IrExpr = {
+      kind: "varRef",
+      localId: "this.0",
+      type: objectType,
+      loc,
+    };
+    const read: IrExpr = {
+      kind: "fieldGet",
+      obj: receiver,
+      className: "Counter",
+      field: "value",
+      type: F64,
+      loc,
+    };
+    const mod: IrModule = {
+      irVersion: IR_VERSION,
+      sourceFile: "fields.ts",
+      classes: [{
+        name: "Counter",
+        fields: [{ name: "value", type: F64 }, { name: "fraction", type: F64 }],
+        methods: ["step"],
+        loc,
+      }],
+      functions: [{
+        name: "%Counter.step",
+        params: [{ localId: "this.0", name: "this", type: objectType }],
+        returnType: VOID,
+        locals: [{ id: "this.0", name: "this", type: objectType, mutable: false }],
+        body: [{
+          kind: "fieldSet",
+          obj: receiver,
+          className: "Counter",
+          field: "value",
+          value: bin("&", bin("^", read, num(17)), num(1023)),
+          loc,
+        }, {
+          kind: "fieldSet",
+          obj: receiver,
+          className: "Counter",
+          field: "fraction",
+          value: num(0.5),
+          loc,
+        }],
+        loc,
+      }],
+      entry: "%Counter.step",
+    };
+
+    const fields = machineIntegerFacts(mod).fields;
+    expect(fields.has(machineIntegerFieldKey("Counter", "value"))).toBe(true);
+    expect(fields.has(machineIntegerFieldKey("Counter", "fraction"))).toBe(false);
   });
 
   test("arithmetic that can leave the slot keeps its check", () => {
