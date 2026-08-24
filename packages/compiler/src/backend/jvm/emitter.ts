@@ -270,6 +270,17 @@ interface JvmArrayPlan {
   readonly className: string;
 }
 
+interface JvmMapPlan {
+  readonly type: Extract<IrType, { readonly kind: "map" }>;
+  readonly className: string;
+  readonly getType?: IrType;
+}
+
+interface JvmMapLiteralPlan {
+  readonly expression: Extract<IrExpr, { readonly kind: "mapNew" }>;
+  readonly factoryName: string;
+}
+
 interface JvmFunctionPlan {
   readonly type: Extract<IrType, { readonly kind: "func" }>;
   readonly interfaceName: string;
@@ -374,6 +385,95 @@ function irArrayTypes(value: unknown): ReadonlyMap<string, JvmArrayPlan> {
         className: `NtsArray${index}`,
       })]),
   );
+}
+
+function irMapTypes(value: unknown): ReadonlyMap<string, JvmMapPlan> {
+  const types = new Map<string, {
+    type: Extract<IrType, { readonly kind: "map" }>;
+    getType?: IrType;
+  }>();
+  const note = (
+    type: Extract<IrType, { readonly kind: "map" }>,
+    getType?: IrType,
+  ): void => {
+    const key = typeKey(type);
+    const prior = types.get(key);
+    if (
+      prior?.getType !== undefined &&
+      getType !== undefined &&
+      typeKey(prior.getType) !== typeKey(getType)
+    ) {
+      throw new Error(`JVM map '${key}' has inconsistent get result types`);
+    }
+    const resolvedGetType = prior?.getType ?? getType;
+    types.set(key, resolvedGetType === undefined
+      ? { type }
+      : { type, getType: resolvedGetType });
+  };
+  const visit = (candidate: unknown): void => {
+    if (Array.isArray(candidate)) {
+      for (const entry of candidate) visit(entry);
+      return;
+    }
+    if (candidate === null || typeof candidate !== "object") return;
+    const record = candidate as Readonly<Record<string, unknown>>;
+    if (
+      record["kind"] === "map" &&
+      record["key"] !== null &&
+      typeof record["key"] === "object" &&
+      record["value"] !== null &&
+      typeof record["value"] === "object"
+    ) {
+      note(candidate as Extract<IrType, { readonly kind: "map" }>);
+    }
+    const receiver = record["receiver"] as Readonly<Record<string, unknown>> | undefined;
+    const receiverType = receiver?.["type"] as Readonly<Record<string, unknown>> | undefined;
+    if (
+      record["kind"] === "mapIntrinsic" &&
+      record["method"] === "get" &&
+      receiverType?.["kind"] === "map" &&
+      record["type"] !== null &&
+      typeof record["type"] === "object"
+    ) {
+      note(
+        receiverType as Extract<IrType, { readonly kind: "map" }>,
+        record["type"] as IrType,
+      );
+    }
+    for (const child of Object.values(record)) visit(child);
+  };
+  visit(value);
+  return new Map(
+    [...types.entries()]
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([key, plan], index) => [key, Object.freeze({
+        ...plan,
+        className: `NtsMap${index}`,
+      })]),
+  );
+}
+
+function irMapLiterals(
+  value: unknown,
+): ReadonlyMap<Extract<IrExpr, { readonly kind: "mapNew" }>, JvmMapLiteralPlan> {
+  const expressions: Extract<IrExpr, { readonly kind: "mapNew" }>[] = [];
+  const visit = (candidate: unknown): void => {
+    if (Array.isArray(candidate)) {
+      for (const entry of candidate) visit(entry);
+      return;
+    }
+    if (candidate === null || typeof candidate !== "object") return;
+    const record = candidate as Readonly<Record<string, unknown>>;
+    if (record["kind"] === "mapNew" && Array.isArray(record["seed"])) {
+      expressions.push(candidate as Extract<IrExpr, { readonly kind: "mapNew" }>);
+    }
+    for (const child of Object.values(record)) visit(child);
+  };
+  visit(value);
+  return new Map(expressions.map((expression, index) => [expression, Object.freeze({
+    expression,
+    factoryName: `ntsMapLiteral${index}`,
+  })]));
 }
 
 function irFunctionTypes(value: unknown): ReadonlyMap<string, JvmFunctionPlan> {
@@ -544,6 +644,11 @@ class JavaEmitter {
   readonly #needsUint8SetHelper: boolean;
   readonly #stringIntrinsics: ReadonlySet<string>;
   readonly #arrayTypes: ReadonlyMap<string, JvmArrayPlan>;
+  readonly #mapTypes: ReadonlyMap<string, JvmMapPlan>;
+  readonly #mapLiterals: ReadonlyMap<
+    Extract<IrExpr, { readonly kind: "mapNew" }>,
+    JvmMapLiteralPlan
+  >;
   readonly #functionTypes: ReadonlyMap<string, JvmFunctionPlan>;
   readonly #functionValues: ReadonlyMap<string, JvmFunctionValuePlan>;
   readonly #recordTypes: ReadonlyMap<string, JvmRecordPlan>;
@@ -712,6 +817,8 @@ class JavaEmitter {
       module.unions,
     ];
     this.#arrayTypes = irArrayTypes(programTypes);
+    this.#mapTypes = irMapTypes(programTypes);
+    this.#mapLiterals = irMapLiterals(module.functions);
     this.#functionTypes = irFunctionTypes(programTypes);
     this.#functionValues = irFunctionValues(module.functions, this.#functions);
     this.#recordTypes = irRecordTypes(module.records ?? []);
@@ -867,6 +974,8 @@ class JavaEmitter {
     lines.push(...this.#emitRecordSupport());
 
     lines.push(...this.#emitUnionSupport());
+
+    lines.push(...this.#emitMapSupport());
 
     lines.push(...this.#emitBoxSupport());
 
@@ -1455,6 +1564,364 @@ class JavaEmitter {
     return lines;
   }
 
+  /** Maps stay specialized by their checked K/V pair. Dense exact arrays
+   * preserve JavaScript insertion order while an int-only open-addressed
+   * index provides expected O(1) lookup without HashMap's Object erasure
+   * or scalar wrappers. Tombstoned dense entries are retained during a
+   * live iterator so callback deletes, appends, and clear() have the same
+   * observable order as JavaScript; compaction is legal only after the
+   * outermost iterator exits. */
+  #emitMapSupport(): string[] {
+    if (this.#mapTypes.size === 0) return [];
+    const entry = this.#functions.get(this.#module.entry)!;
+    const lines = [
+      "  private static int ntsMapIndex(double value, int count) {",
+      "    if (!Double.isFinite(value) || value != Math.rint(value) ||",
+      "        value < 0.0d || value >= count) {",
+      "      throw new NtsTrapError(\"Map iteration index out of bounds\");",
+      "    }",
+      "    return (int)value;",
+      "  }",
+      "",
+    ];
+    for (const plan of this.#mapTypes.values()) {
+      const { key, value } = plan.type;
+      if (key.kind !== "string" && key.kind !== "f64") {
+        throw new JvmUnsupportedError(`map key type '${key.kind}'`, entry.loc);
+      }
+      const keyType = this.#javaType(key, entry.loc);
+      const valueType = this.#javaType(value, entry.loc);
+      const keyZero = this.#defaultJavaValue(key, entry.loc);
+      const valueZero = this.#defaultJavaValue(value, entry.loc);
+      const keyHash = key.kind === "string"
+        ? "key.hashCode()"
+        : [
+            "long bits = key == 0.0d ? 0L : Double.doubleToLongBits(key);",
+            "int hash = (int)(bits ^ (bits >>> 32));",
+            "return hash;",
+          ];
+      const equality = this.#arrayElementEquality(
+        key,
+        "keys[entry]",
+        "key",
+        true,
+      );
+      lines.push(
+        `  private static final class ${plan.className} {`,
+        `    private ${keyType}[] keys = new ${keyType}[8];`,
+        `    private ${valueType}[] values = new ${valueType}[8];`,
+        "    private boolean[] live = new boolean[8];",
+        "    private int[] table = new int[16];",
+        "    private int entryCount;",
+        "    private int liveCount;",
+        "    private int tableUsed;",
+        "    private int iterationDepth;",
+        "",
+        `    private int keyHash(${keyType} key) {`,
+      );
+      if (Array.isArray(keyHash)) {
+        for (const line of keyHash) lines.push(`      ${line}`);
+      } else {
+        lines.push(`      return ${keyHash};`);
+      }
+      lines.push(
+        "    }",
+        "",
+        "    private int spread(int hash) {",
+        "      hash ^= hash >>> 16;",
+        "      hash *= 0x7feb352d;",
+        "      hash ^= hash >>> 15;",
+        "      hash *= 0x846ca68b;",
+        "      return hash ^ (hash >>> 16);",
+        "    }",
+        "",
+        `    private int lookupSlot(${keyType} key) {`,
+        "      int slot = spread(keyHash(key)) & (table.length - 1);",
+        "      int deleted = -1;",
+        "      while (true) {",
+        "        int encoded = table[slot];",
+        "        if (encoded == 0) {",
+        "          int insertion = deleted >= 0 ? deleted : slot;",
+        "          return -insertion - 1;",
+        "        }",
+        "        if (encoded < 0) {",
+        "          if (deleted < 0) deleted = slot;",
+        "        } else {",
+        "          int entry = encoded - 1;",
+        `          if (live[entry] && ${equality}) return slot;`,
+        "        }",
+        "        slot = (slot + 1) & (table.length - 1);",
+        "      }",
+        "    }",
+        "",
+        "    private void rebuildTable(int capacity) {",
+        "      table = new int[capacity];",
+        "      tableUsed = 0;",
+        "      for (int entry = 0; entry < entryCount; entry++) {",
+        "        if (!live[entry]) continue;",
+        "        int slot = -lookupSlot(keys[entry]) - 1;",
+        "        table[slot] = entry + 1;",
+        "        tableUsed++;",
+        "      }",
+        "    }",
+        "",
+        "    private void ensureEntries(int need) {",
+        "      if (need <= keys.length) return;",
+        "      int capacity = keys.length;",
+        "      while (capacity < need) {",
+        "        if (capacity > Integer.MAX_VALUE / 2) {",
+        "          capacity = need;",
+        "          break;",
+        "        }",
+        "        capacity *= 2;",
+        "      }",
+        "      keys = java.util.Arrays.copyOf(keys, capacity);",
+        "      values = java.util.Arrays.copyOf(values, capacity);",
+        "      live = java.util.Arrays.copyOf(live, capacity);",
+        "    }",
+        "",
+        "    private void compact() {",
+        "      if (iterationDepth != 0 || entryCount == liveCount) return;",
+        "      int next = 0;",
+        "      int oldCount = entryCount;",
+        "      for (int entry = 0; entry < oldCount; entry++) {",
+        "        if (!live[entry]) continue;",
+        "        if (next != entry) {",
+        "          keys[next] = keys[entry];",
+        "          values[next] = values[entry];",
+        "        }",
+        "        live[next] = true;",
+        "        next++;",
+        "      }",
+        `      java.util.Arrays.fill(keys, next, oldCount, ${keyZero});`,
+        `      java.util.Arrays.fill(values, next, oldCount, ${valueZero});`,
+        "      java.util.Arrays.fill(live, next, oldCount, false);",
+        "      entryCount = next;",
+        "      rebuildTable(table.length);",
+        "    }",
+        "",
+        `    private void set(${keyType} key, ${valueType} value) {`,
+        "      int slot = lookupSlot(key);",
+        "      if (slot >= 0) {",
+        "        values[table[slot] - 1] = value;",
+        "        return;",
+        "      }",
+        "      if (iterationDepth == 0 && entryCount > 16 && entryCount > liveCount * 2) {",
+        "        compact();",
+        "      }",
+        "      if ((long)(tableUsed + 1) * 4L >= (long)table.length * 3L) {",
+        "        int capacity = table.length;",
+        "        if ((long)(liveCount + 1) * 4L >= (long)table.length * 3L) {",
+        "          if (capacity > (1 << 29)) throw new NtsRangeError(\"Map is too large\");",
+        "          capacity *= 2;",
+        "        }",
+        "        rebuildTable(capacity);",
+        "      }",
+        "      ensureEntries(entryCount + 1);",
+        "      slot = lookupSlot(key);",
+        "      if (slot >= 0) {",
+        "        values[table[slot] - 1] = value;",
+        "        return;",
+        "      }",
+        "      int insertion = -slot - 1;",
+        "      if (table[insertion] == 0) tableUsed++;",
+        "      keys[entryCount] = key;",
+        "      values[entryCount] = value;",
+        "      live[entryCount] = true;",
+        "      table[insertion] = entryCount + 1;",
+        "      entryCount++;",
+        "      liveCount++;",
+        "    }",
+        "",
+      );
+      if (plan.getType !== undefined) {
+        const getType = this.#javaType(plan.getType, entry.loc);
+        lines.push(
+          `    private ${getType} get(${keyType} key) {`,
+          "      int slot = lookupSlot(key);",
+          `      if (slot < 0) return ${this.#mapGetMiss(plan.getType, entry.loc)};`,
+          "      int index = table[slot] - 1;",
+        );
+        lines.push(...this.#mapGetHit(value, plan.getType, "values[index]", entry.loc));
+        lines.push("    }", "");
+      }
+      lines.push(
+        `    private boolean has(${keyType} key) {`,
+        "      return lookupSlot(key) >= 0;",
+        "    }",
+        "",
+        `    private boolean delete(${keyType} key) {`,
+        "      int slot = lookupSlot(key);",
+        "      if (slot < 0) return false;",
+        "      int index = table[slot] - 1;",
+        "      table[slot] = -1;",
+        "      live[index] = false;",
+        `      keys[index] = ${keyZero};`,
+        `      values[index] = ${valueZero};`,
+        "      liveCount--;",
+        "      return true;",
+        "    }",
+        "",
+        "    private double size() {",
+        "      return (double)liveCount;",
+        "    }",
+        "",
+        "    private void clear() {",
+        `      java.util.Arrays.fill(keys, 0, entryCount, ${keyZero});`,
+        `      java.util.Arrays.fill(values, 0, entryCount, ${valueZero});`,
+        "      java.util.Arrays.fill(live, 0, entryCount, false);",
+        "      java.util.Arrays.fill(table, 0);",
+        "      liveCount = 0;",
+        "      tableUsed = 0;",
+        "      if (iterationDepth == 0) entryCount = 0;",
+        "    }",
+        "",
+        "    private double iterCount() {",
+        "      return (double)entryCount;",
+        "    }",
+        "",
+        "    private boolean iterLive(double position) {",
+        "      return live[ntsMapIndex(position, entryCount)];",
+        "    }",
+        "",
+        `    private ${keyType} iterKey(double position) {`,
+        "      int index = ntsMapIndex(position, entryCount);",
+        "      if (!live[index]) throw new NtsTrapError(\"Map iterator read a deleted key\");",
+        "      return keys[index];",
+        "    }",
+        "",
+        `    private ${valueType} iterValue(double position) {`,
+        "      int index = ntsMapIndex(position, entryCount);",
+        "      if (!live[index]) throw new NtsTrapError(\"Map iterator read a deleted value\");",
+        "      return values[index];",
+        "    }",
+        "",
+        "    private void iterEnter() {",
+        "      if (iterationDepth == Integer.MAX_VALUE) {",
+        "        throw new NtsRangeError(\"Map iteration nesting is too deep\");",
+        "      }",
+        "      iterationDepth++;",
+        "    }",
+        "",
+        "    private void iterExit() {",
+        "      if (iterationDepth == 0) {",
+        "        throw new NtsTrapError(\"Map iterator exited without entering\");",
+        "      }",
+        "      iterationDepth--;",
+        "      if (iterationDepth == 0) compact();",
+        "    }",
+        "  }",
+        "",
+      );
+    }
+    for (const literal of this.#mapLiterals.values()) {
+      const { expression } = literal;
+      if (expression.type.kind !== "map") {
+        throw new Error("JVM emitter bug: mapNew has a non-map type");
+      }
+      const mapType = expression.type;
+      const map = this.#mapPlan(mapType, expression.loc);
+      const seed = expression.seed ?? [];
+      const parameters = seed.flatMap((pair, index) => [
+        `${this.#javaType(mapType.key, expression.loc)} k${index}`,
+        `${this.#javaType(mapType.value, expression.loc)} v${index}`,
+      ]);
+      lines.push(
+        `  private static ${map.className} ${literal.factoryName}(${parameters.join(", ")}) {`,
+        `    ${map.className} value = new ${map.className}();`,
+      );
+      for (const [index] of seed.entries()) {
+        lines.push(`    value.set(k${index}, v${index});`);
+      }
+      lines.push("    return value;", "  }", "");
+    }
+    return lines;
+  }
+
+  #mapGetMiss(type: IrType, loc: SrcLoc): string {
+    if (type.kind !== "union") {
+      throw new Error("JVM emitter bug: map get result is not a union");
+    }
+    const nullable = this.#nullableReference(type);
+    if (nullable !== null) {
+      if (nullable.unitKind !== "undefinedT") {
+        throw new Error("JVM emitter bug: map get nullable unit is not undefined");
+      }
+      return "null";
+    }
+    const plan = this.#unionPlan(type.unionId, loc);
+    const tag = plan.definition.arms.findIndex((arm) => arm.kind === "undefinedT");
+    if (tag < 0) throw new Error("JVM emitter bug: map get union lacks undefined");
+    return `${plan.className}.unit${tag}`;
+  }
+
+  #mapGetHit(
+    valueType: IrType,
+    getType: IrType,
+    expression: string,
+    loc: SrcLoc,
+  ): string[] {
+    if (getType.kind !== "union") {
+      throw new Error("JVM emitter bug: map get result is not a union");
+    }
+    if (typeKey(valueType) === typeKey(getType)) {
+      return [`      return ${expression};`];
+    }
+    const nullableResult = this.#nullableReference(getType);
+    if (nullableResult !== null) {
+      if (typeKey(nullableResult.valueType) !== typeKey(valueType)) {
+        throw new Error("JVM emitter bug: map get nullable value disagrees");
+      }
+      return [`      return ${expression};`];
+    }
+    const result = this.#unionPlan(getType.unionId, loc);
+    const resultTag = (arm: IrType): number => {
+      const tag = result.definition.arms.findIndex(
+        (candidate) => typeKey(candidate) === typeKey(arm),
+      );
+      if (tag < 0) throw new Error("JVM emitter bug: map get result lost a value arm");
+      return tag;
+    };
+    const resultValue = (arm: IrType, payload: string): string => {
+      const tag = resultTag(arm);
+      return this.#isUnitType(arm)
+        ? `${result.className}.unit${tag}`
+        : `${result.className}.wrap${tag}(${payload})`;
+    };
+    if (valueType.kind !== "union") {
+      return [`      return ${resultValue(valueType, expression)};`];
+    }
+    const sourceNullable = this.#nullableReference(valueType);
+    if (sourceNullable !== null) {
+      return [
+        `      ${this.#javaType(valueType, loc)} value = ${expression};`,
+        `      if (value == null) return ${resultValue(
+          { kind: sourceNullable.unitKind },
+          "value",
+        )};`,
+        `      return ${resultValue(sourceNullable.valueType, "value")};`,
+      ];
+    }
+    const source = this.#unionPlan(valueType.unionId, loc);
+    const lines = [
+      `      ${source.className} value = ${expression};`,
+      "      switch (value.tag) {",
+    ];
+    for (const [tag, arm] of source.definition.arms.entries()) {
+      lines.push(
+        `        case ${tag}: return ${resultValue(
+          arm,
+          this.#isUnitType(arm) ? "value" : `value.payload${tag}`,
+        )};`,
+      );
+    }
+    lines.push(
+      "        default: throw new NtsTrapError(\"Invalid stored Map union tag\");",
+      "      }",
+    );
+    return lines;
+  }
+
   #functionLambda(
     fnName: string,
     type: Extract<IrType, { readonly kind: "func" }>,
@@ -1499,6 +1966,7 @@ class JavaEmitter {
       this.#needsI64ToNumber ||
       this.#needsUint8ArrayLength ||
       this.#arrayTypes.size > 0 ||
+      this.#mapTypes.size > 0 ||
       this.#stringIntrinsics.has("repeat") ||
       this.#stringIntrinsics.has("padStart") ||
       this.#stringIntrinsics.has("padEnd")
@@ -1512,7 +1980,11 @@ class JavaEmitter {
         "",
       );
     }
-    if (this.#needsUint8SetHelper || this.#arrayTypes.size > 0) {
+    if (
+      this.#needsUint8SetHelper ||
+      this.#arrayTypes.size > 0 ||
+      this.#mapTypes.size > 0
+    ) {
       lines.push(
         "  private static final class NtsTrapError extends Error {",
         "    private NtsTrapError(String message) {",
@@ -2362,6 +2834,61 @@ class JavaEmitter {
         return `new ${this.#arrayClassName(expr.type, expr.loc)}(new ${elementType}[]{${
           expr.elems.map((element) => this.#expr(element)).join(", ")
         }})`;
+      }
+      case "mapNew": {
+        if (expr.type.kind !== "map") {
+          throw new Error("JVM emitter bug: mapNew has a non-map type");
+        }
+        const plan = this.#mapPlan(expr.type, expr.loc);
+        if (expr.seed === undefined) return `new ${plan.className}()`;
+        const literal = this.#mapLiterals.get(expr);
+        if (literal === undefined) {
+          throw new Error("JVM emitter bug: seeded map construction was not planned");
+        }
+        return `${literal.factoryName}(${expr.seed.flatMap((pair) => [
+          this.#expr(pair.key),
+          this.#expr(pair.value),
+        ]).join(", ")})`;
+      }
+      case "mapIntrinsic": {
+        if (expr.receiver.type.kind !== "map") {
+          throw new Error("JVM emitter bug: mapIntrinsic on a non-map value");
+        }
+        const plan = this.#mapPlan(expr.receiver.type, expr.loc);
+        const receiver = this.#expr(expr.receiver);
+        const args = expr.args.map((arg) => this.#expr(arg));
+        switch (expr.method) {
+          case "get":
+            if (
+              plan.getType === undefined ||
+              typeKey(plan.getType) !== typeKey(expr.type)
+            ) {
+              throw new Error("JVM emitter bug: map get result was not planned");
+            }
+            return `(${receiver}).get(${args[0]})`;
+          case "set":
+            return `(${receiver}).set(${args[0]}, ${args[1]})`;
+          case "has":
+            return `(${receiver}).has(${args[0]})`;
+          case "delete":
+            return `(${receiver}).delete(${args[0]})`;
+          case "size":
+            return `(${receiver}).size()`;
+          case "clear":
+            return `(${receiver}).clear()`;
+          case "iterCount":
+            return `(${receiver}).iterCount()`;
+          case "iterLive":
+            return `(${receiver}).iterLive(${args[0]})`;
+          case "iterKey":
+            return `(${receiver}).iterKey(${args[0]})`;
+          case "iterValue":
+            return `(${receiver}).iterValue(${args[0]})`;
+          case "iterEnter":
+            return `(${receiver}).iterEnter()`;
+          case "iterExit":
+            return `(${receiver}).iterExit()`;
+        }
       }
       case "recordLit": {
         const plan = this.#recordLiterals.get(expr);
@@ -3292,6 +3819,9 @@ class JavaEmitter {
     if (type.kind === "array") {
       return this.#arrayClassName(type, loc);
     }
+    if (type.kind === "map") {
+      return this.#mapPlan(type, loc).className;
+    }
     if (type.kind === "func") {
       return this.#functionInterfaceName(type, loc);
     }
@@ -3331,6 +3861,20 @@ class JavaEmitter {
       );
     }
     return plan.className;
+  }
+
+  #mapPlan(
+    type: Extract<IrType, { readonly kind: "map" }>,
+    loc: SrcLoc,
+  ): JvmMapPlan {
+    const plan = this.#mapTypes.get(typeKey(type));
+    if (plan === undefined) {
+      throw new JvmUnsupportedError(
+        `unplanned map type '${typeKey(type)}'`,
+        loc,
+      );
+    }
+    return plan;
   }
 
   #functionInterfaceName(
@@ -3430,6 +3974,7 @@ class JavaEmitter {
     switch (type.kind) {
       case "string":
       case "array":
+      case "map":
       case "object":
       case "record":
       case "nativeHandle":

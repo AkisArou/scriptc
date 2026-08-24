@@ -33,6 +33,9 @@ const recordValues = fileURLToPath(
 const unionValues = fileURLToPath(
   new URL("../../../../../tests/corpus/117-jvm-union-values.ts", import.meta.url),
 );
+const mapValues = fileURLToPath(
+  new URL("../../../../../tests/corpus/118-jvm-map-values.ts", import.meta.url),
+);
 const classFields = fileURLToPath(
   new URL("../../../../../tests/corpus/111-jvm-class-fields.ts", import.meta.url),
 );
@@ -334,6 +337,45 @@ test("the JVM emitter keeps optional references nullable and scalar unions exact
   expect(source).toMatch(/NtsArray\d+ l_/u);
   expect(source).toMatch(/String l_/u);
   expect(source).not.toContain("Object payload");
+  expect(source).not.toContain("Double.valueOf");
+  expect(source).not.toContain("JNI");
+});
+
+test("the JVM emitter keeps typed maps in exact key and value arrays", () => {
+  const roots = [
+    "stringNumberMap",
+    "numberStringMap",
+    "booleanMap",
+    "unionValueMap",
+    "nullableValueMap",
+    "undefinedValueMap",
+    "liveIterationMap",
+    "clearDuringIterationMap",
+    "rehashAndCompactMap",
+  ];
+  const planned = planExecutableCompilation(mapValues, {
+    backend: "c",
+    externalFunctionRoots: roots,
+  });
+  expect(planned.ok).toBe(true);
+  if (!planned.ok) return;
+
+  const source = emitJvmSerializedModule(planned.plan.ir, {
+    className: "MapValues",
+    functionExports: roots.map((functionName) => ({
+      functionName,
+      methodName: functionName,
+    })),
+  });
+
+  expect(source).toContain("String[] keys");
+  expect(source).toContain("double[] keys");
+  expect(source).toContain("double[] values");
+  expect(source).toContain("String[] values");
+  expect(source).toContain("boolean[] values");
+  expect(source).not.toContain("HashMap");
+  expect(source).not.toContain("LinkedHashMap");
+  expect(source).not.toContain("Object[]");
   expect(source).not.toContain("Double.valueOf");
   expect(source).not.toContain("JNI");
 });
