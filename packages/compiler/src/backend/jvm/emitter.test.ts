@@ -27,6 +27,9 @@ const stringIntrinsics = fileURLToPath(
 const arrayValues = fileURLToPath(
   new URL("../../../../../tests/corpus/115-jvm-array-values.ts", import.meta.url),
 );
+const recordValues = fileURLToPath(
+  new URL("../../../../../tests/corpus/116-jvm-record-values.ts", import.meta.url),
+);
 const classFields = fileURLToPath(
   new URL("../../../../../tests/corpus/111-jvm-class-fields.ts", import.meta.url),
 );
@@ -270,6 +273,31 @@ test("the JVM emitter specializes ordinary arrays instead of boxing their elemen
   expect(source).toContain("boolean includes(String value)");
   expect(source).not.toContain("ArrayList");
   expect(source).not.toContain("Object[] data");
+  expect(source).not.toContain("JNI");
+});
+
+test("the JVM emitter gives fixed-shape object literals exact Java fields", () => {
+  const roots = ["recordFields", "recordEvaluationOrder"];
+  const planned = planExecutableCompilation(recordValues, {
+    backend: "c",
+    externalFunctionRoots: roots,
+  });
+  expect(planned.ok).toBe(true);
+  if (!planned.ok) return;
+
+  const source = emitJvmSerializedModule(planned.plan.ir, {
+    className: "RecordValues",
+    functionExports: roots.map((functionName) => ({
+      functionName,
+      methodName: functionName,
+    })),
+  });
+
+  expect(source).toContain("double r_");
+  expect(source).toContain("String r_");
+  expect(source).toContain("boolean r_");
+  expect(source).not.toContain("HashMap");
+  expect(source).not.toContain("Object[]");
   expect(source).not.toContain("JNI");
 });
 

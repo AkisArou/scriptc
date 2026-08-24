@@ -4,6 +4,7 @@ import type {
   IrFunction,
   IrModule,
   IrNativeBinding,
+  IrRecordShape,
   IrStmt,
   IrType,
   SrcLoc,
@@ -180,7 +181,7 @@ function validateOptions(options: JvmEmissionOptions): void {
 
 /** Collision-free Java identifier over the UTF-8 spelling of an IR id. */
 function encodedIdentifier(
-  prefix: "c" | "d" | "f" | "g" | "l" | "m" | "n",
+  prefix: "c" | "d" | "f" | "g" | "l" | "m" | "n" | "r",
   value: string,
 ): string {
   const bytes = new TextEncoder().encode(value);
@@ -284,6 +285,52 @@ interface JvmFunctionValuePlan {
   readonly fnName: string;
   readonly type: Extract<IrType, { readonly kind: "func" }>;
   readonly fieldName: string;
+}
+
+interface JvmRecordPlan {
+  readonly shape: IrRecordShape;
+  readonly className: string;
+}
+
+interface JvmRecordLiteralPlan {
+  readonly expression: Extract<IrExpr, { readonly kind: "recordLit" }>;
+  readonly factoryName: string;
+}
+
+function irRecordTypes(
+  shapes: readonly IrRecordShape[],
+): ReadonlyMap<string, JvmRecordPlan> {
+  return new Map(
+    [...shapes]
+      .sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0)
+      .map((shape, index) => [shape.id, Object.freeze({
+        shape,
+        className: `NtsRecord${index}`,
+      })]),
+  );
+}
+
+function irRecordLiterals(
+  value: unknown,
+): ReadonlyMap<Extract<IrExpr, { readonly kind: "recordLit" }>, JvmRecordLiteralPlan> {
+  const expressions: Extract<IrExpr, { readonly kind: "recordLit" }>[] = [];
+  const visit = (candidate: unknown): void => {
+    if (Array.isArray(candidate)) {
+      for (const entry of candidate) visit(entry);
+      return;
+    }
+    if (candidate === null || typeof candidate !== "object") return;
+    const record = candidate as Readonly<Record<string, unknown>>;
+    if (record["kind"] === "recordLit") {
+      expressions.push(candidate as Extract<IrExpr, { readonly kind: "recordLit" }>);
+    }
+    for (const child of Object.values(record)) visit(child);
+  };
+  visit(value);
+  return new Map(expressions.map((expression, index) => [expression, Object.freeze({
+    expression,
+    factoryName: `ntsRecordLiteral${index}`,
+  })]));
 }
 
 function irArrayTypes(value: unknown): ReadonlyMap<string, JvmArrayPlan> {
@@ -487,6 +534,11 @@ class JavaEmitter {
   readonly #arrayTypes: ReadonlyMap<string, JvmArrayPlan>;
   readonly #functionTypes: ReadonlyMap<string, JvmFunctionPlan>;
   readonly #functionValues: ReadonlyMap<string, JvmFunctionValuePlan>;
+  readonly #recordTypes: ReadonlyMap<string, JvmRecordPlan>;
+  readonly #recordLiterals: ReadonlyMap<
+    Extract<IrExpr, { readonly kind: "recordLit" }>,
+    JvmRecordLiteralPlan
+  >;
   readonly #directCallbackSites: JvmDirectCallbackSitePlan[] = [];
   readonly #directClassCallbackSites: JvmDirectClassCallbackSitePlan[] = [];
   #integerLocals: ReadonlySet<string> = new Set();
@@ -644,6 +696,8 @@ class JavaEmitter {
     this.#arrayTypes = irArrayTypes(programTypes);
     this.#functionTypes = irFunctionTypes(programTypes);
     this.#functionValues = irFunctionValues(module.functions, this.#functions);
+    this.#recordTypes = irRecordTypes(module.records ?? []);
+    this.#recordLiterals = irRecordLiterals(module.functions);
     this.#needsNumberToString = irContains(
       module.functions,
       (record) => {
@@ -790,6 +844,8 @@ class JavaEmitter {
     lines.push(...this.#emitArraySupport());
 
     lines.push(...this.#emitFunctionSupport());
+
+    lines.push(...this.#emitRecordSupport());
 
     lines.push(...this.#emitBoxSupport());
 
@@ -1236,6 +1292,78 @@ class JavaEmitter {
           `${value.fieldName} = ${this.#functionLambda(value.fnName, value.type, [], entry.loc)};`,
         "",
       );
+    }
+    return lines;
+  }
+
+  /** A checked structural record has a closed, interned shape. On the JVM
+   * that shape is an ordinary traced Java object with exact primitive and
+   * reference fields: no generic property table, boxed scalar, or JNI
+   * handle is involved. A factory is emitted per literal because Native IR
+   * keeps literal fields in source order while the shape's fields are
+   * canonicalized by name; Java evaluates factory arguments left-to-right,
+   * preserving JavaScript side effects before the factory stores them. */
+  #emitRecordSupport(): string[] {
+    const entry = this.#functions.get(this.#module.entry)!;
+    const lines: string[] = [];
+    for (const plan of this.#recordTypes.values()) {
+      const { shape } = plan;
+      if (shape.indexValue !== undefined) {
+        throw new JvmUnsupportedError(
+          `record shape '${shape.id}' with an index signature`,
+          entry.loc,
+        );
+      }
+      lines.push(`  private static final class ${plan.className} {`);
+      for (const field of shape.fields) {
+        lines.push(
+          `    private ${this.#javaType(field.type, entry.loc)} ${this.#recordFieldName(field.name)};`,
+        );
+      }
+      lines.push("  }", "");
+    }
+
+    for (const plan of this.#recordLiterals.values()) {
+      const { expression } = plan;
+      if (expression.type.kind !== "record") {
+        throw new Error("JVM emitter bug: recordLit has a non-record type");
+      }
+      const record = this.#recordPlan(expression.type.shapeId, expression.loc);
+      if (record.shape.indexValue !== undefined) {
+        throw new JvmUnsupportedError(
+          `record literal for index-signature shape '${record.shape.id}'`,
+          expression.loc,
+        );
+      }
+      if (expression.fields.some((field) => field.drop === true)) {
+        throw new JvmUnsupportedError("record literal dropped fields", expression.loc);
+      }
+      if (expression.fields.some((field) => field.overflow === true)) {
+        throw new JvmUnsupportedError("record literal overflow fields", expression.loc);
+      }
+      const fields = new Map(record.shape.fields.map((field) => [field.name, field]));
+      const parameters = expression.fields.map((field, index) => {
+        const declared = fields.get(field.name);
+        if (declared === undefined || typeKey(declared.type) !== typeKey(field.value.type)) {
+          throw new Error(
+            `JVM record literal '${record.shape.id}' disagrees at field '${field.name}'`,
+          );
+        }
+        return `${this.#javaType(declared.type, expression.loc)} a${index}`;
+      });
+      if (fields.size !== expression.fields.length) {
+        throw new Error(
+          `JVM record literal '${record.shape.id}' does not initialize its exact shape`,
+        );
+      }
+      lines.push(
+        `  private static ${record.className} ${plan.factoryName}(${parameters.join(", ")}) {`,
+        `    ${record.className} value = new ${record.className}();`,
+      );
+      for (const [index, field] of expression.fields.entries()) {
+        lines.push(`    value.${this.#recordFieldName(field.name)} = a${index};`);
+      }
+      lines.push("    return value;", "  }", "");
     }
     return lines;
   }
@@ -1825,6 +1953,20 @@ class JavaEmitter {
               : this.#expr(stmt.value)
           };`,
         ];
+      case "recordSet": {
+        const record = this.#recordPlan(stmt.shapeId, stmt.loc);
+        const field = record.shape.fields.find(({ name }) => name === stmt.field);
+        if (field === undefined || typeKey(field.type) !== typeKey(stmt.value.type)) {
+          throw new Error(
+            `JVM record write '${stmt.shapeId}.${stmt.field}' disagrees with its shape`,
+          );
+        }
+        return [
+          `${pad}((${record.className})(${this.#expr(stmt.obj)})).${
+            this.#recordFieldName(stmt.field)
+          } = ${this.#expr(stmt.value)};`,
+        ];
+      }
       case "arraySet": {
         if (stmt.arr.type.kind !== "array") {
           throw new Error("JVM emitter bug: arraySet on a non-array value");
@@ -2133,6 +2275,27 @@ class JavaEmitter {
         return `new ${this.#arrayClassName(expr.type, expr.loc)}(new ${elementType}[]{${
           expr.elems.map((element) => this.#expr(element)).join(", ")
         }})`;
+      }
+      case "recordLit": {
+        const plan = this.#recordLiterals.get(expr);
+        if (plan === undefined) {
+          throw new Error("JVM emitter bug: record literal was not planned");
+        }
+        return `${plan.factoryName}(${expr.fields.map((field) =>
+          this.#expr(field.value)
+        ).join(", ")})`;
+      }
+      case "recordGet": {
+        const record = this.#recordPlan(expr.shapeId, expr.loc);
+        const field = record.shape.fields.find(({ name }) => name === expr.field);
+        if (field === undefined || typeKey(field.type) !== typeKey(expr.type)) {
+          throw new Error(
+            `JVM record read '${expr.shapeId}.${expr.field}' disagrees with its shape`,
+          );
+        }
+        return `((${record.className})(${this.#expr(expr.obj)})).${
+          this.#recordFieldName(expr.field)
+        }`;
       }
       case "arrayGet": {
         if (expr.arr.type.kind !== "array") {
@@ -2991,6 +3154,9 @@ class JavaEmitter {
     if (type.kind === "object") {
       return this.#managedClassName(type.className, loc);
     }
+    if (type.kind === "record") {
+      return this.#recordPlan(type.shapeId, loc).className;
+    }
     if (type.kind === "nativeHandle") {
       return this.#javaHandleType(type.typeId, loc);
     }
@@ -3031,6 +3197,18 @@ class JavaEmitter {
       );
     }
     return plan.interfaceName;
+  }
+
+  #recordPlan(shapeId: string, loc: SrcLoc): JvmRecordPlan {
+    const plan = this.#recordTypes.get(shapeId);
+    if (plan === undefined) {
+      throw new JvmUnsupportedError(`unknown record shape '${shapeId}'`, loc);
+    }
+    return plan;
+  }
+
+  #recordFieldName(field: string): string {
+    return encodedIdentifier("r", field);
   }
 
   #isMutableBox(local: IrFunction["locals"][number]): boolean {
