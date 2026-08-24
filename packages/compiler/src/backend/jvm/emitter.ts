@@ -759,6 +759,7 @@ class JavaEmitter {
   readonly #needsNumberToString: boolean;
   readonly #needsUint8ArrayLength: boolean;
   readonly #needsUint8SetHelper: boolean;
+  readonly #needsUncheckedRethrow: boolean;
   readonly #stringIntrinsics: ReadonlySet<string>;
   readonly #libraryCalls: ReadonlySet<string>;
   readonly #arrayTypes: ReadonlyMap<string, JvmArrayPlan>;
@@ -928,6 +929,10 @@ class JavaEmitter {
       module.functions,
       (record) => record["kind"] === "bytesSet",
     );
+    this.#needsUncheckedRethrow = irContains(
+      module.functions,
+      (record) => record["kind"] === "rethrow",
+    );
     this.#stringIntrinsics = irStringIntrinsics(module.functions);
     this.#libraryCalls = irLibraryCalls(module.functions);
     /* Scan only the language program. Native ABI metadata also has a
@@ -1066,6 +1071,20 @@ class JavaEmitter {
         "",
       );
     }
+    if (this.#needsUncheckedRethrow) {
+      lines.push(
+        "  @SuppressWarnings(\"unchecked\")",
+        "  private static <T extends Throwable> void ntsThrowUnchecked(Throwable error) throws T {",
+        "    throw (T)error;",
+        "  }",
+        "",
+        "  private static RuntimeException ntsRethrow(Throwable error) {",
+        `    ${this.#options.className}.<RuntimeException>ntsThrowUnchecked(error);`,
+        "    throw new AssertionError(\"unreachable unchecked rethrow\");",
+        "  }",
+        "",
+      );
+    }
     if (this.#needsNumberToString) {
       lines.push(
         "  private static String ntsNumberToString(double value) {",
@@ -1094,6 +1113,8 @@ class JavaEmitter {
     lines.push(...this.#emitStringIntrinsicSupport());
 
     lines.push(...this.#emitMathSupport());
+
+    lines.push(...this.#emitNumberSupport());
 
     lines.push(...this.#emitArraySupport());
 
@@ -1589,6 +1610,253 @@ class JavaEmitter {
           "",
         );
       }
+    }
+    return lines;
+  }
+
+  #emitNumberSupport(): string[] {
+    const has = (name: string): boolean => this.#libraryCalls.has(name);
+    const needsIntegerPredicate = has("number.isInteger") || has("number.isSafeInteger");
+    const needsWhitespace = has("num.parseInt") ||
+      has("num.parseFloat") ||
+      has("num.fromString");
+    const needsDigits = has("num.parseInt") || has("num.fromString");
+    const needsDecimal = has("num.parseFloat") || has("num.fromString");
+    const lines: string[] = [];
+
+    if (needsIntegerPredicate) {
+      lines.push(
+        "  private static boolean ntsNumberIsInteger(double value) {",
+        "    return Double.isFinite(value) && Math.floor(value) == value;",
+        "  }",
+        "",
+      );
+      if (has("number.isSafeInteger")) {
+        lines.push(
+          "  private static boolean ntsNumberIsSafeInteger(double value) {",
+          "    return ntsNumberIsInteger(value) && Math.abs(value) <= 9007199254740991.0d;",
+          "  }",
+          "",
+        );
+      }
+    }
+    if (has("num.sameValue")) {
+      lines.push(
+        "  private static boolean ntsNumberSameValue(double left, double right) {",
+        "    return Double.doubleToLongBits(left) == Double.doubleToLongBits(right);",
+        "  }",
+        "",
+      );
+    }
+    if (needsWhitespace) {
+      lines.push(
+        "  private static boolean ntsIsJsWhitespace(char value) {",
+        "    if (value >= 0x2000 && value <= 0x200a) return true;",
+        "    switch (value) {",
+        "      case 0x0009: case 0x000a: case 0x000b: case 0x000c:",
+        "      case 0x000d: case 0x0020: case 0x00a0: case 0x1680:",
+        "      case 0x2028: case 0x2029: case 0x202f: case 0x205f:",
+        "      case 0x3000: case 0xfeff:",
+        "        return true;",
+        "      default:",
+        "        return false;",
+        "    }",
+        "  }",
+        "",
+      );
+    }
+    if (needsDigits) {
+      lines.push(
+        "  private static int ntsDigitValue(char value) {",
+        "    if (value >= '0' && value <= '9') return value - '0';",
+        "    if (value >= 'a' && value <= 'z') return value - 'a' + 10;",
+        "    if (value >= 'A' && value <= 'Z') return value - 'A' + 10;",
+        "    return 99;",
+        "  }",
+        "",
+        "  private static double ntsDigitsToDouble(",
+        "      String value, int start, int end, int radix) {",
+        "    if (radix != 10 && (radix & (radix - 1)) != 0) {",
+        "      final long maximumMultiplier = 0xffffffffL / 36L;",
+        "      double result = 0.0d;",
+        "      int index = start;",
+        "      boolean done = false;",
+        "      do {",
+        "        long part = 0L;",
+        "        long multiplier = 1L;",
+        "        for (;;) {",
+        "          if (index == end) {",
+        "            done = true;",
+        "            break;",
+        "          }",
+        "          int digit = ntsDigitValue(value.charAt(index));",
+        "          long nextMultiplier = multiplier * radix;",
+        "          if (nextMultiplier > maximumMultiplier) break;",
+        "          part = part * radix + digit;",
+        "          multiplier = nextMultiplier;",
+        "          index += 1;",
+        "        }",
+        "        result = result * (double)multiplier + (double)part;",
+        "      } while (!done);",
+        "      return result;",
+        "    }",
+        "    long accumulated = 0L;",
+        "    for (int index = start; index < end; index += 1) {",
+        "      int digit = ntsDigitValue(value.charAt(index));",
+        "      if (accumulated > (Long.MAX_VALUE - digit) / radix) {",
+        "        return new java.math.BigInteger(value.substring(start, end), radix).doubleValue();",
+        "      }",
+        "      accumulated = accumulated * radix + digit;",
+        "    }",
+        "    return (double)accumulated;",
+        "  }",
+        "",
+      );
+    }
+    if (needsDecimal) {
+      lines.push(
+        "  private static double ntsParseDecimalSpan(String value, int start, int end) {",
+        "    return Double.parseDouble(",
+        "      start == 0 && end == value.length() ? value : value.substring(start, end)",
+        "    );",
+        "  }",
+        "",
+      );
+    }
+    if (has("num.parseInt")) {
+      lines.push(
+        "  private static double ntsParseInt(String value, double radix) {",
+        "    int length = value.length();",
+        "    int index = 0;",
+        "    while (index < length && ntsIsJsWhitespace(value.charAt(index))) index += 1;",
+        "    double sign = 1.0d;",
+        "    if (index < length && (value.charAt(index) == '+' || value.charAt(index) == '-')) {",
+        "      if (value.charAt(index) == '-') sign = -1.0d;",
+        "      index += 1;",
+        "    }",
+        "    int parsedRadix = ntsToInt32(radix);",
+        "    boolean stripPrefix = true;",
+        "    if (parsedRadix != 0) {",
+        "      if (parsedRadix < 2 || parsedRadix > 36) return Double.NaN;",
+        "      if (parsedRadix != 16) stripPrefix = false;",
+        "    } else {",
+        "      parsedRadix = 10;",
+        "    }",
+        "    if (stripPrefix && index + 1 < length && value.charAt(index) == '0' &&",
+        "        (value.charAt(index + 1) == 'x' || value.charAt(index + 1) == 'X')) {",
+        "      index += 2;",
+        "      parsedRadix = 16;",
+        "    }",
+        "    int digitStart = index;",
+        "    while (index < length && ntsDigitValue(value.charAt(index)) < parsedRadix) index += 1;",
+        "    if (index == digitStart) return Double.NaN;",
+        "    while (digitStart < index && value.charAt(digitStart) == '0') digitStart += 1;",
+        "    if (digitStart == index) return sign * 0.0d;",
+        "    return sign * ntsDigitsToDouble(value, digitStart, index, parsedRadix);",
+        "  }",
+        "",
+      );
+    }
+    if (has("num.parseFloat")) {
+      lines.push(
+        "  private static double ntsParseFloat(String value) {",
+        "    int length = value.length();",
+        "    int index = 0;",
+        "    while (index < length && ntsIsJsWhitespace(value.charAt(index))) index += 1;",
+        "    int start = index;",
+        "    double sign = 1.0d;",
+        "    if (index < length && (value.charAt(index) == '+' || value.charAt(index) == '-')) {",
+        "      if (value.charAt(index) == '-') sign = -1.0d;",
+        "      index += 1;",
+        "    }",
+        "    if (index + 8 <= length && value.startsWith(\"Infinity\", index)) {",
+        "      return sign * Double.POSITIVE_INFINITY;",
+        "    }",
+        "    int integerDigits = 0;",
+        "    int fractionDigits = 0;",
+        "    while (index < length && value.charAt(index) >= '0' && value.charAt(index) <= '9') {",
+        "      index += 1;",
+        "      integerDigits += 1;",
+        "    }",
+        "    if (index < length && value.charAt(index) == '.') {",
+        "      int cursor = index + 1;",
+        "      while (cursor < length && value.charAt(cursor) >= '0' && value.charAt(cursor) <= '9') {",
+        "        cursor += 1;",
+        "        fractionDigits += 1;",
+        "      }",
+        "      if (integerDigits > 0 || fractionDigits > 0) index = cursor;",
+        "    }",
+        "    if (integerDigits == 0 && fractionDigits == 0) return Double.NaN;",
+        "    int end = index;",
+        "    if (index < length && (value.charAt(index) == 'e' || value.charAt(index) == 'E')) {",
+        "      int cursor = index + 1;",
+        "      if (cursor < length && (value.charAt(cursor) == '+' || value.charAt(cursor) == '-')) cursor += 1;",
+        "      int exponentStart = cursor;",
+        "      while (cursor < length && value.charAt(cursor) >= '0' && value.charAt(cursor) <= '9') cursor += 1;",
+        "      if (cursor > exponentStart) end = cursor;",
+        "    }",
+        "    return ntsParseDecimalSpan(value, start, end);",
+        "  }",
+        "",
+      );
+    }
+    if (has("num.fromString")) {
+      lines.push(
+        "  private static double ntsStringToNumber(String value) {",
+        "    int start = 0;",
+        "    int end = value.length();",
+        "    while (start < end && ntsIsJsWhitespace(value.charAt(start))) start += 1;",
+        "    while (end > start && ntsIsJsWhitespace(value.charAt(end - 1))) end -= 1;",
+        "    if (start == end) return 0.0d;",
+        "    if (end - start >= 2 && value.charAt(start) == '0') {",
+        "      char prefix = value.charAt(start + 1);",
+        "      int radix = prefix == 'x' || prefix == 'X' ? 16",
+        "        : prefix == 'o' || prefix == 'O' ? 8",
+        "        : prefix == 'b' || prefix == 'B' ? 2 : 0;",
+        "      if (radix != 0) {",
+        "        int digitStart = start + 2;",
+        "        int index = digitStart;",
+        "        while (index < end && ntsDigitValue(value.charAt(index)) < radix) index += 1;",
+        "        if (index == digitStart || index != end) return Double.NaN;",
+        "        while (digitStart < end && value.charAt(digitStart) == '0') digitStart += 1;",
+        "        return digitStart == end ? 0.0d : ntsDigitsToDouble(value, digitStart, end, radix);",
+        "      }",
+        "    }",
+        "    int index = start;",
+        "    double sign = 1.0d;",
+        "    if (value.charAt(index) == '+' || value.charAt(index) == '-') {",
+        "      if (value.charAt(index) == '-') sign = -1.0d;",
+        "      index += 1;",
+        "    }",
+        "    if (index + 8 == end && value.startsWith(\"Infinity\", index)) {",
+        "      return sign * Double.POSITIVE_INFINITY;",
+        "    }",
+        "    int integerDigits = 0;",
+        "    int fractionDigits = 0;",
+        "    while (index < end && value.charAt(index) >= '0' && value.charAt(index) <= '9') {",
+        "      index += 1;",
+        "      integerDigits += 1;",
+        "    }",
+        "    if (index < end && value.charAt(index) == '.') {",
+        "      index += 1;",
+        "      while (index < end && value.charAt(index) >= '0' && value.charAt(index) <= '9') {",
+        "        index += 1;",
+        "        fractionDigits += 1;",
+        "      }",
+        "    }",
+        "    if (integerDigits == 0 && fractionDigits == 0) return Double.NaN;",
+        "    if (index < end && (value.charAt(index) == 'e' || value.charAt(index) == 'E')) {",
+        "      index += 1;",
+        "      if (index < end && (value.charAt(index) == '+' || value.charAt(index) == '-')) index += 1;",
+        "      int exponentStart = index;",
+        "      while (index < end && value.charAt(index) >= '0' && value.charAt(index) <= '9') index += 1;",
+        "      if (index == exponentStart) return Double.NaN;",
+        "    }",
+        "    if (index != end) return Double.NaN;",
+        "    return ntsParseDecimalSpan(value, start, end);",
+        "  }",
+        "",
+      );
     }
     return lines;
   }
@@ -3089,7 +3357,48 @@ class JavaEmitter {
         }
         return [`${pad}continue;`];
       }
+      case "block": {
+        if ((stmt.labels?.length ?? 0) !== 0) {
+          throw new JvmUnsupportedError("labeled blocks", stmt.loc);
+        }
+        const lines = [`${pad}{`];
+        for (const child of stmt.body) {
+          lines.push(...this.#stmt(fn, child, depth + 1));
+        }
+        lines.push(`${pad}}`);
+        return lines;
+      }
       case "tryCatch": {
+        const cleanup = stmt.catchBody?.[0];
+        const rethrow = stmt.catchBody?.[1];
+        const generatedIteratorCleanup =
+          stmt.finallyBody === null &&
+          stmt.catchLocalId !== null &&
+          stmt.catchBody?.length === 2 &&
+          cleanup?.kind === "exprStmt" &&
+          (cleanup.expr.kind === "mapIntrinsic" ||
+            cleanup.expr.kind === "setIntrinsic") &&
+          cleanup.expr.method === "iterExit" &&
+          rethrow?.kind === "rethrow" &&
+          rethrow.localId === stmt.catchLocalId;
+        if (generatedIteratorCleanup) {
+          const binding = encodedIdentifier("l", stmt.catchLocalId!);
+          const lines = [`${pad}try {`];
+          for (const child of stmt.tryBody) {
+            lines.push(...this.#stmt(fn, child, depth + 1));
+          }
+          /* Java's checked-exception declarations are not JavaScript's
+           * exception model. Catch the actual Throwable, release the live
+           * iterator, then use the standard generic erasure technique to
+           * rethrow that SAME object without wrapping or changing its
+           * dynamic type. `throw ntsRethrow(...)` also tells javac that the
+           * handler cannot fall through to the normal-path iterExit. */
+          lines.push(`${pad}} catch (Throwable ${binding}) {`);
+          lines.push(...this.#stmt(fn, cleanup, depth + 1));
+          lines.push(`${"  ".repeat(depth + 1)}throw ntsRethrow(${binding});`);
+          lines.push(`${pad}}`);
+          return lines;
+        }
         if (
           stmt.catchBody !== null ||
           stmt.catchLocalId !== null ||
@@ -3803,6 +4112,23 @@ class JavaEmitter {
             return `ntsMathMaxArray(${this.#expr(expr.args[0]!)})`;
           case "math.minArr":
             return `ntsMathMinArray(${this.#expr(expr.args[0]!)})`;
+          case "number.isFinite":
+            return `Double.isFinite(${argument(0)})`;
+          case "number.isNaN":
+          case "num.isNaN":
+            return `Double.isNaN(${argument(0)})`;
+          case "number.isInteger":
+            return `ntsNumberIsInteger(${argument(0)})`;
+          case "number.isSafeInteger":
+            return `ntsNumberIsSafeInteger(${argument(0)})`;
+          case "num.sameValue":
+            return `ntsNumberSameValue(${argument(0)}, ${argument(1)})`;
+          case "num.parseInt":
+            return `ntsParseInt(${this.#expr(expr.args[0]!)}, ${argument(1)})`;
+          case "num.parseFloat":
+            return `ntsParseFloat(${this.#expr(expr.args[0]!)})`;
+          case "num.fromString":
+            return `ntsStringToNumber(${this.#expr(expr.args[0]!)})`;
           default:
             throw new JvmUnsupportedError(
               `standard-library call '${expr.fn}'`,
@@ -4194,17 +4520,78 @@ class JavaEmitter {
     return false;
   }
 
+  #directArgumentMatches(
+    type: IrType,
+    descriptor: string,
+    loc: SrcLoc,
+  ): boolean {
+    const stringInput = descriptor === "Ljava/lang/String;" ||
+      descriptor === "Ljava/lang/CharSequence;";
+    if (type.kind === "string") return stringInput;
+    const nullable = this.#nullableReference(type);
+    if (
+      nullable !== null &&
+      nullable.unitKind === "nullT" &&
+      nullable.valueType.kind === "string"
+    ) {
+      return stringInput;
+    }
+    /* Results require representation equality; every other argument does
+     * too. String -> CharSequence is the one declared JVM widening whose
+     * direction matters, so keep it out of #directValueMatches: a returned
+     * arbitrary CharSequence is deliberately not projected as String. */
+    return this.#directValueMatches(type, descriptor, loc);
+  }
+
   #directArgument(expr: IrExpr, descriptor: string): string {
     if (expr.kind === "unionWrap") {
-      if (!this.#directValueMatches(expr.type, descriptor, expr.loc)) {
+      const nullable = this.#nullableReference(expr.type);
+      if (nullable === null || nullable.unionId !== expr.unionId) {
         throw new JvmUnsupportedError(
           `direct '${descriptor}' argument from union '${expr.unionId}'`,
           expr.loc,
         );
       }
-      return expr.value.kind === "unitLit" ? "null" : this.#directArgument(expr.value, descriptor);
+      if (expr.tag === nullable.unitTag) {
+        if (
+          nullable.unitKind !== "nullT" ||
+          expr.value.kind !== "unitLit" ||
+          (!descriptor.startsWith("L") && !descriptor.startsWith("["))
+        ) {
+          throw new JvmUnsupportedError(
+            `direct '${descriptor}' argument from union '${expr.unionId}'`,
+            expr.loc,
+          );
+        }
+        return "null";
+      }
+      if (
+        expr.tag !== nullable.valueTag ||
+        typeKey(expr.value.type) !== typeKey(nullable.valueType)
+      ) {
+        throw new Error(
+          `JVM direct nullable union '${expr.unionId}' received the wrong arm`,
+        );
+      }
+      /* The union construction is itself proof of the live arm. Pass its
+       * payload in the physical JVM position rather than materializing a
+       * nullable/tagged carrier. This is important for declared widenings
+       * such as `string | null` -> CharSequence: Java String implements the
+       * descriptor even though the semantic union is not itself String. */
+      return this.#directArgument(expr.value, descriptor);
     }
-    if (expr.kind === "unitLit") return "null";
+    if (expr.kind === "unitLit") {
+      if (
+        expr.type.kind !== "nullT" ||
+        (!descriptor.startsWith("L") && !descriptor.startsWith("["))
+      ) {
+        throw new JvmUnsupportedError(
+          `direct '${descriptor}' argument from '${expr.type.kind}'`,
+          expr.loc,
+        );
+      }
+      return "null";
+    }
     if (descriptor.startsWith("[")) {
       if (descriptor !== "[B" || !isJvmByteArray(expr.type)) {
         throw new JvmUnsupportedError(
@@ -4215,11 +4602,7 @@ class JavaEmitter {
       return this.#expr(expr);
     }
     if (descriptor.startsWith("L")) {
-      if (
-        expr.type.kind !== "string" &&
-        expr.type.kind !== "nativeHandle" &&
-        !this.#directValueMatches(expr.type, descriptor, expr.loc)
-      ) {
+      if (!this.#directArgumentMatches(expr.type, descriptor, expr.loc)) {
         throw new JvmUnsupportedError(
           `direct reference argument from '${expr.type.kind}'`,
           expr.loc,

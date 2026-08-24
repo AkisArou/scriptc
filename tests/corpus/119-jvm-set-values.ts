@@ -105,3 +105,10 @@ export function rehashAndCompactSet(): number {
   });
   return checksum + values.size;
 }
+
+export function directSetIteration(): number {
+  const values = new Set<string>(["a", "bb", "ccc"]);
+  let checksum = 0;
+  for (const member of values) checksum += member.length;
+  return checksum;
+}

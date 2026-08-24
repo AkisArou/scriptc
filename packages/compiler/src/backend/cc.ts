@@ -2083,15 +2083,15 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
   const vendorCacheRoot = transientVendorRoot ?? vendorBuildCacheRoot();
   /* Two producers this seam does not yet describe, refused rather than run.
    *
-   * Vendored objects (the regex engine, zlib) are BUILT by their own cached
-   * helpers, and localization rewrites objects through the driver and the
-   * archiver. Both would materialize artifacts an embedder's graph never
-   * declared — the exact thing asking for commands instead of running them
-   * exists to prevent. They are separate slices, and each announces itself
-   * here rather than silently producing a build the graph cannot reproduce. */
+   * zlib's vendored objects are BUILT by their own cached helper, and
+   * localization rewrites objects through the driver and the archiver. Both
+   * would materialize artifacts an embedder's graph never declared — the
+   * exact thing asking for commands instead of running them exists to
+   * prevent. The regex matcher is different: its two sources live inside the
+   * already-declared runtime resource and are compiled as ordinary planned
+   * objects below, so no hidden producer remains. */
   if (opts.commandExecutor !== undefined) {
     const unplanned = [
-      ...(regex ? ["the regex engine"] : []),
       ...(opts.zlib === true ? ["zlib"] : []),
       ...(opts.localizeSymbols === undefined ? [] : ["symbol localization"]),
     ];
@@ -2104,7 +2104,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     }
   }
   try {
-    const lreObjects = regex
+    const lreObjects = regex && opts.commandExecutor === undefined
       ? await ensureLreObjects(sanitize, driver, vendorBuildIdentity, vendorCacheRoot)
       : [];
     const zlibObjects = opts.zlib
@@ -2412,6 +2412,23 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
             )),
           );
         }
+      }
+      if (regex && opts.commandExecutor !== undefined) {
+        /* A planned build cannot consume the private vendor-object cache:
+         * those objects have no declared producer. Compile the same two
+         * translation units directly from the runtime resource instead. The
+         * common cflags retain target, sanitizer, PIC, and include identity;
+         * the ordinary builder keeps its cached fast path above. */
+        lreObjects.push(
+          ...(await Promise.all(
+            LRE_SOURCES.map((source) =>
+              compileOne(
+                join(vendorEngineDir(), source),
+                source.replace(/\.c$/, ".o"),
+              )
+            ),
+          )),
+        );
       }
       const objects = [programObject, ...(identityObject === null ? [] : [identityObject]), ...runtimeObjects, ...lreObjects, ...zlibObjects];
       // Multi-instance library mode: the archive's one member becomes the

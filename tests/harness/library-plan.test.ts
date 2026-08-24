@@ -145,6 +145,30 @@ describe("library compilation plan", () => {
     expect(objects.some((name) => name.includes("callback"))).toBe(true);
   }, 120_000);
 
+  it("plans regex matcher sources as declared runtime objects", async () => {
+    const { profilePath } = stageProfile("buffers", "c");
+    const planned = await planLibraryCompilation({ profilePath });
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) return;
+    expect(planned.plan.nativeBuild.regex).toBe(true);
+
+    const build = await planLibraryExternalCBuild(planned.plan, {
+      program: "program.c",
+      runtime: "scriptc-runtime",
+      output: "library.a",
+      objectIdPrefix: "obj/",
+    });
+    const names = build.objects.map(({ fileName }) => fileName);
+    expect(names).toContain("scr_regex.o");
+    expect(names).toContain("libregexp.o");
+    expect(names).toContain("libunicode.o");
+    for (const name of ["libregexp.o", "libunicode.o"]) {
+      const object = build.objects.find(({ fileName }) => fileName === name)!;
+      const compile = build.plans.find(({ output }) => output === object.id)!;
+      expect(compile.inputs).toContain("scriptc-runtime");
+    }
+  }, 120_000);
+
   it("produces an archive a host runtime can actually link into", async () => {
     const { profilePath, outDir } = stageProfile("scalars", "c");
     const built = await compileLibrary({

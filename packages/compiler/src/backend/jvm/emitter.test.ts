@@ -42,6 +42,9 @@ const setValues = fileURLToPath(
 const mathValues = fileURLToPath(
   new URL("../../../../../tests/corpus/120-jvm-math-values.ts", import.meta.url),
 );
+const numberParsing = fileURLToPath(
+  new URL("../../../../../tests/corpus/121-jvm-number-parsing.ts", import.meta.url),
+);
 const classFields = fileURLToPath(
   new URL("../../../../../tests/corpus/111-jvm-class-fields.ts", import.meta.url),
 );
@@ -400,6 +403,7 @@ test("the JVM emitter keeps typed sets in exact element arrays", () => {
     "clearDuringIterationSet",
     "combinedSets",
     "rehashAndCompactSet",
+    "directSetIteration",
   ];
   const planned = planExecutableCompilation(setValues, {
     backend: "c",
@@ -419,6 +423,9 @@ test("the JVM emitter keeps typed sets in exact element arrays", () => {
   expect(source).toContain("String[] elements");
   expect(source).toContain("double[] elements");
   expect(source).toContain("int[] table");
+  expect(source).toContain("catch (Throwable l_25697465726578632e30)");
+  expect(source).toContain("throw ntsRethrow(l_25697465726578632e30);");
+  expect(source).toContain("<T extends Throwable> void ntsThrowUnchecked");
   expect(source).not.toContain("Object[]");
   expect(source).not.toContain("HashSet");
   expect(source).not.toContain("LinkedHashSet");
@@ -455,6 +462,47 @@ test("the JVM emitter keeps static JavaScript math as primitive JVM operations",
   expect(source).toContain("Math.abs(");
   expect(source).toContain("ntsMathRound(");
   expect(source).toContain("ntsMathMaxArray(");
+  expect(source).not.toContain("JNI");
+});
+
+test("the JVM emitter keeps numeric recognition and parsing inside ART", () => {
+  const roots = [
+    "numberPredicates",
+    "numericSameValue",
+    "predicateEvaluationOrder",
+    "parseIntegerEdges",
+    "parseFloatEdges",
+    "convertStringEdges",
+    "parsedInteger",
+    "parsedFloat",
+    "convertedNumber",
+  ];
+  const planned = planExecutableCompilation(numberParsing, {
+    backend: "c",
+    externalFunctionRoots: roots,
+  });
+  expect(planned.ok).toBe(true);
+  if (!planned.ok) return;
+
+  const source = emitJvmSerializedModule(planned.plan.ir, {
+    className: "NumberParsing",
+    functionExports: roots.map((functionName) => ({
+      functionName,
+      methodName: functionName,
+    })),
+  });
+
+  expect(source).toContain("Double.isFinite(");
+  expect(source).toContain("Double.isNaN(");
+  expect(source).toContain("ntsNumberIsInteger(");
+  expect(source).toContain("ntsNumberIsSafeInteger(");
+  expect(source).toContain("Double.doubleToLongBits(");
+  expect(source).toContain("ntsIsJsWhitespace(");
+  expect(source).toContain("ntsParseInt(");
+  expect(source).toContain("ntsParseFloat(");
+  expect(source).toContain("ntsStringToNumber(");
+  expect(source).toContain("new java.math.BigInteger(");
+  expect(source).not.toContain("java.util.regex");
   expect(source).not.toContain("JNI");
 });
 
