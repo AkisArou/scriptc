@@ -263,6 +263,12 @@ test("the JVM emitter lowers JavaScript string operations directly in ART", () =
   expect(source).toContain("ntsStringSlice(");
   expect(source).toContain("ntsStringRepeat(");
   expect(source).toContain("ntsStringPad(");
+  expect(source).toContain(
+    "StringBuilder result = new StringBuilder((int)integer);",
+  );
+  expect(source).not.toContain(
+    "StringBuilder padding = new StringBuilder(paddingLength);",
+  );
   expect(source).toContain("ntsStringToWellFormed(");
   expect(source).toContain("ntsStringSplit(");
   expect(source).toContain("java.util.Locale.ROOT");
