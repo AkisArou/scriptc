@@ -7,9 +7,10 @@ import type {
   IrRecordShape,
   IrStmt,
   IrType,
+  IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { nullableNativeHandleUnion, typeKey } from "../../ir/nodes.js";
+import { typeKey } from "../../ir/nodes.js";
 import {
   machineIntegerFieldKey,
   machineIntegerFacts,
@@ -141,20 +142,13 @@ interface JvmDirectClassCallbackSitePlan {
   readonly handlerName: string;
 }
 
-type JvmNullableReference =
-  | {
-      readonly kind: "handle";
-      readonly unionId: string;
-      readonly valueTag: number;
-      readonly nullTag: number;
-      readonly typeId: string;
-    }
-  | {
-      readonly kind: "string";
-      readonly unionId: string;
-      readonly valueTag: number;
-      readonly nullTag: number;
-    };
+interface JvmNullableReference {
+  readonly unionId: string;
+  readonly valueTag: number;
+  readonly unitTag: number;
+  readonly unitKind: "nullT" | "undefinedT";
+  readonly valueType: IrType;
+}
 
 function assertJavaIdentifier(value: string, role: string): void {
   if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(value)) {
@@ -297,6 +291,11 @@ interface JvmRecordLiteralPlan {
   readonly factoryName: string;
 }
 
+interface JvmUnionPlan {
+  readonly definition: IrUnionDef;
+  readonly className: string;
+}
+
 function irRecordTypes(
   shapes: readonly IrRecordShape[],
 ): ReadonlyMap<string, JvmRecordPlan> {
@@ -331,6 +330,19 @@ function irRecordLiterals(
     expression,
     factoryName: `ntsRecordLiteral${index}`,
   })]));
+}
+
+function irUnionTypes(
+  definitions: readonly IrUnionDef[],
+): ReadonlyMap<string, JvmUnionPlan> {
+  return new Map(
+    [...definitions]
+      .sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0)
+      .map((definition, index) => [definition.id, Object.freeze({
+        definition,
+        className: `NtsUnion${index}`,
+      })]),
+  );
 }
 
 function irArrayTypes(value: unknown): ReadonlyMap<string, JvmArrayPlan> {
@@ -535,6 +547,7 @@ class JavaEmitter {
   readonly #functionTypes: ReadonlyMap<string, JvmFunctionPlan>;
   readonly #functionValues: ReadonlyMap<string, JvmFunctionValuePlan>;
   readonly #recordTypes: ReadonlyMap<string, JvmRecordPlan>;
+  readonly #unionTypes: ReadonlyMap<string, JvmUnionPlan>;
   readonly #recordLiterals: ReadonlyMap<
     Extract<IrExpr, { readonly kind: "recordLit" }>,
     JvmRecordLiteralPlan
@@ -692,12 +705,18 @@ class JavaEmitter {
      * `kind: "func"` callback shape, but its parameters are physical ABI
      * types rather than IrType values and must never enter the JavaScript
      * function-value representation. */
-    const programTypes = [module.functions, module.classes, module.globals];
+    const programTypes = [
+      module.functions,
+      module.classes,
+      module.globals,
+      module.unions,
+    ];
     this.#arrayTypes = irArrayTypes(programTypes);
     this.#functionTypes = irFunctionTypes(programTypes);
     this.#functionValues = irFunctionValues(module.functions, this.#functions);
     this.#recordTypes = irRecordTypes(module.records ?? []);
     this.#recordLiterals = irRecordLiterals(module.functions);
+    this.#unionTypes = irUnionTypes(module.unions ?? []);
     this.#needsNumberToString = irContains(
       module.functions,
       (record) => {
@@ -846,6 +865,8 @@ class JavaEmitter {
     lines.push(...this.#emitFunctionSupport());
 
     lines.push(...this.#emitRecordSupport());
+
+    lines.push(...this.#emitUnionSupport());
 
     lines.push(...this.#emitBoxSupport());
 
@@ -1364,6 +1385,72 @@ class JavaEmitter {
         lines.push(`    value.${this.#recordFieldName(field.name)} = a${index};`);
       }
       lines.push("    return value;", "  }", "");
+    }
+    return lines;
+  }
+
+  /** A general union remains monomorphic without erasing scalar arms into
+   * java.lang.Object. Each closed union gets one exact tag class and one
+   * field per payload-bearing arm. Unit arms are shared singletons; value
+   * arms construct through typed factories, leaving javac and ART able to
+   * scalar-replace short-lived boxes. A reference plus one null/undefined
+   * arm is represented directly as a nullable ART reference instead and
+   * therefore emits no class here. */
+  #emitUnionSupport(): string[] {
+    const entry = this.#functions.get(this.#module.entry)!;
+    const lines: string[] = [];
+    for (const plan of this.#unionTypes.values()) {
+      if (this.#nullableReference({ kind: "union", unionId: plan.definition.id }) !== null) {
+        continue;
+      }
+      const payloads = plan.definition.arms
+        .map((type, tag) => ({ type, tag }))
+        .filter(({ type }) => !this.#isUnitType(type));
+      lines.push(
+        `  private static final class ${plan.className} {`,
+        "    private final int tag;",
+      );
+      for (const { type, tag } of payloads) {
+        lines.push(
+          `    private final ${this.#javaType(type, entry.loc)} payload${tag};`,
+        );
+      }
+      const constructorParameters = [
+        "int tag",
+        ...payloads.map(({ type, tag }) =>
+          `${this.#javaType(type, entry.loc)} payload${tag}`
+        ),
+      ];
+      lines.push(
+        `    private ${plan.className}(${constructorParameters.join(", ")}) {`,
+        "      this.tag = tag;",
+      );
+      for (const { tag } of payloads) {
+        lines.push(`      this.payload${tag} = payload${tag};`);
+      }
+      lines.push("    }", "");
+      for (const [tag, arm] of plan.definition.arms.entries()) {
+        const arguments_ = payloads.map(({ type, tag: payloadTag }) =>
+          payloadTag === tag ? "value" : this.#defaultJavaValue(type, entry.loc)
+        );
+        if (this.#isUnitType(arm)) {
+          lines.push(
+            `    private static final ${plan.className} unit${tag} = ` +
+              `new ${plan.className}(${[String(tag), ...arguments_].join(", ")});`,
+            "",
+          );
+        } else {
+          lines.push(
+            `    private static ${plan.className} wrap${tag}(` +
+              `${this.#javaType(arm, entry.loc)} value) {`,
+            `      return new ${plan.className}(` +
+              `${[String(tag), ...arguments_].join(", ")});`,
+            "    }",
+            "",
+          );
+        }
+      }
+      lines.push("  }", "");
     }
     return lines;
   }
@@ -2492,58 +2579,103 @@ class JavaEmitter {
         return `(${this.#expr(expr.cond)} ? ${this.#expr(expr.then)} : ${this.#expr(expr.else_)})`;
       case "unionWrap": {
         const nullable = this.#nullableReference(expr.type);
-        if (nullable === null || expr.unionId !== nullable.unionId) {
-          throw new JvmUnsupportedError("non-nullable-reference union construction", expr.loc);
-        }
-        if (expr.tag === nullable.nullTag) {
-          if (expr.value.kind !== "unitLit" || expr.value.type.kind !== "nullT") {
+        if (nullable !== null) {
+          if (expr.unionId !== nullable.unionId) {
             throw new Error(
-              `JVM nullable-handle union '${expr.unionId}' null arm has a payload`,
+              `JVM nullable-reference union '${expr.unionId}' has the wrong type`,
             );
           }
-          return "null";
+          if (expr.tag === nullable.unitTag) {
+            if (
+              expr.value.kind !== "unitLit" ||
+              expr.value.type.kind !== nullable.unitKind
+            ) {
+              throw new Error(
+                `JVM nullable-reference union '${expr.unionId}' unit arm has a payload`,
+              );
+            }
+            return "null";
+          }
+          if (
+            expr.tag !== nullable.valueTag ||
+            typeKey(expr.value.type) !== typeKey(nullable.valueType)
+          ) {
+            throw new Error(
+              `JVM nullable-reference union '${expr.unionId}' received the wrong arm`,
+            );
+          }
+          return this.#expr(expr.value);
         }
+        const plan = this.#unionPlan(expr.unionId, expr.loc);
+        const arm = plan.definition.arms[expr.tag];
         if (
-          expr.tag !== nullable.valueTag ||
-          (nullable.kind === "handle"
-            ? expr.value.type.kind !== "nativeHandle" ||
-              expr.value.type.typeId !== nullable.typeId
-            : expr.value.type.kind !== "string")
+          expr.type.kind !== "union" ||
+          expr.type.unionId !== expr.unionId ||
+          arm === undefined ||
+          typeKey(arm) !== typeKey(expr.value.type)
         ) {
-          throw new Error(
-            `JVM nullable-reference union '${expr.unionId}' received the wrong arm`,
-          );
+          throw new Error(`JVM tagged union '${expr.unionId}' received the wrong arm`);
         }
-        return this.#expr(expr.value);
+        if (this.#isUnitType(arm)) {
+          if (expr.value.kind !== "unitLit") {
+            throw new Error(`JVM tagged union '${expr.unionId}' unit arm has a payload`);
+          }
+          return `${plan.className}.unit${expr.tag}`;
+        }
+        return `${plan.className}.wrap${expr.tag}(${this.#expr(expr.value)})`;
       }
       case "unionNarrow": {
         const nullable = this.#nullableReference(expr.value.type);
-        if (
-          nullable === null ||
-          expr.unionId !== nullable.unionId ||
-          expr.tag !== nullable.valueTag ||
-          (nullable.kind === "handle"
-            ? expr.type.kind !== "nativeHandle" ||
-              expr.type.typeId !== nullable.typeId
-            : expr.type.kind !== "string")
-        ) {
-          throw new JvmUnsupportedError("non-nullable-reference union narrowing", expr.loc);
+        if (nullable !== null) {
+          if (
+            expr.unionId !== nullable.unionId ||
+            expr.tag !== nullable.valueTag ||
+            typeKey(expr.type) !== typeKey(nullable.valueType)
+          ) {
+            throw new Error(
+              `JVM nullable-reference union '${expr.unionId}' narrows the wrong arm`,
+            );
+          }
+          /* The checked IR proves this arm is live. A nullable Java reference
+           * carries the same proof without a tag box or ownership operation. */
+          return this.#expr(expr.value);
         }
-        /* The checked IR proves this arm is live. A nullable Java reference
-         * carries the same proof without a tag box or ownership operation. */
-        return this.#expr(expr.value);
+        const plan = this.#unionPlan(expr.unionId, expr.loc);
+        const arm = plan.definition.arms[expr.tag];
+        if (
+          expr.value.type.kind !== "union" ||
+          expr.value.type.unionId !== expr.unionId ||
+          arm === undefined ||
+          this.#isUnitType(arm) ||
+          typeKey(arm) !== typeKey(expr.type)
+        ) {
+          throw new Error(`JVM tagged union '${expr.unionId}' narrows the wrong arm`);
+        }
+        return `(${this.#expr(expr.value)}).payload${expr.tag}`;
       }
       case "unionIsTag": {
         const nullable = this.#nullableReference(expr.value.type);
-        if (
-          nullable === null ||
-          expr.unionId !== nullable.unionId ||
-          (expr.tag !== nullable.valueTag && expr.tag !== nullable.nullTag)
-        ) {
-          throw new JvmUnsupportedError("non-nullable-reference union tag tests", expr.loc);
+        if (nullable !== null) {
+          if (
+            expr.unionId !== nullable.unionId ||
+            (expr.tag !== nullable.valueTag && expr.tag !== nullable.unitTag)
+          ) {
+            throw new Error(
+              `JVM nullable-reference union '${expr.unionId}' tests an unknown arm`,
+            );
+          }
+          const equality = (expr.tag === nullable.unitTag) !== expr.negated;
+          return `(${this.#expr(expr.value)} ${equality ? "==" : "!="} null)`;
         }
-        const equality = (expr.tag === nullable.nullTag) !== expr.negated;
-        return `(${this.#expr(expr.value)} ${equality ? "==" : "!="} null)`;
+        const plan = this.#unionPlan(expr.unionId, expr.loc);
+        if (
+          expr.value.type.kind !== "union" ||
+          expr.value.type.unionId !== expr.unionId ||
+          plan.definition.arms[expr.tag] === undefined
+        ) {
+          throw new Error(`JVM tagged union '${expr.unionId}' tests an unknown arm`);
+        }
+        return `((${this.#expr(expr.value)}).tag ${expr.negated ? "!=" : "=="} ${expr.tag})`;
       }
       case "upcast":
         if (
@@ -2964,15 +3096,27 @@ class JavaEmitter {
     }
     const nullable = this.#nullableReference(type);
     if (nullable !== null) {
-      return nullable.kind === "string"
-        ? descriptor === "Ljava/lang/String;"
-        : descriptor === `L${this.#nativeHandleOwner(nullable.typeId, loc)};`;
+      if (nullable.unitKind !== "nullT") return false;
+      if (nullable.valueType.kind === "string") {
+        return descriptor === "Ljava/lang/String;";
+      }
+      if (nullable.valueType.kind === "nativeHandle") {
+        return descriptor ===
+          `L${this.#nativeHandleOwner(nullable.valueType.typeId, loc)};`;
+      }
+      return false;
     }
     return false;
   }
 
   #directArgument(expr: IrExpr, descriptor: string): string {
     if (expr.kind === "unionWrap") {
+      if (!this.#directValueMatches(expr.type, descriptor, expr.loc)) {
+        throw new JvmUnsupportedError(
+          `direct '${descriptor}' argument from union '${expr.unionId}'`,
+          expr.loc,
+        );
+      }
       return expr.value.kind === "unitLit" ? "null" : this.#directArgument(expr.value, descriptor);
     }
     if (expr.kind === "unitLit") return "null";
@@ -2989,7 +3133,7 @@ class JavaEmitter {
       if (
         expr.type.kind !== "string" &&
         expr.type.kind !== "nativeHandle" &&
-        this.#nullableReference(expr.type) === null
+        !this.#directValueMatches(expr.type, descriptor, expr.loc)
       ) {
         throw new JvmUnsupportedError(
           `direct reference argument from '${expr.type.kind}'`,
@@ -3162,11 +3306,15 @@ class JavaEmitter {
     }
     const nullable = this.#nullableReference(type);
     if (nullable !== null) {
-      /* Java references already carry null. Keeping T | null unboxed is
-       * both the exact representation and what lets javac verify uses. */
-      return nullable.kind === "string"
-        ? "String"
-        : this.#javaHandleType(nullable.typeId, loc);
+      /* Java references already carry null. For internal values the same
+       * bit pattern represents either null or undefined because the union
+       * has exactly one unit arm, so the missing-value distinction remains
+       * exact without a tag object. Platform boundaries still admit only a
+       * declared null arm; undefined is never silently projected to JNI. */
+      return this.#javaType(nullable.valueType, loc);
+    }
+    if (type.kind === "union") {
+      return this.#unionPlan(type.unionId, loc).className;
     }
     return scalarJavaType(type, loc);
   }
@@ -3209,6 +3357,14 @@ class JavaEmitter {
 
   #recordFieldName(field: string): string {
     return encodedIdentifier("r", field);
+  }
+
+  #unionPlan(unionId: string, loc: SrcLoc): JvmUnionPlan {
+    const plan = this.#unionTypes.get(unionId);
+    if (plan === undefined) {
+      throw new JvmUnsupportedError(`unknown union '${unionId}'`, loc);
+    }
+    return plan;
   }
 
   #isMutableBox(local: IrFunction["locals"][number]): boolean {
@@ -3263,52 +3419,45 @@ class JavaEmitter {
       javaOwner(ownerBinaryName);
   }
 
-  #nullableHandle(type: IrType): {
-    unionId: string;
-    typeId: string;
-    handleTag: number;
-    nullTag: number;
-  } | null {
-    if (type.kind !== "union") return null;
-    const definition = this.#module.unions?.find(
-      (candidate) => candidate.id === type.unionId,
-    );
-    if (definition === undefined || definition.arms.length !== 2) return null;
-    const handle = definition.arms.find(
-      (arm): arm is Extract<IrType, { kind: "nativeHandle" }> =>
-        arm.kind === "nativeHandle",
-    );
-    if (handle === undefined) return null;
-    const nullable = nullableNativeHandleUnion(
-      this.#module.unions ?? [],
-      handle.typeId,
-    );
-    return nullable?.unionId === type.unionId
-      ? { ...nullable, typeId: handle.typeId }
-      : null;
+  #isUnitType(type: IrType): type is Extract<
+    IrType,
+    { readonly kind: "nullT" | "undefinedT" }
+  > {
+    return type.kind === "nullT" || type.kind === "undefinedT";
+  }
+
+  #isDirectReferenceType(type: IrType): boolean {
+    switch (type.kind) {
+      case "string":
+      case "array":
+      case "object":
+      case "record":
+      case "nativeHandle":
+        return true;
+      case "bytes":
+        return type.elem === "u8";
+      default:
+        return false;
+    }
   }
 
   #nullableReference(type: IrType): JvmNullableReference | null {
-    const handle = this.#nullableHandle(type);
-    if (handle !== null) {
-      return {
-        kind: "handle",
-        unionId: handle.unionId,
-        valueTag: handle.handleTag,
-        nullTag: handle.nullTag,
-        typeId: handle.typeId,
-      };
-    }
     if (type.kind !== "union") return null;
-    const definition = this.#module.unions?.find(
-      (candidate) => candidate.id === type.unionId,
-    );
+    const definition = this.#unionTypes.get(type.unionId)?.definition;
     if (definition === undefined || definition.arms.length !== 2) return null;
-    const valueTag = definition.arms.findIndex((arm) => arm.kind === "string");
-    const nullTag = definition.arms.findIndex((arm) => arm.kind === "nullT");
-    return valueTag < 0 || nullTag < 0
-      ? null
-      : { kind: "string", unionId: type.unionId, valueTag, nullTag };
+    const valueTag = definition.arms.findIndex((arm) =>
+      this.#isDirectReferenceType(arm)
+    );
+    const unitTag = definition.arms.findIndex((arm) => this.#isUnitType(arm));
+    if (valueTag < 0 || unitTag < 0) return null;
+    const unit = definition.arms[unitTag]!;
+    return {
+      unionId: type.unionId,
+      valueTag,
+      unitTag,
+      unitKind: unit.kind as "nullT" | "undefinedT",
+      valueType: definition.arms[valueTag]!,
+    };
   }
 
   #nativeHandleOwner(typeId: string, loc: SrcLoc): string {

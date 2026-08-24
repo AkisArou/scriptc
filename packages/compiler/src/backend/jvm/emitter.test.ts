@@ -30,6 +30,9 @@ const arrayValues = fileURLToPath(
 const recordValues = fileURLToPath(
   new URL("../../../../../tests/corpus/116-jvm-record-values.ts", import.meta.url),
 );
+const unionValues = fileURLToPath(
+  new URL("../../../../../tests/corpus/117-jvm-union-values.ts", import.meta.url),
+);
 const classFields = fileURLToPath(
   new URL("../../../../../tests/corpus/111-jvm-class-fields.ts", import.meta.url),
 );
@@ -298,6 +301,40 @@ test("the JVM emitter gives fixed-shape object literals exact Java fields", () =
   expect(source).toContain("boolean r_");
   expect(source).not.toContain("HashMap");
   expect(source).not.toContain("Object[]");
+  expect(source).not.toContain("JNI");
+});
+
+test("the JVM emitter keeps optional references nullable and scalar unions exact", () => {
+  const roots = [
+    "optionalNumber",
+    "optionalRecord",
+    "optionalString",
+    "optionalArray",
+    "mixedValue",
+  ];
+  const planned = planExecutableCompilation(unionValues, {
+    backend: "c",
+    externalFunctionRoots: roots,
+  });
+  expect(planned.ok).toBe(true);
+  if (!planned.ok) return;
+
+  const source = emitJvmSerializedModule(planned.plan.ir, {
+    className: "UnionValues",
+    functionExports: roots.map((functionName) => ({
+      functionName,
+      methodName: functionName,
+    })),
+  });
+
+  expect(source).toContain("final int tag");
+  expect(source).toContain("final double payload");
+  expect(source).toContain("final String payload");
+  expect(source).toMatch(/NtsRecord\d+ l_/u);
+  expect(source).toMatch(/NtsArray\d+ l_/u);
+  expect(source).toMatch(/String l_/u);
+  expect(source).not.toContain("Object payload");
+  expect(source).not.toContain("Double.valueOf");
   expect(source).not.toContain("JNI");
 });
 
