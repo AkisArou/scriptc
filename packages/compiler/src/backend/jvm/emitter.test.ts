@@ -294,6 +294,7 @@ test("the JVM emitter specializes ordinary arrays instead of boxing their elemen
   expect(source).toContain("double get(double position)");
   expect(source).toContain("double get(int position)");
   expect(source).toContain("int push(double value)");
+  expect(source).toContain("int push(double first, double second)");
   expect(source).toContain("int push(double... values)");
   expect(source).toContain("int pushSpread(NtsArray");
   expect(source).toContain("System.arraycopy(values.data, 0, data, length, count)");
