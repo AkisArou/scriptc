@@ -8,7 +8,7 @@ import type {
   IrType,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { nullableNativeHandleUnion } from "../../ir/nodes.js";
+import { nullableNativeHandleUnion, typeKey } from "../../ir/nodes.js";
 import {
   machineIntegerFieldKey,
   machineIntegerFacts,
@@ -270,6 +270,123 @@ interface JvmMethodDescriptor {
   readonly result: string;
 }
 
+interface JvmArrayPlan {
+  readonly type: Extract<IrType, { readonly kind: "array" }>;
+  readonly className: string;
+}
+
+interface JvmFunctionPlan {
+  readonly type: Extract<IrType, { readonly kind: "func" }>;
+  readonly interfaceName: string;
+}
+
+interface JvmFunctionValuePlan {
+  readonly fnName: string;
+  readonly type: Extract<IrType, { readonly kind: "func" }>;
+  readonly fieldName: string;
+}
+
+function irArrayTypes(value: unknown): ReadonlyMap<string, JvmArrayPlan> {
+  const types = new Map<string, Extract<IrType, { readonly kind: "array" }>>();
+  const visit = (candidate: unknown): void => {
+    if (Array.isArray(candidate)) {
+      for (const entry of candidate) visit(entry);
+      return;
+    }
+    if (candidate === null || typeof candidate !== "object") return;
+    const record = candidate as Readonly<Record<string, unknown>>;
+    if (
+      record["kind"] === "array" &&
+      record["elem"] !== null &&
+      typeof record["elem"] === "object" &&
+      typeof (record["elem"] as Readonly<Record<string, unknown>>)["kind"] === "string"
+    ) {
+      const type = candidate as Extract<IrType, { readonly kind: "array" }>;
+      types.set(typeKey(type), type);
+    }
+    for (const child of Object.values(record)) visit(child);
+  };
+  visit(value);
+  return new Map(
+    [...types.entries()]
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([key, type], index) => [key, Object.freeze({
+        type,
+        className: `NtsArray${index}`,
+      })]),
+  );
+}
+
+function irFunctionTypes(value: unknown): ReadonlyMap<string, JvmFunctionPlan> {
+  const types = new Map<string, Extract<IrType, { readonly kind: "func" }>>();
+  const visit = (candidate: unknown): void => {
+    if (Array.isArray(candidate)) {
+      for (const entry of candidate) visit(entry);
+      return;
+    }
+    if (candidate === null || typeof candidate !== "object") return;
+    const record = candidate as Readonly<Record<string, unknown>>;
+    if (
+      record["kind"] === "func" &&
+      Array.isArray(record["params"]) &&
+      record["ret"] !== null &&
+      typeof record["ret"] === "object"
+    ) {
+      const type = candidate as Extract<IrType, { readonly kind: "func" }>;
+      types.set(typeKey(type), type);
+    }
+    for (const child of Object.values(record)) visit(child);
+  };
+  visit(value);
+  return new Map(
+    [...types.entries()]
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([key, type], index) => [key, Object.freeze({
+        type,
+        interfaceName: `NtsFunction${index}`,
+      })]),
+  );
+}
+
+function irFunctionValues(
+  value: unknown,
+  functions: ReadonlyMap<string, IrFunction>,
+): ReadonlyMap<string, JvmFunctionValuePlan> {
+  const values = new Map<string, Extract<IrType, { readonly kind: "func" }>>();
+  const visit = (candidate: unknown): void => {
+    if (Array.isArray(candidate)) {
+      for (const entry of candidate) visit(entry);
+      return;
+    }
+    if (candidate === null || typeof candidate !== "object") return;
+    const record = candidate as Readonly<Record<string, unknown>>;
+    if (
+      record["kind"] === "closure" &&
+      typeof record["fnName"] === "string" &&
+      record["type"] !== null &&
+      typeof record["type"] === "object" &&
+      (record["type"] as Readonly<Record<string, unknown>>)["kind"] === "func" &&
+      functions.get(record["fnName"])?.captures === undefined
+    ) {
+      values.set(
+        record["fnName"],
+        record["type"] as Extract<IrType, { readonly kind: "func" }>,
+      );
+    }
+    for (const child of Object.values(record)) visit(child);
+  };
+  visit(value);
+  return new Map(
+    [...values.entries()]
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([fnName, type], index) => [fnName, Object.freeze({
+        fnName,
+        type,
+        fieldName: `ntsFunctionValue${index}`,
+      })]),
+  );
+}
+
 function parseJvmMethodDescriptor(descriptor: string): JvmMethodDescriptor {
   let cursor = 0;
   function type(allowVoid: boolean): string {
@@ -367,6 +484,9 @@ class JavaEmitter {
   readonly #needsUint8ArrayLength: boolean;
   readonly #needsUint8SetHelper: boolean;
   readonly #stringIntrinsics: ReadonlySet<string>;
+  readonly #arrayTypes: ReadonlyMap<string, JvmArrayPlan>;
+  readonly #functionTypes: ReadonlyMap<string, JvmFunctionPlan>;
+  readonly #functionValues: ReadonlyMap<string, JvmFunctionValuePlan>;
   readonly #directCallbackSites: JvmDirectCallbackSitePlan[] = [];
   readonly #directClassCallbackSites: JvmDirectClassCallbackSitePlan[] = [];
   #integerLocals: ReadonlySet<string> = new Set();
@@ -516,6 +636,14 @@ class JavaEmitter {
       (record) => record["kind"] === "bytesSet",
     );
     this.#stringIntrinsics = irStringIntrinsics(module.functions);
+    /* Scan only the language program. Native ABI metadata also has a
+     * `kind: "func"` callback shape, but its parameters are physical ABI
+     * types rather than IrType values and must never enter the JavaScript
+     * function-value representation. */
+    const programTypes = [module.functions, module.classes, module.globals];
+    this.#arrayTypes = irArrayTypes(programTypes);
+    this.#functionTypes = irFunctionTypes(programTypes);
+    this.#functionValues = irFunctionValues(module.functions, this.#functions);
     this.#needsNumberToString = irContains(
       module.functions,
       (record) => {
@@ -658,6 +786,10 @@ class JavaEmitter {
     }
 
     lines.push(...this.#emitStringIntrinsicSupport());
+
+    lines.push(...this.#emitArraySupport());
+
+    lines.push(...this.#emitFunctionSupport());
 
     lines.push(...this.#emitBoxSupport());
 
@@ -862,6 +994,37 @@ class JavaEmitter {
         "",
       );
     }
+    if (has("split")) {
+      const result = [...this.#arrayTypes.values()].find(
+        ({ type }) => type.elem.kind === "string",
+      );
+      if (result === undefined) {
+        throw new Error("JVM emitter bug: String.split has no string-array type");
+      }
+      lines.push(
+        `  private static ${result.className} ntsStringSplit(String value, String separator, double limitValue) {`,
+        `    ${result.className} result = new ${result.className}(new String[]{});`,
+        "    long limit = ntsToUint32(limitValue);",
+        "    if (limit == 0L) return result;",
+        "    if (separator.isEmpty()) {",
+        "      for (int index = 0; index < value.length() && result.length < limit; index++) {",
+        "        result.push(value.substring(index, index + 1));",
+        "      }",
+        "      return result;",
+        "    }",
+        "    int start = 0;",
+        "    while (result.length < limit) {",
+        "      int match = value.indexOf(separator, start);",
+        "      if (match < 0) break;",
+        "      result.push(value.substring(start, match));",
+        "      start = match + separator.length();",
+        "    }",
+        "    if (result.length < limit) result.push(value.substring(start));",
+        "    return result;",
+        "  }",
+        "",
+      );
+    }
     if (has("isWellFormed", "toWellFormed")) {
       lines.push(
         "  private static boolean ntsStringIsWellFormed(String value) {",
@@ -916,6 +1079,194 @@ class JavaEmitter {
     return lines;
   }
 
+  #emitArraySupport(): string[] {
+    if (this.#arrayTypes.size === 0) return [];
+    const entry = this.#functions.get(this.#module.entry)!;
+    const lines = [
+      "  private static int ntsArrayIndex(double value, int length, boolean append) {",
+      "    int limit = append && length < Integer.MAX_VALUE ? length + 1 : length;",
+      "    if (!Double.isFinite(value) || value != Math.rint(value) ||",
+      "        value < 0.0d || value >= limit) {",
+      "      throw new NtsTrapError(\"Array index out of bounds\");",
+      "    }",
+      "    return (int)value;",
+      "  }",
+      "",
+    ];
+    for (const plan of this.#arrayTypes.values()) {
+      const elementType = this.#javaType(plan.type.elem, entry.loc);
+      const zero = this.#defaultJavaValue(plan.type.elem, entry.loc);
+      const strictEquality = this.#arrayElementEquality(
+        plan.type.elem,
+        "data[index]",
+        "value",
+        false,
+      );
+      const sameValueZero = this.#arrayElementEquality(
+        plan.type.elem,
+        "data[index]",
+        "value",
+        true,
+      );
+      lines.push(
+        `  private static final class ${plan.className} {`,
+        `    private ${elementType}[] data;`,
+        "    private int length;",
+        "",
+        `    private ${plan.className}(${elementType}[] data) {`,
+        "      this.data = data;",
+        "      this.length = data.length;",
+        "    }",
+        "",
+        "    private void ensure(int need) {",
+        "      if (need <= data.length) return;",
+        "      int capacity = Math.max(4, data.length);",
+        "      while (capacity < need) {",
+        "        if (capacity > Integer.MAX_VALUE / 2) {",
+        "          capacity = need;",
+        "          break;",
+        "        }",
+        "        capacity *= 2;",
+        "      }",
+        "      data = java.util.Arrays.copyOf(data, capacity);",
+        "    }",
+        "",
+        "    private double length() {",
+        "      return (double)length;",
+        "    }",
+        "",
+        `    private ${elementType} get(double position) {`,
+        "      return data[ntsArrayIndex(position, length, false)];",
+        "    }",
+        "",
+        `    private void set(double position, ${elementType} value) {`,
+        "      int index = ntsArrayIndex(position, length, true);",
+        "      if (index == length) {",
+        "        ensure(length + 1);",
+        "        length++;",
+        "      }",
+        "      data[index] = value;",
+        "    }",
+        "",
+        `    private double push(${elementType}... values) {`,
+        "      if (values.length > Integer.MAX_VALUE - length) {",
+        "        throw new NtsRangeError(\"Invalid array length\");",
+        "      }",
+        "      int next = length + values.length;",
+        "      ensure(next);",
+        "      System.arraycopy(values, 0, data, length, values.length);",
+        "      length = next;",
+        "      return (double)length;",
+        "    }",
+        "",
+        `    private ${elementType} pop() {`,
+        "      if (length == 0) throw new NtsTrapError(\"Cannot pop an empty array\");",
+        `      ${elementType} value = data[--length];`,
+        `      data[length] = ${zero};`,
+        "      return value;",
+        "    }",
+        "",
+        `    private double indexOf(${elementType} value) {`,
+        "      for (int index = 0; index < length; index++) {",
+        `        if (${strictEquality}) return (double)index;`,
+        "      }",
+        "      return -1.0d;",
+        "    }",
+        "",
+        `    private boolean includes(${elementType} value) {`,
+        "      for (int index = 0; index < length; index++) {",
+        `        if (${sameValueZero}) return true;`,
+        "      }",
+        "      return false;",
+        "    }",
+        "  }",
+        "",
+      );
+    }
+    return lines;
+  }
+
+  #arrayElementEquality(
+    type: IrType,
+    left: string,
+    right: string,
+    sameValueZero: boolean,
+  ): string {
+    if (type.kind === "string") {
+      return `java.util.Objects.equals(${left}, ${right})`;
+    }
+    if (type.kind === "f64") {
+      return sameValueZero
+        ? `((${left}) == (${right}) || (Double.isNaN(${left}) && Double.isNaN(${right})))`
+        : `((${left}) == (${right}))`;
+    }
+    if (
+      type.kind === "bool" ||
+      (type.kind === "nativeScalar" && type.scalar === "i64")
+    ) {
+      return `((${left}) == (${right}))`;
+    }
+    /* Every other admitted array element is an ART reference. Java
+     * reference identity is the JavaScript identity of managed objects,
+     * native handles, byte arrays, and nested array wrappers. */
+    return `((${left}) == (${right}))`;
+  }
+
+  #emitFunctionSupport(): string[] {
+    const entry = this.#functions.get(this.#module.entry)!;
+    const lines: string[] = [];
+    for (const plan of this.#functionTypes.values()) {
+      if (plan.type.rest === true) {
+        throw new JvmUnsupportedError("rest-parameter function values", entry.loc);
+      }
+      const parameters = plan.type.params.map((type, index) =>
+        `${this.#javaType(type, entry.loc)} a${index}`
+      );
+      lines.push(
+        "  @FunctionalInterface",
+        `  private interface ${plan.interfaceName} {`,
+        `    ${this.#javaType(plan.type.ret, entry.loc)} call(${parameters.join(", ")});`,
+        "  }",
+        "",
+      );
+    }
+    for (const value of this.#functionValues.values()) {
+      lines.push(
+        `  private static final ${this.#functionInterfaceName(value.type, entry.loc)} ` +
+          `${value.fieldName} = ${this.#functionLambda(value.fnName, value.type, [], entry.loc)};`,
+        "",
+      );
+    }
+    return lines;
+  }
+
+  #functionLambda(
+    fnName: string,
+    type: Extract<IrType, { readonly kind: "func" }>,
+    captures: readonly string[],
+    loc: SrcLoc,
+  ): string {
+    const target = this.#functions.get(fnName);
+    if (target === undefined) {
+      throw new Error(`JVM emitter bug: closure over missing function '${fnName}'`);
+    }
+    if (
+      target.params.length !== type.params.length ||
+      (target.captures?.length ?? 0) !== captures.length
+    ) {
+      throw new Error(`JVM emitter bug: closure signature disagrees for '${fnName}'`);
+    }
+    if (type.rest === true) {
+      throw new JvmUnsupportedError("rest-parameter function values", loc);
+    }
+    const parameters = type.params.map((_, index) => `a${index}`);
+    const invocation = `${encodedIdentifier("f", fnName)}(${[
+      ...captures,
+      ...parameters,
+    ].join(", ")})`;
+    return `(${parameters.join(", ")}) -> ${invocation}`;
+  }
+
   #emitBoxSupport(): string[] {
     const kinds = new Set<"boolean" | "double" | "long" | "reference">();
     for (const fn of this.#module.functions) {
@@ -932,6 +1283,7 @@ class JavaEmitter {
     if (
       this.#needsI64ToNumber ||
       this.#needsUint8ArrayLength ||
+      this.#arrayTypes.size > 0 ||
       this.#stringIntrinsics.has("repeat") ||
       this.#stringIntrinsics.has("padStart") ||
       this.#stringIntrinsics.has("padEnd")
@@ -945,7 +1297,7 @@ class JavaEmitter {
         "",
       );
     }
-    if (this.#needsUint8SetHelper) {
+    if (this.#needsUint8SetHelper || this.#arrayTypes.size > 0) {
       lines.push(
         "  private static final class NtsTrapError extends Error {",
         "    private NtsTrapError(String message) {",
@@ -1473,6 +1825,16 @@ class JavaEmitter {
               : this.#expr(stmt.value)
           };`,
         ];
+      case "arraySet": {
+        if (stmt.arr.type.kind !== "array") {
+          throw new Error("JVM emitter bug: arraySet on a non-array value");
+        }
+        return [
+          `${pad}(${this.#expr(stmt.arr)}).set(${this.#expr(stmt.index)}, ${
+            this.#expr(stmt.value)
+          });`,
+        ];
+      }
       case "bytesSet": {
         if (
           !isJvmByteArray(stmt.arr.type) ||
@@ -1527,6 +1889,30 @@ class JavaEmitter {
         lines.push(`${pad}}`);
         return lines;
       }
+      case "for": {
+        if ((stmt.labels?.length ?? 0) !== 0) {
+          throw new JvmUnsupportedError("labeled for loops", stmt.loc);
+        }
+        const init = stmt.init === null ? "" : this.#forClause(fn, stmt.init);
+        const cond = stmt.cond === null ? "" : this.#expr(stmt.cond);
+        const update = stmt.update === null ? "" : this.#forClause(fn, stmt.update);
+        const lines = [`${pad}for (${init}; ${cond}; ${update}) {`];
+        for (const child of stmt.body) lines.push(...this.#stmt(fn, child, depth + 1));
+        lines.push(`${pad}}`);
+        return lines;
+      }
+      case "break": {
+        if (stmt.label !== undefined) {
+          throw new JvmUnsupportedError("labeled break statements", stmt.loc);
+        }
+        return [`${pad}break;`];
+      }
+      case "continue": {
+        if (stmt.label !== undefined) {
+          throw new JvmUnsupportedError("labeled continue statements", stmt.loc);
+        }
+        return [`${pad}continue;`];
+      }
       case "tryCatch": {
         if (
           stmt.catchBody !== null ||
@@ -1572,6 +1958,21 @@ class JavaEmitter {
       default:
         throw new JvmUnsupportedError(`statement '${stmt.kind}'`, stmt.loc);
     }
+  }
+
+  #forClause(fn: IrFunction, stmt: IrStmt): string {
+    if (
+      stmt.kind !== "varDecl" &&
+      stmt.kind !== "assign" &&
+      stmt.kind !== "exprStmt"
+    ) {
+      throw new JvmUnsupportedError(`for-loop clause '${stmt.kind}'`, stmt.loc);
+    }
+    const lines = this.#stmt(fn, stmt, 0);
+    if (lines.length !== 1 || !lines[0]!.endsWith(";")) {
+      throw new Error("JVM emitter bug: for-loop clause did not emit one statement");
+    }
+    return lines[0]!.slice(0, -1);
   }
 
   #expr(expr: IrExpr): string {
@@ -1701,8 +2102,10 @@ class JavaEmitter {
             return `ntsStringTrim(${receiver}, true, false)`;
           case "trimEnd":
             return `ntsStringTrim(${receiver}, false, true)`;
-          case "split":
-            throw new JvmUnsupportedError("string intrinsic 'split'", expr.loc);
+         case "split":
+            return `ntsStringSplit(${receiver}, ${argument(0)}, ${
+              expr.args[1] === undefined ? "4294967295.0d" : argument(1)
+            })`;
           case "padStart":
             return `ntsStringPad(${receiver}, ${argument(0)}, ${argument(1)}, true)`;
           case "padEnd":
@@ -1717,6 +2120,44 @@ class JavaEmitter {
             return `ntsStringToWellFormed(${receiver})`;
           case "cpAt":
             return `ntsStringCodePointAt(${receiver}, ${argument(0)})`;
+        }
+      }
+      case "arrayLit": {
+        if (expr.type.kind !== "array") {
+          throw new Error("JVM emitter bug: arrayLit has a non-array type");
+        }
+        if ((expr.spreads?.length ?? 0) !== 0) {
+          throw new JvmUnsupportedError("array literal spreads", expr.loc);
+        }
+        const elementType = this.#javaType(expr.type.elem, expr.loc);
+        return `new ${this.#arrayClassName(expr.type, expr.loc)}(new ${elementType}[]{${
+          expr.elems.map((element) => this.#expr(element)).join(", ")
+        }})`;
+      }
+      case "arrayGet": {
+        if (expr.arr.type.kind !== "array") {
+          throw new Error("JVM emitter bug: arrayGet on a non-array value");
+        }
+        return `(${this.#expr(expr.arr)}).get(${this.#expr(expr.index)})`;
+      }
+      case "arrIntrinsic": {
+        if (expr.receiver.type.kind !== "array") {
+          throw new Error("JVM emitter bug: arrIntrinsic on a non-array value");
+        }
+        const receiver = this.#expr(expr.receiver);
+        switch (expr.method) {
+          case "length":
+            return `(${receiver}).length()`;
+          case "push":
+            return `(${receiver}).push(${expr.args.map((arg) => this.#expr(arg)).join(", ")})`;
+          case "pop":
+            return `(${receiver}).pop()`;
+          case "indexOf":
+            return `(${receiver}).indexOf(${this.#expr(expr.args[0]!)})`;
+          case "includes":
+            return `(${receiver}).includes(${this.#expr(expr.args[0]!)})`;
+          default:
+            throw new JvmUnsupportedError(`array intrinsic '${expr.method}'`, expr.loc);
         }
       }
       case "bytesNew": {
@@ -1756,6 +2197,39 @@ class JavaEmitter {
       case "varRef": return this.#binding(expr.localId);
       case "call":
         return `${encodedIdentifier("f", expr.callee)}(${expr.args.map((arg) => this.#expr(arg)).join(", ")})`;
+      case "closure": {
+        if (expr.type.kind !== "func") {
+          throw new Error("JVM emitter bug: closure has a non-function type");
+        }
+        const target = this.#functions.get(expr.fnName);
+        if (target === undefined) {
+          throw new Error(`JVM emitter bug: closure over missing function '${expr.fnName}'`);
+        }
+        if (target.captures === undefined) {
+          const value = this.#functionValues.get(expr.fnName);
+          if (value === undefined || typeKey(value.type) !== typeKey(expr.type)) {
+            throw new Error(
+              `JVM emitter bug: top-level function value '${expr.fnName}' was not planned`,
+            );
+          }
+          return value.fieldName;
+        }
+        const captures = expr.captures.map((id) => this.#captureBinding(id, expr.loc));
+        return `(${this.#functionInterfaceName(expr.type, expr.loc)})(${
+          this.#functionLambda(expr.fnName, expr.type, captures, expr.loc)
+        })`;
+      }
+      case "callValue": {
+        if (expr.callee.type.kind !== "func") {
+          throw new Error("JVM emitter bug: callValue has a non-function callee");
+        }
+        if (expr.args.length !== expr.callee.type.params.length) {
+          throw new Error("JVM emitter bug: callValue argument count disagrees");
+        }
+        return `(${this.#expr(expr.callee)}).call(${
+          expr.args.map((arg) => this.#expr(arg)).join(", ")
+        })`;
+      }
       case "new":
         return `${this.#managedNewName(expr.className)}(${expr.args.map((arg) => this.#expr(arg)).join(", ")})`;
       case "virtualCall": {
@@ -1839,6 +2313,18 @@ class JavaEmitter {
           expr.loc,
         );
       }
+      case "logical":
+        if (
+          expr.type.kind === "bool" &&
+          expr.left.type.kind === "bool" &&
+          expr.right.type.kind === "bool"
+        ) {
+          return `(${this.#expr(expr.left)} ${expr.op} ${this.#expr(expr.right)})`;
+        }
+        throw new JvmUnsupportedError(
+          `value-producing logical '${expr.op}' over '${expr.type.kind}'`,
+          expr.loc,
+        );
       case "ternary":
         return `(${this.#expr(expr.cond)} ? ${this.#expr(expr.then)} : ${this.#expr(expr.else_)})`;
       case "unionWrap": {
@@ -2496,6 +2982,12 @@ class JavaEmitter {
   }
 
   #javaType(type: IrType, loc: SrcLoc): string {
+    if (type.kind === "array") {
+      return this.#arrayClassName(type, loc);
+    }
+    if (type.kind === "func") {
+      return this.#functionInterfaceName(type, loc);
+    }
     if (type.kind === "object") {
       return this.#managedClassName(type.className, loc);
     }
@@ -2511,6 +3003,34 @@ class JavaEmitter {
         : this.#javaHandleType(nullable.typeId, loc);
     }
     return scalarJavaType(type, loc);
+  }
+
+  #arrayClassName(
+    type: Extract<IrType, { readonly kind: "array" }>,
+    loc: SrcLoc,
+  ): string {
+    const plan = this.#arrayTypes.get(typeKey(type));
+    if (plan === undefined) {
+      throw new JvmUnsupportedError(
+        `unplanned array type '${typeKey(type)}'`,
+        loc,
+      );
+    }
+    return plan.className;
+  }
+
+  #functionInterfaceName(
+    type: Extract<IrType, { readonly kind: "func" }>,
+    loc: SrcLoc,
+  ): string {
+    const plan = this.#functionTypes.get(typeKey(type));
+    if (plan === undefined) {
+      throw new JvmUnsupportedError(
+        `unplanned function type '${typeKey(type)}'`,
+        loc,
+      );
+    }
+    return plan.interfaceName;
   }
 
   #isMutableBox(local: IrFunction["locals"][number]): boolean {

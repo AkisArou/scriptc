@@ -53,3 +53,20 @@ export function wellFormed(value: string): boolean {
 export function repaired(value: string): string {
   return value.toWellFormed();
 }
+
+export function splitCount(
+  value: string,
+  separator: string,
+  limit: number,
+): number {
+  return value.split(separator, limit).length;
+}
+
+export function splitPart(
+  value: string,
+  separator: string,
+  limit: number,
+  index: number,
+): string {
+  return value.split(separator, limit)[index]!;
+}

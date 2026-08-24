@@ -24,6 +24,9 @@ const byteValues = fileURLToPath(
 const stringIntrinsics = fileURLToPath(
   new URL("../../../../../tests/corpus/114-jvm-string-intrinsics.ts", import.meta.url),
 );
+const arrayValues = fileURLToPath(
+  new URL("../../../../../tests/corpus/115-jvm-array-values.ts", import.meta.url),
+);
 const classFields = fileURLToPath(
   new URL("../../../../../tests/corpus/111-jvm-class-fields.ts", import.meta.url),
 );
@@ -207,6 +210,8 @@ test("the JVM emitter lowers JavaScript string operations directly in ART", () =
     "cased",
     "wellFormed",
     "repaired",
+    "splitCount",
+    "splitPart",
   ];
   const planned = planExecutableCompilation(stringIntrinsics, {
     backend: "c",
@@ -228,7 +233,43 @@ test("the JVM emitter lowers JavaScript string operations directly in ART", () =
   expect(source).toContain("ntsStringRepeat(");
   expect(source).toContain("ntsStringPad(");
   expect(source).toContain("ntsStringToWellFormed(");
+  expect(source).toContain("ntsStringSplit(");
   expect(source).toContain("java.util.Locale.ROOT");
+  expect(source).not.toContain("JNI");
+});
+
+test("the JVM emitter specializes ordinary arrays instead of boxing their elements", () => {
+  const roots = [
+    "mutateNumbers",
+    "findString",
+    "mutateBooleans",
+    "arrayPipeline",
+    "capturedPipeline",
+    "mutateCapturedTotal",
+    "namedPipeline",
+  ];
+  const planned = planExecutableCompilation(arrayValues, {
+    backend: "c",
+    externalFunctionRoots: roots,
+  });
+  expect(planned.ok).toBe(true);
+  if (!planned.ok) return;
+
+  const source = emitJvmSerializedModule(planned.plan.ir, {
+    className: "ArrayValues",
+    functionExports: roots.map((functionName) => ({
+      functionName,
+      methodName: functionName,
+    })),
+  });
+
+  expect(source).toContain("double[] data");
+  expect(source).toContain("String[] data");
+  expect(source).toContain("boolean[] data");
+  expect(source).toContain("double push(double... values)");
+  expect(source).toContain("boolean includes(String value)");
+  expect(source).not.toContain("ArrayList");
+  expect(source).not.toContain("Object[] data");
   expect(source).not.toContain("JNI");
 });
 
