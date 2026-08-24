@@ -971,7 +971,18 @@ interface MachineIntegerAssumptions {
   readonly methodValues: ReadonlyMap<string, AbsVal>;
   readonly returns: ReadonlySet<string>;
   readonly returnValues: ReadonlyMap<string, AbsVal>;
+  readonly representation: MachineIntegerRepresentation;
 }
+
+/** Target representation facts that are stronger than the language-level
+ * container contract. They are opt-in because a generic ScriptC array may
+ * grow beyond signed int32 even when a target's physical array cannot. */
+export interface MachineIntegerRepresentation {
+  readonly arrayLength?: "int32";
+}
+
+const GENERIC_MACHINE_INTEGER_REPRESENTATION: MachineIntegerRepresentation =
+  Object.freeze({});
 
 const EMPTY_MACHINE_INTEGER_ASSUMPTIONS: MachineIntegerAssumptions = {
   fields: new Map(),
@@ -980,6 +991,7 @@ const EMPTY_MACHINE_INTEGER_ASSUMPTIONS: MachineIntegerAssumptions = {
   methodValues: new Map(),
   returns: new Set(),
   returnValues: new Map(),
+  representation: GENERIC_MACHINE_INTEGER_REPRESENTATION,
 };
 
 /** Meet a value with an interval; `clearNaN` when the comparison's truth
@@ -1583,6 +1595,10 @@ class FnAnalyzer {
         return this.isPure(e.value);
       case "strIntrinsic":
         return this.isPure(e.receiver) && e.args.every((argument) => this.isPure(argument));
+      case "arrIntrinsic":
+        return e.method === "length" &&
+          this.isPure(e.receiver) &&
+          e.args.every((argument) => this.isPure(argument));
       case "bytesIntrinsic":
         return (e.method === "length" || e.method === "byteLength") &&
           this.isPure(e.receiver) &&
@@ -1634,6 +1650,12 @@ class FnAnalyzer {
       case "strIntrinsic":
         return e.method === "length" && e.type.kind === "f64"
           ? absVal(0, SAFE_MAX, true, false)
+          : { ...TOP };
+      case "arrIntrinsic":
+        return e.method === "length" &&
+            e.type.kind === "f64" &&
+            this.machineAssumptions.representation.arrayLength === "int32"
+          ? absVal(0, MACHINE_I32_MAX, true, false)
           : { ...TOP };
       case "unary":
         if (e.op === "-") return transferNeg(this.evalPure(e.operand, env));
@@ -1936,6 +1958,33 @@ class FnAnalyzer {
         return e.method === "length" && e.type.kind === "f64"
           ? absVal(0, SAFE_MAX, true, false)
           : { ...TOP };
+      }
+      case "arrIntrinsic": {
+        this.evalExpr(e.receiver, env);
+        for (const argument of e.args) this.evalExpr(argument, env);
+        if (e.method !== "length") clearPathFacts(env);
+        if (
+          e.type.kind !== "f64" ||
+          this.machineAssumptions.representation.arrayLength !== "int32"
+        ) {
+          return { ...TOP };
+        }
+        /* An int-bounded target represents all successful array lengths in
+         * 0..INT32_MAX. Mutating length operations either throw or return
+         * that new length; indexOf returns -1 or a valid int index. Array
+         * intrinsics do not invoke user code, so global facts survive. */
+        switch (e.method) {
+          case "length":
+          case "push":
+          case "pushSpread":
+          case "unshift":
+          case "unshiftSpread":
+            return absVal(0, MACHINE_I32_MAX, true, false);
+          case "indexOf":
+            return absVal(-1, MACHINE_I32_MAX - 1, true, false);
+          default:
+            return { ...TOP };
+        }
       }
       case "bytesIntrinsic": {
         this.evalExpr(e.receiver, env);
@@ -2628,6 +2677,7 @@ function inferMachineIntegerReturns(
   fields: ReadonlyMap<string, AbsVal>,
   parameters: ReadonlyMap<string, AbsVal>,
   returnValues: ReadonlyMap<string, AbsVal>,
+  representation: MachineIntegerRepresentation,
 ): ReadonlySet<string> {
   let candidates: ReadonlySet<string> = new Set(
     mod.functions
@@ -2643,6 +2693,7 @@ function inferMachineIntegerReturns(
       methodValues: methodFacts.values,
       returns: candidates,
       returnValues,
+      representation,
     };
     const next = new Set<string>();
     for (const fn of mod.functions) {
@@ -2681,6 +2732,7 @@ function summarizeMachineIntegerReturns(
   fields: ReadonlyMap<string, AbsVal>,
   parameters: ReadonlyMap<string, AbsVal>,
   returns: ReadonlySet<string>,
+  representation: MachineIntegerRepresentation,
 ): ReadonlyMap<string, AbsVal> {
   let values: ReadonlyMap<string, AbsVal> = new Map(
     [...returns].map((fn) => [fn, BOTTOM]),
@@ -2694,6 +2746,7 @@ function summarizeMachineIntegerReturns(
       methodValues: methodFacts.values,
       returns,
       returnValues: values,
+      representation,
     };
     const next = new Map<string, AbsVal>();
     for (const fn of mod.functions) {
@@ -2776,8 +2829,13 @@ function observeMachineIntegers(
 export function machineIntegerFacts(
   mod: IrModule,
   externallyCallable: ReadonlySet<string> = new Set(),
+  representation: MachineIntegerRepresentation =
+    GENERIC_MACHINE_INTEGER_REPRESENTATION,
 ): MachineIntegerFacts {
-  const cacheKey = JSON.stringify([...externallyCallable].sort());
+  const cacheKey = JSON.stringify({
+    externallyCallable: [...externallyCallable].sort(),
+    arrayLength: representation.arrayLength ?? null,
+  });
   let moduleCache = machineIntegerFactsByModule.get(mod);
   const cached = moduleCache?.get(cacheKey);
   if (cached !== undefined) return cached;
@@ -2795,7 +2853,10 @@ export function machineIntegerFacts(
     effects,
     native,
     globalSeeds,
-    EMPTY_MACHINE_INTEGER_ASSUMPTIONS,
+    {
+      ...EMPTY_MACHINE_INTEGER_ASSUMPTIONS,
+      representation,
+    },
   );
   let fieldValues: ReadonlyMap<string, AbsVal> = machineIntegerFieldValues(
     mod,
@@ -2818,6 +2879,7 @@ export function machineIntegerFacts(
       fieldValues,
       parameterValues,
       returnValues,
+      representation,
     );
     const nextReturnValues = summarizeMachineIntegerReturns(
       mod,
@@ -2827,6 +2889,7 @@ export function machineIntegerFacts(
       fieldValues,
       parameterValues,
       inferredReturns,
+      representation,
     );
     const methodFacts = machineIntegerMethodFacts(
       mod,
@@ -2840,6 +2903,7 @@ export function machineIntegerFacts(
       methodValues: methodFacts.values,
       returns: inferredReturns,
       returnValues: nextReturnValues,
+      representation,
     };
     const nextObserved = observeMachineIntegers(
       mod,

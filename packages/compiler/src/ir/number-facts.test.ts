@@ -1125,6 +1125,58 @@ describe("the native checked-number boundary", () => {
     expect(machineIntegerFacts(mod).locals.get("case")?.has("i.0")).toBe(true);
   });
 
+  test("a target-declared int32 array length keeps synthetic loop indices in int32", () => {
+    const arrayType = { kind: "array", elem: F64 } as const;
+    const arrayRef: IrExpr = {
+      kind: "varRef",
+      localId: "values.0",
+      type: arrayType,
+      loc,
+    };
+    const length: IrExpr = {
+      kind: "arrIntrinsic",
+      method: "length",
+      receiver: arrayRef,
+      args: [],
+      type: F64,
+      loc,
+    };
+    const mod: IrModule = {
+      irVersion: IR_VERSION,
+      sourceFile: "array-length.ts",
+      functions: [{
+        name: "case",
+        params: [{ localId: "values.0", name: "values", type: arrayType }],
+        returnType: VOID,
+        locals: [
+          { id: "values.0", name: "values", type: arrayType, mutable: false },
+          { id: "length.0", name: "length", type: F64, mutable: false },
+          { id: "index.0", name: "index", type: F64, mutable: true },
+        ],
+        body: [
+          decl("length.0", length),
+          forLoop(
+            decl("index.0", num(0)),
+            bin("<", ref("index.0"), ref("length.0")),
+            assign("index.0", bin("+", ref("index.0"), num(1))),
+            [],
+          ),
+        ],
+        loc,
+      }],
+      entry: "case",
+    };
+
+    const generic = machineIntegerFacts(mod);
+    expect(generic.expressions.has(length)).toBe(false);
+    expect(generic.locals.get("case")?.has("length.0") ?? false).toBe(false);
+
+    const facts = machineIntegerFacts(mod, new Set(), { arrayLength: "int32" });
+    expect(facts.expressions.has(length)).toBe(true);
+    expect(facts.locals.get("case")?.has("length.0")).toBe(true);
+    expect(facts.locals.get("case")?.has("index.0")).toBe(true);
+  });
+
   test("managed fields use int storage only when every write proves it", () => {
     const objectType = { kind: "object", className: "Counter" } as const;
     const receiver: IrExpr = {

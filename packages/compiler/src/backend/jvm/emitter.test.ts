@@ -290,10 +290,15 @@ test("the JVM emitter specializes ordinary arrays instead of boxing their elemen
   expect(source).toContain("double[] data");
   expect(source).toContain("String[] data");
   expect(source).toContain("boolean[] data");
-  expect(source).toContain("double push(double... values)");
-  expect(source).toContain("double pushSpread(NtsArray");
+  expect(source).toContain("int length()");
+  expect(source).toContain("double get(double position)");
+  expect(source).toContain("double get(int position)");
+  expect(source).toContain("int push(double value)");
+  expect(source).toContain("int push(double... values)");
+  expect(source).toContain("int pushSpread(NtsArray");
   expect(source).toContain("System.arraycopy(values.data, 0, data, length, count)");
   expect(source).toContain("boolean includes(String value)");
+  expect(source).not.toContain("for (double ");
   expect(source).not.toContain("ArrayList");
   expect(source).not.toContain("Object[] data");
   expect(source).not.toContain("JNI");

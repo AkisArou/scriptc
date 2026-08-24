@@ -926,6 +926,7 @@ class JavaEmitter {
     this.#machineIntegers = machineIntegerFacts(
       module,
       new Set((options.functionExports ?? []).map(({ functionName }) => functionName)),
+      { arrayLength: "int32" },
     );
     this.#needsI64ToNumber = irContains(
       module.functions,
@@ -1440,6 +1441,14 @@ class JavaEmitter {
     if (this.#arrayTypes.size === 0) return [];
     const entry = this.#functions.get(this.#module.entry)!;
     const lines = [
+      "  private static int ntsArrayIndex(int value, int length, boolean append) {",
+      "    int limit = append && length < Integer.MAX_VALUE ? length + 1 : length;",
+      "    if (value < 0 || value >= limit) {",
+      "      throw new NtsTrapError(\"Array index out of bounds\");",
+      "    }",
+      "    return value;",
+      "  }",
+      "",
       "  private static int ntsArrayIndex(double value, int length, boolean append) {",
       "    int limit = append && length < Integer.MAX_VALUE ? length + 1 : length;",
       "    if (!Double.isFinite(value) || value != Math.rint(value) ||",
@@ -1488,12 +1497,25 @@ class JavaEmitter {
         "      data = java.util.Arrays.copyOf(data, capacity);",
         "    }",
         "",
-        "    private double length() {",
-        "      return (double)length;",
+        "    private int length() {",
+        "      return length;",
+        "    }",
+        "",
+        `    private ${elementType} get(int position) {`,
+        "      return data[ntsArrayIndex(position, length, false)];",
         "    }",
         "",
         `    private ${elementType} get(double position) {`,
         "      return data[ntsArrayIndex(position, length, false)];",
+        "    }",
+        "",
+        `    private void set(int position, ${elementType} value) {`,
+        "      int index = ntsArrayIndex(position, length, true);",
+        "      if (index == length) {",
+        "        ensure(length + 1);",
+        "        length++;",
+        "      }",
+        "      data[index] = value;",
         "    }",
         "",
         `    private void set(double position, ${elementType} value) {`,
@@ -1505,7 +1527,16 @@ class JavaEmitter {
         "      data[index] = value;",
         "    }",
         "",
-        `    private double push(${elementType}... values) {`,
+        `    private int push(${elementType} value) {`,
+        "      if (length == Integer.MAX_VALUE) {",
+        "        throw new NtsRangeError(\"Invalid array length\");",
+        "      }",
+        "      ensure(length + 1);",
+        "      data[length++] = value;",
+        "      return length;",
+        "    }",
+        "",
+        `    private int push(${elementType}... values) {`,
         "      if (values.length > Integer.MAX_VALUE - length) {",
         "        throw new NtsRangeError(\"Invalid array length\");",
         "      }",
@@ -1513,10 +1544,10 @@ class JavaEmitter {
         "      ensure(next);",
         "      System.arraycopy(values, 0, data, length, values.length);",
         "      length = next;",
-        "      return (double)length;",
+        "      return length;",
         "    }",
         "",
-        `    private double pushSpread(${plan.className} values) {`,
+        `    private int pushSpread(${plan.className} values) {`,
         "      int count = values.length;",
         "      if (count > Integer.MAX_VALUE - length) {",
         "        throw new NtsRangeError(\"Invalid array length\");",
@@ -1525,7 +1556,7 @@ class JavaEmitter {
         "      ensure(next);",
         "      System.arraycopy(values.data, 0, data, length, count);",
         "      length = next;",
-        "      return (double)length;",
+        "      return length;",
         "    }",
         "",
         `    private ${elementType} pop() {`,
@@ -1535,11 +1566,11 @@ class JavaEmitter {
         "      return value;",
         "    }",
         "",
-        `    private double indexOf(${elementType} value) {`,
+        `    private int indexOf(${elementType} value) {`,
         "      for (int index = 0; index < length; index++) {",
-        `        if (${strictEquality}) return (double)index;`,
+        `        if (${strictEquality}) return index;`,
         "      }",
-        "      return -1.0d;",
+        "      return -1;",
         "    }",
         "",
         `    private boolean includes(${elementType} value) {`,
@@ -3367,8 +3398,9 @@ class JavaEmitter {
         if (stmt.arr.type.kind !== "array") {
           throw new Error("JVM emitter bug: arraySet on a non-array value");
         }
+        const index = this.#directIntExpr(stmt.index) ?? this.#expr(stmt.index);
         return [
-          `${pad}(${this.#expr(stmt.arr)}).set(${this.#expr(stmt.index)}, ${
+          `${pad}(${this.#expr(stmt.arr)}).set(${index}, ${
             this.#expr(stmt.value)
           });`,
         ];
@@ -3843,7 +3875,8 @@ class JavaEmitter {
         if (expr.arr.type.kind !== "array") {
           throw new Error("JVM emitter bug: arrayGet on a non-array value");
         }
-        return `(${this.#expr(expr.arr)}).get(${this.#expr(expr.index)})`;
+        const index = this.#directIntExpr(expr.index) ?? this.#expr(expr.index);
+        return `(${this.#expr(expr.arr)}).get(${index})`;
       }
       case "arrIntrinsic": {
         if (expr.receiver.type.kind !== "array") {
@@ -4818,6 +4851,10 @@ class JavaEmitter {
         return this.#machineIntegers.methods.has(
             machineIntegerMethodKey(expr.className, expr.method)
           )
+          ? this.#expr(expr)
+          : null;
+      case "arrIntrinsic":
+        return this.#machineIntegers.expressions.has(expr)
           ? this.#expr(expr)
           : null;
       case "bin": {
