@@ -1,6 +1,7 @@
 import { fileURLToPath } from "node:url";
 import { expect, test } from "vitest";
 import { planExecutableCompilation } from "../../index.js";
+import { deserializeModule } from "../../ir/serialize.js";
 import { emitJvmSerializedModule, JvmUnsupportedError } from "./emitter.js";
 
 const hello = fileURLToPath(
@@ -44,6 +45,9 @@ const mathValues = fileURLToPath(
 );
 const numberParsing = fileURLToPath(
   new URL("../../../../../tests/corpus/121-jvm-number-parsing.ts", import.meta.url),
+);
+const integerParameters = fileURLToPath(
+  new URL("../../../../../tests/corpus/122-jvm-integer-parameters.ts", import.meta.url),
 );
 const classFields = fileURLToPath(
   new URL("../../../../../tests/corpus/111-jvm-class-fields.ts", import.meta.url),
@@ -503,6 +507,64 @@ test("the JVM emitter keeps numeric recognition and parsing inside ART", () => {
   expect(source).toContain("ntsStringToNumber(");
   expect(source).toContain("new java.math.BigInteger(");
   expect(source).not.toContain("java.util.regex");
+  expect(source).not.toContain("JNI");
+});
+
+test("the JVM emitter specializes only closed integer parameter entries", () => {
+  const roots = [
+    "directIntegerParameter",
+    "publicNumberParameter",
+    "callPublicNumberParameter",
+  ];
+  const planned = planExecutableCompilation(integerParameters, {
+    backend: "c",
+    externalFunctionRoots: roots,
+  });
+  expect(planned.ok).toBe(true);
+  if (!planned.ok) return;
+
+  const module = deserializeModule(planned.plan.ir);
+  const bounded = module.functions.find(({ name }) =>
+    name.endsWith(".boundedIntegerLoop") || name === "boundedIntegerLoop"
+  );
+  const publicParameter = module.functions.find(({ name }) =>
+    name.endsWith(".publicNumberParameter") || name === "publicNumberParameter"
+  );
+  expect(bounded).toBeDefined();
+  expect(publicParameter).toBeDefined();
+  if (bounded === undefined || publicParameter === undefined) return;
+  const encoded = (name: string): string => {
+    let result = "f_";
+    for (const byte of new TextEncoder().encode(name)) {
+      result += byte.toString(16).padStart(2, "0");
+    }
+    return result;
+  };
+
+  const source = emitJvmSerializedModule(planned.plan.ir, {
+    className: "IntegerParameters",
+    functionExports: roots.map((functionName) => ({
+      functionName,
+      methodName: functionName,
+    })),
+  });
+
+  const boundedName = encoded(bounded.name);
+  const boundedStart = source.search(
+    new RegExp(`private static (?:int|double) ${boundedName}\\(int `, "u"),
+  );
+  expect(boundedStart).toBeGreaterThanOrEqual(0);
+  const boundedEnd = source.indexOf("\n  private static", boundedStart + 1);
+  const boundedSource = source.slice(
+    boundedStart,
+    boundedEnd < 0 ? source.length : boundedEnd,
+  );
+  expect(boundedSource).not.toContain("ntsToInt32");
+
+  expect(source).toContain(
+    `private static int ${encoded(publicParameter.name)}(double `,
+  );
+  expect(source).toContain("public static double publicNumberParameter(double a0)");
   expect(source).not.toContain("JNI");
 });
 

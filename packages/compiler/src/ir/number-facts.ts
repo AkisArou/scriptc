@@ -966,6 +966,7 @@ class FunctionMachineIntegerObserver implements MachineIntegerObserver {
 
 interface MachineIntegerAssumptions {
   readonly fields: ReadonlyMap<string, AbsVal>;
+  readonly parameters: ReadonlyMap<string, AbsVal>;
   readonly methods: ReadonlySet<string>;
   readonly methodValues: ReadonlyMap<string, AbsVal>;
   readonly returns: ReadonlySet<string>;
@@ -974,6 +975,7 @@ interface MachineIntegerAssumptions {
 
 const EMPTY_MACHINE_INTEGER_ASSUMPTIONS: MachineIntegerAssumptions = {
   fields: new Map(),
+  parameters: new Map(),
   methods: new Set(),
   methodValues: new Map(),
   returns: new Set(),
@@ -1061,9 +1063,13 @@ class FnAnalyzer {
       const declared = slots?.params[i] ?? null;
       const seed = slots?.paramSeeds[i] ?? null;
       const nativeSeed = nativeSeeds?.[i] ?? null;
+      const machineSeed = this.machineAssumptions.parameters.get(
+        machineIntegerParameterKey(fn.name, i),
+      );
       if (declared !== null) env.set(p.localId, classSeed(declared));
       else if (seed !== null) env.set(p.localId, { ...seed });
       else if (nativeSeed !== null) env.set(p.localId, { ...nativeSeed });
+      else if (machineSeed !== undefined) env.set(p.localId, { ...machineSeed });
       else env.set(p.localId, { ...TOP });
     });
     this.collect = true;
@@ -2287,6 +2293,11 @@ export interface MachineIntegerFacts {
    * fit a signed int32 and can never carry -0. Keys include inherited class
    * views so a backend need not rediscover the declaring layout owner. */
   readonly fields: ReadonlySet<string>;
+  /** Direct-only f64 parameters whose complete set of call sites passes a
+   * signed int32 value. Externally callable functions, closures, class
+   * methods, boxed parameters, and functions with an unknown entry path are
+   * never present. The source-visible number ABI therefore remains f64. */
+  readonly parameters: ReadonlySet<string>;
   /** Function name → f64 locals whose every reachable write is proved to
    * be a signed 32-bit integer and never the observably distinct -0. */
   readonly locals: ReadonlyMap<string, ReadonlySet<string>>;
@@ -2303,10 +2314,17 @@ export interface MachineIntegerFacts {
   readonly methods: ReadonlySet<string>;
 }
 
-const machineIntegerFactsByModule = new WeakMap<IrModule, MachineIntegerFacts>();
+const machineIntegerFactsByModule = new WeakMap<
+  IrModule,
+  Map<string, MachineIntegerFacts>
+>();
 
 export function machineIntegerFieldKey(className: string, field: string): string {
   return JSON.stringify([className, field]);
+}
+
+export function machineIntegerParameterKey(functionName: string, index: number): string {
+  return JSON.stringify([functionName, index]);
 }
 
 export function machineIntegerMethodKey(className: string, method: string): string {
@@ -2394,6 +2412,83 @@ function machineIntegerFieldValues(
     }
   }
   return fields;
+}
+
+/** Infer an implementation-only parameter carrier from the complete direct
+ * call graph. A source `number` parameter can become Java `int` only when
+ * every way into that implementation is visible here. Public JVM wrappers
+ * are supplied by the emitter as `externallyCallable`; closures, managed
+ * methods, module entry, async/generator bodies, and boxed parameters are
+ * excluded structurally because another entry path can supply an arbitrary
+ * JavaScript number.
+ *
+ * Values come from the same abstract interpreter that proves locals and
+ * returns. This is deliberately a call-site proof rather than a parameter
+ * annotation: a helper called only with 50_000 may specialize, while an
+ * otherwise identical exported helper remains f64. */
+function machineIntegerParameterValues(
+  mod: IrModule,
+  expressions: ReadonlyMap<IrExpr, AbsVal>,
+  externallyCallable: ReadonlySet<string>,
+): ReadonlyMap<string, AbsVal> {
+  const excluded = new Set(externallyCallable);
+  excluded.add(mod.entry);
+  const managedImplementations = new Set<string>();
+  for (const class_ of mod.classes ?? []) {
+    for (const fn of mod.functions) {
+      if (fn.name.startsWith(`%${class_.name}.`)) {
+        managedImplementations.add(fn.name);
+      }
+    }
+  }
+  for (const fn of mod.functions) {
+    if (
+      managedImplementations.has(fn.name) ||
+      fn.captures !== undefined ||
+      fn.async === true ||
+      fn.generator !== undefined
+    ) {
+      excluded.add(fn.name);
+    }
+  }
+
+  const calls = new Map<
+    string,
+    Extract<IrExpr, { readonly kind: "call" }>[]
+  >();
+  walkBodyNodes(mod.functions, (node) => {
+    if (node.kind === "closure") {
+      excluded.add((node as Extract<IrExpr, { readonly kind: "closure" }>).fnName);
+      return;
+    }
+    if (node.kind !== "call") return;
+    const call = node as Extract<IrExpr, { readonly kind: "call" }>;
+    const sites = calls.get(call.callee) ?? [];
+    sites.push(call);
+    calls.set(call.callee, sites);
+  });
+
+  const values = new Map<string, AbsVal>();
+  for (const fn of mod.functions) {
+    if (excluded.has(fn.name)) continue;
+    const sites = calls.get(fn.name);
+    if (sites === undefined || sites.length === 0) continue;
+    fn.params.forEach((parameter, index) => {
+      if (parameter.type.kind !== "f64") return;
+      const local = fn.locals.find(({ id }) => id === parameter.localId);
+      if (local?.boxed === true) return;
+      let value = BOTTOM;
+      for (const site of sites) {
+        const argument = site.args[index];
+        if (argument === undefined) return;
+        const observed = expressions.get(argument) ?? BOTTOM;
+        if (!isMachineI32(observed)) return;
+        value = join(value, observed);
+      }
+      values.set(machineIntegerParameterKey(fn.name, index), value);
+    });
+  }
+  return values;
 }
 
 function sameStringSet(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
@@ -2531,6 +2626,7 @@ function inferMachineIntegerReturns(
   native: NativeBoundaryContext,
   globalSeeds: ReadonlyMap<string, AbsVal>,
   fields: ReadonlyMap<string, AbsVal>,
+  parameters: ReadonlyMap<string, AbsVal>,
   returnValues: ReadonlyMap<string, AbsVal>,
 ): ReadonlySet<string> {
   let candidates: ReadonlySet<string> = new Set(
@@ -2542,6 +2638,7 @@ function inferMachineIntegerReturns(
     const methodFacts = machineIntegerMethodFacts(mod, candidates, returnValues);
     const assumptions: MachineIntegerAssumptions = {
       fields,
+      parameters,
       methods: methodFacts.methods,
       methodValues: methodFacts.values,
       returns: candidates,
@@ -2582,6 +2679,7 @@ function summarizeMachineIntegerReturns(
   native: NativeBoundaryContext,
   globalSeeds: ReadonlyMap<string, AbsVal>,
   fields: ReadonlyMap<string, AbsVal>,
+  parameters: ReadonlyMap<string, AbsVal>,
   returns: ReadonlySet<string>,
 ): ReadonlyMap<string, AbsVal> {
   let values: ReadonlyMap<string, AbsVal> = new Map(
@@ -2591,6 +2689,7 @@ function summarizeMachineIntegerReturns(
     const methodFacts = machineIntegerMethodFacts(mod, returns, values);
     const assumptions: MachineIntegerAssumptions = {
       fields,
+      parameters,
       methods: methodFacts.methods,
       methodValues: methodFacts.values,
       returns,
@@ -2670,9 +2769,17 @@ function observeMachineIntegers(
 /** Proved storage choices for backends that have a cheaper signed-integer
  * representation. JavaScript's public number type remains f64: external
  * parameters and returns widen at their boundary, while overflow, fractions,
- * NaN, infinities, and -0 keep that carrier everywhere. */
-export function machineIntegerFacts(mod: IrModule): MachineIntegerFacts {
-  const cached = machineIntegerFactsByModule.get(mod);
+ * NaN, infinities, and -0 keep that carrier everywhere. `externallyCallable`
+ * names implementation bodies a target exposes through another ABI; their
+ * parameters must remain general numbers even when every internal call site
+ * happens to pass an integer. */
+export function machineIntegerFacts(
+  mod: IrModule,
+  externallyCallable: ReadonlySet<string> = new Set(),
+): MachineIntegerFacts {
+  const cacheKey = JSON.stringify([...externallyCallable].sort());
+  let moduleCache = machineIntegerFactsByModule.get(mod);
+  const cached = moduleCache?.get(cacheKey);
   if (cached !== undefined) return cached;
 
   const effects = globalEffectsOf(mod);
@@ -2694,6 +2801,11 @@ export function machineIntegerFacts(mod: IrModule): MachineIntegerFacts {
     mod,
     observed.expressionValues,
   );
+  let parameterValues: ReadonlyMap<string, AbsVal> = machineIntegerParameterValues(
+    mod,
+    observed.expressionValues,
+    externallyCallable,
+  );
   let returns: ReadonlySet<string> = new Set();
   let returnValues: ReadonlyMap<string, AbsVal> = new Map();
   let methods: ReadonlySet<string> = new Set();
@@ -2704,6 +2816,7 @@ export function machineIntegerFacts(mod: IrModule): MachineIntegerFacts {
       native,
       globalSeeds,
       fieldValues,
+      parameterValues,
       returnValues,
     );
     const nextReturnValues = summarizeMachineIntegerReturns(
@@ -2712,6 +2825,7 @@ export function machineIntegerFacts(mod: IrModule): MachineIntegerFacts {
       native,
       globalSeeds,
       fieldValues,
+      parameterValues,
       inferredReturns,
     );
     const methodFacts = machineIntegerMethodFacts(
@@ -2721,6 +2835,7 @@ export function machineIntegerFacts(mod: IrModule): MachineIntegerFacts {
     );
     const assumptions: MachineIntegerAssumptions = {
       fields: fieldValues,
+      parameters: parameterValues,
       methods: methodFacts.methods,
       methodValues: methodFacts.values,
       returns: inferredReturns,
@@ -2737,26 +2852,38 @@ export function machineIntegerFacts(mod: IrModule): MachineIntegerFacts {
       fieldValues,
       machineIntegerFieldValues(mod, nextObserved.expressionValues),
     );
+    const nextParameterValues = machineIntegerParameterValues(
+      mod,
+      nextObserved.expressionValues,
+      externallyCallable,
+    );
     const stable =
       sameStringSet(returns, inferredReturns) &&
       sameAbsValMap(returnValues, nextReturnValues) &&
-      sameAbsValMap(fieldValues, nextFieldValues);
+      sameAbsValMap(fieldValues, nextFieldValues) &&
+      sameAbsValMap(parameterValues, nextParameterValues);
     returns = inferredReturns;
     returnValues = nextReturnValues;
     methods = methodFacts.methods;
     fieldValues = nextFieldValues;
+    parameterValues = nextParameterValues;
     observed = nextObserved;
     if (stable) break;
   }
   const facts = Object.freeze({
     globals,
     fields: new Set(fieldValues.keys()),
+    parameters: new Set(parameterValues.keys()),
     locals: observed.locals,
     expressions: observed.expressions,
     returns,
     methods,
   });
-  machineIntegerFactsByModule.set(mod, facts);
+  if (moduleCache === undefined) {
+    moduleCache = new Map();
+    machineIntegerFactsByModule.set(mod, moduleCache);
+  }
+  moduleCache.set(cacheKey, facts);
   return facts;
 }
 

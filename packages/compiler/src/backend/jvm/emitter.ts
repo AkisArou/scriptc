@@ -15,6 +15,7 @@ import {
   machineIntegerFieldKey,
   machineIntegerFacts,
   machineIntegerMethodKey,
+  machineIntegerParameterKey,
   type MachineIntegerFacts,
 } from "../../ir/number-facts.js";
 import { deserializeModule } from "../../ir/serialize.js";
@@ -906,7 +907,10 @@ class JavaEmitter {
     this.#directCallbackByOwner = callbackByOwner;
     this.#directCancellationBindings = cancellationBindings;
     this.#directConnectionTypeIds = connectionTypeIds;
-    this.#machineIntegers = machineIntegerFacts(module);
+    this.#machineIntegers = machineIntegerFacts(
+      module,
+      new Set((options.functionExports ?? []).map(({ functionName }) => functionName)),
+    );
     this.#needsI64ToNumber = irContains(
       module.functions,
       (record) => record["kind"] === "nativeScalarToNumber",
@@ -3173,7 +3177,15 @@ class JavaEmitter {
       }
     }
 
-    this.#integerLocals = this.#machineIntegers.locals.get(fn.name) ?? new Set();
+    const integerParameters = new Set(
+      fn.params
+        .filter((_, index) => this.#integerParameter(fn.name, index))
+        .map(({ localId }) => localId),
+    );
+    this.#integerLocals = new Set([
+      ...(this.#machineIntegers.locals.get(fn.name) ?? []),
+      ...integerParameters,
+    ]);
     this.#mutableBoxedLocals = new Set(
       fn.locals
         .filter((local) => local.boxed === true && local.mutable)
@@ -3187,7 +3199,7 @@ class JavaEmitter {
     const params = fn.params.map((param) => {
       const local = this.#local(fn, param.localId, fn.loc);
       const name = encodedIdentifier("l", param.localId);
-      return `${this.#javaType(param.type, fn.loc)} ${
+      return `${integerParameters.has(param.localId) ? "int" : this.#javaType(param.type, fn.loc)} ${
         this.#isMutableBox(local) ? `${name}_input` : name
       }`;
     });
@@ -3809,7 +3821,11 @@ class JavaEmitter {
       }
       case "varRef": return this.#binding(expr.localId);
       case "call":
-        return `${encodedIdentifier("f", expr.callee)}(${expr.args.map((arg) => this.#expr(arg)).join(", ")})`;
+        return `${encodedIdentifier("f", expr.callee)}(${expr.args.map((arg, index) =>
+          this.#integerParameter(expr.callee, index)
+            ? this.#intExpr(arg)
+            : this.#expr(arg)
+        ).join(", ")})`;
       case "closure": {
         if (expr.type.kind !== "func") {
           throw new Error("JVM emitter bug: closure has a non-function type");
@@ -4997,6 +5013,12 @@ class JavaEmitter {
   #integerField(className: string, field: string): boolean {
     return this.#machineIntegers.fields.has(
       machineIntegerFieldKey(className, field),
+    );
+  }
+
+  #integerParameter(functionName: string, index: number): boolean {
+    return this.#machineIntegers.parameters.has(
+      machineIntegerParameterKey(functionName, index),
     );
   }
 

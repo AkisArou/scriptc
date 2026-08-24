@@ -16,6 +16,7 @@ import {
   machineIntegerFieldKey,
   machineIntegerFacts,
   machineIntegerMethodKey,
+  machineIntegerParameterKey,
   type IntSlotConfig,
   numberBoundaryFacts,
   type IntVerdict,
@@ -1177,6 +1178,82 @@ describe("the native checked-number boundary", () => {
     const fields = machineIntegerFacts(mod).fields;
     expect(fields.has(machineIntegerFieldKey("Counter", "value"))).toBe(true);
     expect(fields.has(machineIntegerFieldKey("Counter", "fraction"))).toBe(false);
+  });
+
+  test("direct-only integer parameters specialize without narrowing an external ABI", () => {
+    const worker: IrFunction = {
+      name: "worker",
+      params: [{ localId: "limit.0", name: "limit", type: F64 }],
+      returnType: F64,
+      locals: [
+        { id: "limit.0", name: "limit", type: F64, mutable: false },
+        { id: "copy.0", name: "copy", type: F64, mutable: false },
+      ],
+      body: [
+        decl("copy.0", ref("limit.0")),
+        { kind: "return", value: ref("copy.0"), loc },
+      ],
+      loc,
+    };
+    const callWorker: IrExpr = {
+      kind: "call",
+      callee: "worker",
+      args: [num(50_000)],
+      type: F64,
+      loc,
+    };
+    const mod: IrModule = {
+      irVersion: IR_VERSION,
+      sourceFile: "integer-parameter.ts",
+      functions: [worker, {
+        name: "caller",
+        params: [],
+        returnType: F64,
+        locals: [],
+        body: [{ kind: "return", value: callWorker, loc }],
+        loc,
+      }],
+      entry: "caller",
+    };
+
+    const internal = machineIntegerFacts(mod);
+    expect(
+      internal.parameters.has(machineIntegerParameterKey("worker", 0)),
+    ).toBe(true);
+    expect(internal.locals.get("worker")?.has("copy.0")).toBe(true);
+
+    const external = machineIntegerFacts(mod, new Set(["worker"]));
+    expect(
+      external.parameters.has(machineIntegerParameterKey("worker", 0)),
+    ).toBe(false);
+    expect(external.locals.get("worker")?.has("copy.0")).not.toBe(true);
+
+    const indirect: IrModule = {
+      ...mod,
+      functions: [worker, {
+        name: "caller",
+        params: [],
+        returnType: F64,
+        locals: [],
+        body: [{ kind: "exprStmt", expr: callWorker, loc }, {
+          kind: "exprStmt",
+          expr: {
+            kind: "closure",
+            fnName: "worker",
+            captures: [],
+            type: { kind: "func", params: [F64], ret: F64 },
+            loc,
+          },
+          loc,
+        }, { kind: "return", value: num(0), loc }],
+        loc,
+      }],
+    };
+    expect(
+      machineIntegerFacts(indirect).parameters.has(
+        machineIntegerParameterKey("worker", 0),
+      ),
+    ).toBe(false);
   });
 
   test("internal returns specialize transitively but virtual slots agree as a family", () => {
