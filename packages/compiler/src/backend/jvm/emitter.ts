@@ -3769,7 +3769,10 @@ class JavaEmitter {
         ) {
           throw new JvmUnsupportedError("non-string concatenation", expr.loc);
         }
-        return `(${this.#expr(expr.left)} + ${this.#expr(expr.right)})`;
+        const left = this.#stringConcatOperand(expr.left);
+        const right = this.#stringConcatOperand(expr.right);
+        const anchor = left.primitive && right.primitive ? '"" + ' : "";
+        return `(${anchor}${left.value} + ${right.value})`;
       }
       case "strEq": {
         if (
@@ -4468,6 +4471,24 @@ class JavaEmitter {
       default:
         throw new JvmUnsupportedError(`expression '${expr.kind}'`, expr.loc);
     }
+  }
+
+  /** A toString node consumed immediately by concatenation has no observable
+   * identity of its own. Java's concatenation spelling is JavaScript-exact
+   * for booleans and for signed int32 values that cannot be -0, so those
+   * primitives can enter the final builder without an intermediate String.
+   * Two primitives need an empty-string anchor to prevent numeric addition. */
+  #stringConcatOperand(expr: IrExpr): { readonly value: string; readonly primitive: boolean } {
+    if (expr.kind === "toString") {
+      if (expr.operand.type.kind === "bool") {
+        return { value: this.#expr(expr.operand), primitive: true };
+      }
+      if (expr.operand.type.kind === "f64") {
+        const integer = this.#directIntExpr(expr.operand);
+        if (integer !== null) return { value: integer, primitive: true };
+      }
+    }
+    return { value: this.#expr(expr), primitive: false };
   }
 
   #directNativePeerAttach(

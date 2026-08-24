@@ -143,6 +143,8 @@ test("the JVM emitter preserves JavaScript string values inside ART", () => {
     backend: "c",
     externalFunctionRoots: [
       "joined",
+      "integerTemplate",
+      "adjacentIntegerTemplate",
       "equal",
       "notEqual",
       "numberText",
@@ -158,6 +160,12 @@ test("the JVM emitter preserves JavaScript string values inside ART", () => {
     functionExports: [{
       functionName: "joined",
       methodName: "joined",
+    }, {
+      functionName: "integerTemplate",
+      methodName: "integerTemplate",
+    }, {
+      functionName: "adjacentIntegerTemplate",
+      methodName: "adjacentIntegerTemplate",
     }, {
       functionName: "equal",
       methodName: "equal",
@@ -178,7 +186,8 @@ test("the JVM emitter preserves JavaScript string values inside ART", () => {
 
   expect(source).toContain("private static String ntsNumberToString(double value)");
   expect(source).toContain(".equals(");
-  expect(source).toContain("Boolean.toString(");
+  expect(source).not.toContain("Boolean.toString(");
+  expect(source).not.toContain("Integer.toString(");
   expect(source).toContain("public static String maybeText(String a0, boolean a1)");
   expect(source).toContain("public static double nullableLength(String a0)");
   expect(source).not.toContain("ntsI64ToNumber");

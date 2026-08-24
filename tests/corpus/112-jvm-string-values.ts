@@ -2,6 +2,14 @@ export function joined(value: number, enabled: boolean): string {
   return `value=${value} enabled=${enabled}`;
 }
 
+export function integerTemplate(value: number): string {
+  return `Count: ${value & 1023}`;
+}
+
+export function adjacentIntegerTemplate(value: number): string {
+  return `${value & 255}${value & 15}`;
+}
+
 export function equal(left: string, right: string): boolean {
   return left === right;
 }
