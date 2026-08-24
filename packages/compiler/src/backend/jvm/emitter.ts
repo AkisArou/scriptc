@@ -260,6 +260,20 @@ function irStringIntrinsics(value: unknown, methods = new Set<string>()): Readon
   return methods;
 }
 
+function irLibraryCalls(value: unknown, calls = new Set<string>()): ReadonlySet<string> {
+  if (Array.isArray(value)) {
+    for (const entry of value) irLibraryCalls(entry, calls);
+    return calls;
+  }
+  if (value === null || typeof value !== "object") return calls;
+  const record = value as Readonly<Record<string, unknown>>;
+  if (record["kind"] === "libCall" && typeof record["fn"] === "string") {
+    calls.add(record["fn"]);
+  }
+  for (const entry of Object.values(record)) irLibraryCalls(entry, calls);
+  return calls;
+}
+
 interface JvmMethodDescriptor {
   readonly parameters: readonly string[];
   readonly result: string;
@@ -746,6 +760,7 @@ class JavaEmitter {
   readonly #needsUint8ArrayLength: boolean;
   readonly #needsUint8SetHelper: boolean;
   readonly #stringIntrinsics: ReadonlySet<string>;
+  readonly #libraryCalls: ReadonlySet<string>;
   readonly #arrayTypes: ReadonlyMap<string, JvmArrayPlan>;
   readonly #arrayLiterals: ReadonlyMap<
     Extract<IrExpr, { readonly kind: "arrayLit" }>,
@@ -914,6 +929,7 @@ class JavaEmitter {
       (record) => record["kind"] === "bytesSet",
     );
     this.#stringIntrinsics = irStringIntrinsics(module.functions);
+    this.#libraryCalls = irLibraryCalls(module.functions);
     /* Scan only the language program. Native ABI metadata also has a
      * `kind: "func"` callback shape, but its parameters are physical ABI
      * types rather than IrType values and must never enter the JavaScript
@@ -1076,6 +1092,8 @@ class JavaEmitter {
     }
 
     lines.push(...this.#emitStringIntrinsicSupport());
+
+    lines.push(...this.#emitMathSupport());
 
     lines.push(...this.#emitArraySupport());
 
@@ -1514,6 +1532,63 @@ class JavaEmitter {
         );
       }
       lines.push("    return value;", "  }", "");
+    }
+    return lines;
+  }
+
+  #emitMathSupport(): string[] {
+    const has = (name: string): boolean => this.#libraryCalls.has(name);
+    const lines: string[] = [];
+    if (has("math.trunc")) {
+      lines.push(
+        "  private static double ntsMathTrunc(double value) {",
+        "    if (Double.isNaN(value) || Double.isInfinite(value) || value == 0.0d) return value;",
+        "    return value < 0.0d ? Math.ceil(value) : Math.floor(value);",
+        "  }",
+        "",
+      );
+    }
+    if (has("math.round")) {
+      lines.push(
+        "  private static double ntsMathRound(double value) {",
+        "    if (Double.isNaN(value) || Double.isInfinite(value) || value == 0.0d) return value;",
+        "    double floor = Math.floor(value);",
+        "    double result = value - floor < 0.5d ? floor : floor + 1.0d;",
+        "    return result == 0.0d && value < 0.0d ? -0.0d : result;",
+        "  }",
+        "",
+      );
+    }
+    if (has("math.maxArr") || has("math.minArr")) {
+      const entry = this.#functions.get(this.#module.entry)!;
+      const array = this.#arrayClassName(
+        { kind: "array", elem: { kind: "f64" } },
+        entry.loc,
+      );
+      if (has("math.maxArr")) {
+        lines.push(
+          `  private static double ntsMathMaxArray(${array} values) {`,
+          "    double result = Double.NEGATIVE_INFINITY;",
+          "    for (int index = 0; index < values.length; index++) {",
+          "      result = Math.max(result, values.data[index]);",
+          "    }",
+          "    return result;",
+          "  }",
+          "",
+        );
+      }
+      if (has("math.minArr")) {
+        lines.push(
+          `  private static double ntsMathMinArray(${array} values) {`,
+          "    double result = Double.POSITIVE_INFINITY;",
+          "    for (int index = 0; index < values.length; index++) {",
+          "      result = Math.min(result, values.data[index]);",
+          "    }",
+          "    return result;",
+          "  }",
+          "",
+        );
+      }
     }
     return lines;
   }
@@ -3704,6 +3779,37 @@ class JavaEmitter {
         return this.#directNativePeerAttach(expr);
       case "nativeCall":
         return this.#nativeCall(expr);
+      case "libCall": {
+        const argument = (index: number): string =>
+          this.#numberExprAsDouble(expr.args[index]!);
+        switch (expr.fn) {
+          case "math.floor":
+            return `Math.floor(${argument(0)})`;
+          case "math.trunc":
+            return `ntsMathTrunc(${argument(0)})`;
+          case "math.ceil":
+            return `Math.ceil(${argument(0)})`;
+          case "math.abs":
+            return `Math.abs(${argument(0)})`;
+          case "math.round":
+            return `ntsMathRound(${argument(0)})`;
+          case "math.min":
+            return `Math.min(${argument(0)}, ${argument(1)})`;
+          case "math.max":
+            return `Math.max(${argument(0)}, ${argument(1)})`;
+          case "math.random":
+            return "Math.random()";
+          case "math.maxArr":
+            return `ntsMathMaxArray(${this.#expr(expr.args[0]!)})`;
+          case "math.minArr":
+            return `ntsMathMinArray(${this.#expr(expr.args[0]!)})`;
+          default:
+            throw new JvmUnsupportedError(
+              `standard-library call '${expr.fn}'`,
+              expr.loc,
+            );
+        }
+      }
       case "intrinsic": {
         if (
           (expr.name === "console.log" || expr.name === "console.error") &&

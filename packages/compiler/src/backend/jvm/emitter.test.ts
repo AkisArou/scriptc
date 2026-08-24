@@ -39,6 +39,9 @@ const mapValues = fileURLToPath(
 const setValues = fileURLToPath(
   new URL("../../../../../tests/corpus/119-jvm-set-values.ts", import.meta.url),
 );
+const mathValues = fileURLToPath(
+  new URL("../../../../../tests/corpus/120-jvm-math-values.ts", import.meta.url),
+);
 const classFields = fileURLToPath(
   new URL("../../../../../tests/corpus/111-jvm-class-fields.ts", import.meta.url),
 );
@@ -420,6 +423,38 @@ test("the JVM emitter keeps typed sets in exact element arrays", () => {
   expect(source).not.toContain("HashSet");
   expect(source).not.toContain("LinkedHashSet");
   expect(source).not.toContain("Double.valueOf");
+  expect(source).not.toContain("JNI");
+});
+
+test("the JVM emitter keeps static JavaScript math as primitive JVM operations", () => {
+  const roots = [
+    "mathTransforms",
+    "mathEdges",
+    "extremaArity",
+    "spreadExtrema",
+    "variadicMathOrder",
+    "randomInvariant",
+  ];
+  const planned = planExecutableCompilation(mathValues, {
+    backend: "c",
+    externalFunctionRoots: roots,
+  });
+  expect(planned.ok).toBe(true);
+  if (!planned.ok) return;
+
+  const source = emitJvmSerializedModule(planned.plan.ir, {
+    className: "MathValues",
+    functionExports: roots.map((functionName) => ({
+      functionName,
+      methodName: functionName,
+    })),
+  });
+
+  expect(source).toContain("Math.floor(");
+  expect(source).toContain("Math.ceil(");
+  expect(source).toContain("Math.abs(");
+  expect(source).toContain("ntsMathRound(");
+  expect(source).toContain("ntsMathMaxArray(");
   expect(source).not.toContain("JNI");
 });
 
