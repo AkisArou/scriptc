@@ -304,6 +304,7 @@ interface JvmArrayPlan {
 interface JvmArrayLiteralPlan {
   readonly expression: Extract<IrExpr, { readonly kind: "arrayLit" }>;
   readonly factoryName: string;
+  readonly capacity?: number;
 }
 
 interface JvmMapPlan {
@@ -433,6 +434,76 @@ function irArrayTypes(value: unknown): ReadonlyMap<string, JvmArrayPlan> {
 function irArrayLiterals(
   value: unknown,
 ): ReadonlyMap<Extract<IrExpr, { readonly kind: "arrayLit" }>, JvmArrayLiteralPlan> {
+  const reservedCapacities = new Map<
+    Extract<IrExpr, { readonly kind: "arrayLit" }>,
+    number
+  >();
+  const fixedPushCount = (candidate: unknown, localId: string): number | null => {
+    if (candidate === null || typeof candidate !== "object") return null;
+    const statement = candidate as Readonly<Record<string, unknown>>;
+    const expression = (
+      statement["kind"] === "exprStmt"
+        ? statement["expr"]
+        : statement["kind"] === "varDecl"
+        ? statement["init"]
+        : statement["kind"] === "assign"
+        ? statement["value"]
+        : undefined
+    ) as Readonly<Record<string, unknown>> | undefined;
+    if (expression?.["kind"] !== "arrIntrinsic" || expression["method"] !== "push") {
+      return null;
+    }
+    const receiver = expression["receiver"] as Readonly<Record<string, unknown>> | undefined;
+    const args = expression["args"];
+    if (
+      receiver?.["kind"] !== "varRef" ||
+      receiver["localId"] !== localId ||
+      !Array.isArray(args)
+    ) {
+      return null;
+    }
+    return args.length;
+  };
+  const findReservedCapacities = (candidate: unknown): void => {
+    if (Array.isArray(candidate)) {
+      for (let index = 0; index < candidate.length; index++) {
+        const statement = candidate[index];
+        if (statement !== null && typeof statement === "object") {
+          const record = statement as Readonly<Record<string, unknown>>;
+          const init = record["init"] as Readonly<Record<string, unknown>> | undefined;
+          const localId = record["localId"];
+          if (
+            record["kind"] === "varDecl" &&
+            typeof localId === "string" &&
+            init?.["kind"] === "arrayLit" &&
+            Array.isArray(init["elems"]) &&
+            (!Array.isArray(init["spreads"]) || init["spreads"].length === 0)
+          ) {
+            let capacity = init["elems"].length;
+            for (let next = index + 1; next < candidate.length; next++) {
+              const count = fixedPushCount(candidate[next], localId);
+              if (count === null) break;
+              capacity += count;
+            }
+            if (capacity > init["elems"].length && capacity <= 0x7fff_ffff) {
+              reservedCapacities.set(
+                init as Extract<IrExpr, { readonly kind: "arrayLit" }>,
+                capacity,
+              );
+            }
+          }
+        }
+      }
+      for (const entry of candidate) findReservedCapacities(entry);
+      return;
+    }
+    if (candidate === null || typeof candidate !== "object") return;
+    for (const child of Object.values(candidate as Readonly<Record<string, unknown>>)) {
+      findReservedCapacities(child);
+    }
+  };
+  findReservedCapacities(value);
+
   const expressions: Extract<IrExpr, { readonly kind: "arrayLit" }>[] = [];
   const visit = (candidate: unknown): void => {
     if (Array.isArray(candidate)) {
@@ -443,18 +514,24 @@ function irArrayLiterals(
     const record = candidate as Readonly<Record<string, unknown>>;
     if (
       record["kind"] === "arrayLit" &&
-      Array.isArray(record["spreads"]) &&
-      record["spreads"].length > 0
+      (
+        (Array.isArray(record["spreads"]) && record["spreads"].length > 0) ||
+        reservedCapacities.has(candidate as Extract<IrExpr, { readonly kind: "arrayLit" }>)
+      )
     ) {
       expressions.push(candidate as Extract<IrExpr, { readonly kind: "arrayLit" }>);
     }
     for (const child of Object.values(record)) visit(child);
   };
   visit(value);
-  return new Map(expressions.map((expression, index) => [expression, Object.freeze({
-    expression,
-    factoryName: `ntsArrayLiteral${index}`,
-  })]));
+  return new Map(expressions.map((expression, index) => {
+    const capacity = reservedCapacities.get(expression);
+    return [expression, Object.freeze({
+      expression,
+      factoryName: `ntsArrayLiteral${index}`,
+      ...(capacity === undefined ? {} : { capacity }),
+    })];
+  }));
 }
 
 function irMapTypes(value: unknown): ReadonlyMap<string, JvmMapPlan> {
@@ -1462,6 +1539,11 @@ class JavaEmitter {
     for (const plan of this.#arrayTypes.values()) {
       const elementType = this.#javaType(plan.type.elem, entry.loc);
       const zero = this.#defaultJavaValue(plan.type.elem, entry.loc);
+      const reservesCapacity = [...this.#arrayLiterals.values()].some((literal) =>
+        literal.capacity !== undefined &&
+        literal.expression.type.kind === "array" &&
+        typeKey(literal.expression.type) === typeKey(plan.type)
+      );
       const strictEquality = this.#arrayElementEquality(
         plan.type.elem,
         "data[index]",
@@ -1484,6 +1566,15 @@ class JavaEmitter {
         "      this.length = data.length;",
         "    }",
         "",
+        ...(reservesCapacity
+          ? [
+            `    private ${plan.className}(${elementType}[] data, int length) {`,
+            "      this.data = data;",
+            "      this.length = length;",
+            "    }",
+            "",
+          ]
+          : []),
         "    private void ensure(int need) {",
         "      if (need <= data.length) return;",
         "      int capacity = Math.max(4, data.length);",
@@ -1606,6 +1697,20 @@ class JavaEmitter {
       const parameters = expression.elems.map((_, index) =>
         `${spreads.has(index) ? array : elementType} v${index}`
       );
+      if (literal.capacity !== undefined) {
+        if (spreads.size > 0) {
+          throw new Error("JVM emitter bug: a spread literal reserved fixed capacity");
+        }
+        lines.push(
+          `  private static ${array} ${literal.factoryName}(${parameters.join(", ")}) {`,
+          `    ${array} value = new ${array}(new ${elementType}[${literal.capacity}], ${expression.elems.length});`,
+        );
+        for (const [index] of expression.elems.entries()) {
+          lines.push(`    value.data[${index}] = v${index};`);
+        }
+        lines.push("    return value;", "  }", "");
+        continue;
+      }
       lines.push(
         `  private static ${array} ${literal.factoryName}(${parameters.join(", ")}) {`,
         `    ${array} value = new ${array}(new ${elementType}[]{});`,
@@ -3749,14 +3854,14 @@ class JavaEmitter {
         if (expr.type.kind !== "array") {
           throw new Error("JVM emitter bug: arrayLit has a non-array type");
         }
-        if ((expr.spreads?.length ?? 0) !== 0) {
-          const literal = this.#arrayLiterals.get(expr);
-          if (literal === undefined) {
-            throw new Error("JVM emitter bug: spread array literal was not planned");
-          }
+        const literal = this.#arrayLiterals.get(expr);
+        if (literal !== undefined) {
           return `${literal.factoryName}(${expr.elems.map((element) =>
             this.#expr(element)
           ).join(", ")})`;
+        }
+        if ((expr.spreads?.length ?? 0) !== 0) {
+          throw new Error("JVM emitter bug: spread array literal was not planned");
         }
         const elementType = this.#javaType(expr.type.elem, expr.loc);
         return `new ${this.#arrayClassName(expr.type, expr.loc)}(new ${elementType}[]{${

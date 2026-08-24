@@ -263,6 +263,7 @@ test("the JVM emitter lowers JavaScript string operations directly in ART", () =
 test("the JVM emitter specializes ordinary arrays instead of boxing their elements", () => {
   const roots = [
     "mutateNumbers",
+    "reservedPushOrder",
     "findString",
     "mutateBooleans",
     "arrayPipeline",
@@ -293,6 +294,10 @@ test("the JVM emitter specializes ordinary arrays instead of boxing their elemen
   expect(source).toContain("int length()");
   expect(source).toContain("double get(double position)");
   expect(source).toContain("double get(int position)");
+  expect(source).toContain("private NtsArray1(double[] data, int length)");
+  expect(source).toContain("new NtsArray1(new double[5], 3)");
+  expect(source).toContain("new NtsArray1(new double[3], 1)");
+  expect(source).toContain("value.data[0] = v0;");
   expect(source).toContain("int push(double value)");
   expect(source).toContain("int push(double first, double second)");
   expect(source).toContain("int push(double... values)");

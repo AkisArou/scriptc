@@ -5,6 +5,12 @@ export function mutateNumbers(seed: number): number {
   return length + values[0] + values[1] + values[4];
 }
 
+export function reservedPushOrder(): number {
+  const values = [10];
+  const length = values.push(values.length, values.length);
+  return length * 1_000 + values[1]! * 10 + values[2]!;
+}
+
 export function findString(needle: string): number {
   const values = ["alpha", "same", "omega"];
   return values.indexOf(needle) + (values.includes(needle) ? 10 : 0);
