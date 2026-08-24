@@ -15,6 +15,15 @@ const integerLocals = fileURLToPath(
 const referenceValues = fileURLToPath(
   new URL("../../../../../tests/corpus/110-jvm-reference-values.ts", import.meta.url),
 );
+const stringValues = fileURLToPath(
+  new URL("../../../../../tests/corpus/112-jvm-string-values.ts", import.meta.url),
+);
+const byteValues = fileURLToPath(
+  new URL("../../../../../tests/corpus/113-jvm-byte-values.ts", import.meta.url),
+);
+const stringIntrinsics = fileURLToPath(
+  new URL("../../../../../tests/corpus/114-jvm-string-intrinsics.ts", import.meta.url),
+);
 const classFields = fileURLToPath(
   new URL("../../../../../tests/corpus/111-jvm-class-fields.ts", import.meta.url),
 );
@@ -101,6 +110,125 @@ test("the JVM emitter keeps strings and byte arrays as direct Java references", 
   expect(source).toMatch(/\.length\(\)/u);
   expect(source).toMatch(/\.length\)/u);
   expect(source).not.toContain("UTF");
+  expect(source).not.toContain("JNI");
+});
+
+test("the JVM emitter preserves JavaScript string values inside ART", () => {
+  const planned = planExecutableCompilation(stringValues, {
+    backend: "c",
+    externalFunctionRoots: [
+      "joined",
+      "equal",
+      "notEqual",
+      "numberText",
+      "maybeText",
+      "nullableLength",
+    ],
+  });
+  expect(planned.ok).toBe(true);
+  if (!planned.ok) return;
+
+  const source = emitJvmSerializedModule(planned.plan.ir, {
+    className: "StringValues",
+    functionExports: [{
+      functionName: "joined",
+      methodName: "joined",
+    }, {
+      functionName: "equal",
+      methodName: "equal",
+    }, {
+      functionName: "notEqual",
+      methodName: "notEqual",
+    }, {
+      functionName: "numberText",
+      methodName: "numberText",
+    }, {
+      functionName: "maybeText",
+      methodName: "maybeText",
+    }, {
+      functionName: "nullableLength",
+      methodName: "nullableLength",
+    }],
+  });
+
+  expect(source).toContain("private static String ntsNumberToString(double value)");
+  expect(source).toContain(".equals(");
+  expect(source).toContain("Boolean.toString(");
+  expect(source).toContain("public static String maybeText(String a0, boolean a1)");
+  expect(source).toContain("public static double nullableLength(String a0)");
+  expect(source).not.toContain("ntsI64ToNumber");
+  expect(source).not.toContain("NtsRangeError");
+  expect(source).not.toContain("JNI");
+});
+
+test("the JVM emitter constructs and fills Uint8Array values as Java byte arrays", () => {
+  const planned = planExecutableCompilation(byteValues, {
+    backend: "c",
+    externalFunctionRoots: ["filledBytes", "copiedBytes", "emptyBytes"],
+  });
+  expect(planned.ok).toBe(true);
+  if (!planned.ok) return;
+
+  const source = emitJvmSerializedModule(planned.plan.ir, {
+    className: "ByteValues",
+    functionExports: [{
+      functionName: "filledBytes",
+      methodName: "filledBytes",
+    }, {
+      functionName: "copiedBytes",
+      methodName: "copiedBytes",
+    }, {
+      functionName: "emptyBytes",
+      methodName: "emptyBytes",
+    }],
+  });
+
+  expect(source).toContain("public static byte[] filledBytes(double a0)");
+  expect(source).toContain("new byte[ntsUint8ArrayLength(");
+  expect(source).toContain(".clone()");
+  expect(source).toContain("new byte[0]");
+  expect(source).toMatch(/\[[^\]]+\] = \(byte\)/u);
+  expect(source).not.toContain("JNI");
+});
+
+test("the JVM emitter lowers JavaScript string operations directly in ART", () => {
+  const roots = [
+    "codeAt",
+    "characterAt",
+    "findText",
+    "hasText",
+    "startsWithText",
+    "endsWithText",
+    "sliced",
+    "substring",
+    "repeated",
+    "padded",
+    "trimmed",
+    "cased",
+    "wellFormed",
+    "repaired",
+  ];
+  const planned = planExecutableCompilation(stringIntrinsics, {
+    backend: "c",
+    externalFunctionRoots: roots,
+  });
+  expect(planned.ok).toBe(true);
+  if (!planned.ok) return;
+
+  const source = emitJvmSerializedModule(planned.plan.ir, {
+    className: "StringIntrinsics",
+    functionExports: roots.map((functionName) => ({
+      functionName,
+      methodName: functionName,
+    })),
+  });
+
+  expect(source).toContain("ntsStringCharCodeAt(");
+  expect(source).toContain("ntsStringSlice(");
+  expect(source).toContain("ntsStringRepeat(");
+  expect(source).toContain("ntsStringPad(");
+  expect(source).toContain("ntsStringToWellFormed(");
+  expect(source).toContain("java.util.Locale.ROOT");
   expect(source).not.toContain("JNI");
 });
 

@@ -140,6 +140,21 @@ interface JvmDirectClassCallbackSitePlan {
   readonly handlerName: string;
 }
 
+type JvmNullableReference =
+  | {
+      readonly kind: "handle";
+      readonly unionId: string;
+      readonly valueTag: number;
+      readonly nullTag: number;
+      readonly typeId: string;
+    }
+  | {
+      readonly kind: "string";
+      readonly unionId: string;
+      readonly valueTag: number;
+      readonly nullTag: number;
+    };
+
 function assertJavaIdentifier(value: string, role: string): void {
   if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(value)) {
     throw new Error(`Invalid JVM ${role} '${value}'`);
@@ -205,6 +220,9 @@ function scalarJavaType(type: IrType, loc: SrcLoc): string {
     case "f64": return "double";
     case "bool": return "boolean";
     case "string": return "String";
+    case "nativeScalar":
+      if (type.scalar === "i64") return "long";
+      throw new JvmUnsupportedError(`native scalar '${type.scalar}'`, loc);
     case "bytes":
       if (type.elem === "u8") return "byte[]";
       throw new JvmUnsupportedError(`bytes element '${type.elem}'`, loc);
@@ -218,6 +236,33 @@ function numberLiteral(value: number): string {
   if (value === -Infinity) return "Double.NEGATIVE_INFINITY";
   if (Object.is(value, -0)) return "-0.0d";
   return `${String(value)}d`;
+}
+
+function irContains(
+  value: unknown,
+  predicate: (record: Readonly<Record<string, unknown>>) => boolean,
+): boolean {
+  if (Array.isArray(value)) {
+    return value.some((entry) => irContains(entry, predicate));
+  }
+  if (value === null || typeof value !== "object") return false;
+  const record = value as Readonly<Record<string, unknown>>;
+  if (predicate(record)) return true;
+  return Object.values(record).some((entry) => irContains(entry, predicate));
+}
+
+function irStringIntrinsics(value: unknown, methods = new Set<string>()): ReadonlySet<string> {
+  if (Array.isArray(value)) {
+    for (const entry of value) irStringIntrinsics(entry, methods);
+    return methods;
+  }
+  if (value === null || typeof value !== "object") return methods;
+  const record = value as Readonly<Record<string, unknown>>;
+  if (record["kind"] === "strIntrinsic" && typeof record["method"] === "string") {
+    methods.add(record["method"]);
+  }
+  for (const entry of Object.values(record)) irStringIntrinsics(entry, methods);
+  return methods;
 }
 
 interface JvmMethodDescriptor {
@@ -317,6 +362,11 @@ class JavaEmitter {
   }>;
   readonly #directConnectionTypeIds: ReadonlySet<string>;
   readonly #machineIntegers: MachineIntegerFacts;
+  readonly #needsI64ToNumber: boolean;
+  readonly #needsNumberToString: boolean;
+  readonly #needsUint8ArrayLength: boolean;
+  readonly #needsUint8SetHelper: boolean;
+  readonly #stringIntrinsics: ReadonlySet<string>;
   readonly #directCallbackSites: JvmDirectCallbackSitePlan[] = [];
   readonly #directClassCallbackSites: JvmDirectClassCallbackSitePlan[] = [];
   #integerLocals: ReadonlySet<string> = new Set();
@@ -443,6 +493,52 @@ class JavaEmitter {
     this.#directCancellationBindings = cancellationBindings;
     this.#directConnectionTypeIds = connectionTypeIds;
     this.#machineIntegers = machineIntegerFacts(module);
+    this.#needsI64ToNumber = irContains(
+      module.functions,
+      (record) => record["kind"] === "nativeScalarToNumber",
+    );
+    this.#needsUint8ArrayLength = irContains(
+      module.functions,
+      (record) => {
+        if (record["kind"] !== "bytesNew") return false;
+        const source = record["source"] as
+          | Readonly<Record<string, unknown>>
+          | null
+          | undefined;
+        const type = source?.["type"] as
+          | Readonly<Record<string, unknown>>
+          | undefined;
+        return type?.["kind"] === "f64";
+      },
+    );
+    this.#needsUint8SetHelper = irContains(
+      module.functions,
+      (record) => record["kind"] === "bytesSet",
+    );
+    this.#stringIntrinsics = irStringIntrinsics(module.functions);
+    this.#needsNumberToString = irContains(
+      module.functions,
+      (record) => {
+        if (record["kind"] === "bytesNew") {
+          const source = record["source"] as
+            | Readonly<Record<string, unknown>>
+            | null
+            | undefined;
+          const type = source?.["type"] as
+            | Readonly<Record<string, unknown>>
+            | undefined;
+          return type?.["kind"] === "f64";
+        }
+        if (record["kind"] !== "toString") return false;
+        const operand = record["operand"] as
+          | Readonly<Record<string, unknown>>
+          | undefined;
+        const type = operand?.["type"] as
+          | Readonly<Record<string, unknown>>
+          | undefined;
+        return type?.["kind"] === "f64";
+      },
+    );
     if (this.#jvmNativeBindings.size !== (options.nativeBindings?.length ?? 0)) {
       throw new Error("JVM emission received duplicate direct binding ids");
     }
@@ -488,6 +584,80 @@ class JavaEmitter {
       "  }",
       "",
     );
+
+    if (this.#needsI64ToNumber) {
+      lines.push(
+        "  private static double ntsI64ToNumber(long value) {",
+        "    if (value == Long.MIN_VALUE) return -9223372036854775808.0d;",
+        "    long magnitude = Math.abs(value);",
+        "    int discardedBits = (64 - Long.numberOfLeadingZeros(magnitude)) - 53;",
+        "    if (discardedBits <= 0 ||",
+        "        (magnitude & ((1L << discardedBits) - 1L)) == 0L) {",
+        "      return (double)value;",
+        "    }",
+        "    throw new NtsRangeError(\"i64 value is not exactly representable as a number\");",
+        "  }",
+        "",
+      );
+    }
+    if (this.#needsUint8ArrayLength) {
+      lines.push(
+        "  private static int ntsUint8ArrayLength(double value) {",
+        "    if (Double.isNaN(value) || value == 0.0d) return 0;",
+        "    if (!Double.isFinite(value)) {",
+        "      throw new NtsRangeError(\"Invalid typed array length: \" + ntsNumberToString(value));",
+        "    }",
+        "    double whole = value < 0.0d ? Math.ceil(value) : Math.floor(value);",
+        "    if (whole < 0.0d || whole > Integer.MAX_VALUE) {",
+        "      throw new NtsRangeError(\"Invalid typed array length: \" + ntsNumberToString(value));",
+        "    }",
+        "    return (int)whole;",
+        "  }",
+        "",
+      );
+    }
+    if (this.#needsUint8SetHelper) {
+      lines.push(
+        "  private static int ntsUint8Index(double value, int length) {",
+        "    if (!Double.isFinite(value) || value != Math.rint(value) ||",
+        "        value < 0.0d || value >= length) {",
+        "      throw new NtsTrapError(\"Uint8Array index out of bounds\");",
+        "    }",
+        "    return (int)value;",
+        "  }",
+        "",
+        "  private static void ntsSetUint8(byte[] array, double index, double value) {",
+        "    array[ntsUint8Index(index, array.length)] = (byte)ntsToUint32(value);",
+        "  }",
+        "",
+      );
+    }
+    if (this.#needsNumberToString) {
+      lines.push(
+        "  private static String ntsNumberToString(double value) {",
+        "    if (Double.isNaN(value)) return \"NaN\";",
+        "    if (value == 0.0d) return \"0\";",
+        "    if (value == Double.POSITIVE_INFINITY) return \"Infinity\";",
+        "    if (value == Double.NEGATIVE_INFINITY) return \"-Infinity\";",
+        "    double magnitude = Math.abs(value);",
+        "    java.math.BigDecimal decimal = java.math.BigDecimal.valueOf(value).stripTrailingZeros();",
+        "    if (magnitude >= 0.000001d && magnitude < 1.0e21d) {",
+        "      return decimal.toPlainString();",
+        "    }",
+        "    String scientific = decimal.toString().replace('E', 'e');",
+        "    int exponent = scientific.indexOf('e');",
+        "    if (exponent >= 0 && scientific.charAt(exponent + 1) != '-' &&",
+        "        scientific.charAt(exponent + 1) != '+') {",
+        "      scientific = scientific.substring(0, exponent + 1) + \"+\" +",
+        "        scientific.substring(exponent + 1);",
+        "    }",
+        "    return scientific;",
+        "  }",
+        "",
+      );
+    }
+
+    lines.push(...this.#emitStringIntrinsicSupport());
 
     lines.push(...this.#emitBoxSupport());
 
@@ -542,8 +712,212 @@ class JavaEmitter {
     return lines.join("\n");
   }
 
+  #emitStringIntrinsicSupport(): string[] {
+    const methods = this.#stringIntrinsics;
+    const has = (...names: string[]): boolean => names.some((name) => methods.has(name));
+    const needsInteger = has(
+      "charCodeAt",
+      "charAt",
+      "indexOf",
+      "includes",
+      "slice",
+      "substring",
+      "repeat",
+      "padStart",
+      "padEnd",
+      "cpAt",
+    );
+    const needsPosition = has("indexOf", "includes", "substring");
+    const lines: string[] = [];
+    if (needsInteger) {
+      lines.push(
+        "  private static double ntsToIntegerOrInfinity(double value) {",
+        "    if (Double.isNaN(value) || value == 0.0d) return 0.0d;",
+        "    return value < 0.0d ? Math.ceil(value) : Math.floor(value);",
+        "  }",
+        "",
+      );
+    }
+    if (needsPosition) {
+      lines.push(
+        "  private static int ntsStringPosition(double value, int length) {",
+        "    double integer = ntsToIntegerOrInfinity(value);",
+        "    if (integer <= 0.0d) return 0;",
+        "    if (integer >= length) return length;",
+        "    return (int)integer;",
+        "  }",
+        "",
+      );
+    }
+    if (has("indexOf", "includes")) {
+      lines.push(
+        "  private static int ntsStringIndexOf(String value, String needle, double position) {",
+        "    return value.indexOf(needle, ntsStringPosition(position, value.length()));",
+        "  }",
+        "",
+      );
+    }
+    if (has("charCodeAt")) {
+      lines.push(
+        "  private static double ntsStringCharCodeAt(String value, double index) {",
+        "    double integer = ntsToIntegerOrInfinity(index);",
+        "    if (integer < 0.0d || integer >= value.length()) return Double.NaN;",
+        "    return (double)value.charAt((int)integer);",
+        "  }",
+        "",
+      );
+    }
+    if (has("charAt")) {
+      lines.push(
+        "  private static String ntsStringCharAt(String value, double index) {",
+        "    double integer = ntsToIntegerOrInfinity(index);",
+        "    if (integer < 0.0d || integer >= value.length()) return \"\";",
+        "    int position = (int)integer;",
+        "    return value.substring(position, position + 1);",
+        "  }",
+        "",
+      );
+    }
+    if (has("slice")) {
+      lines.push(
+        "  private static int ntsStringRelativeIndex(double value, int length) {",
+        "    double integer = ntsToIntegerOrInfinity(value);",
+        "    if (integer < 0.0d) {",
+        "      if (integer <= -length) return 0;",
+        "      return length + (int)integer;",
+        "    }",
+        "    if (integer >= length) return length;",
+        "    return (int)integer;",
+        "  }",
+        "",
+        "  private static String ntsStringSlice(String value, double start, double end) {",
+        "    int from = ntsStringRelativeIndex(start, value.length());",
+        "    int to = ntsStringRelativeIndex(end, value.length());",
+        "    return to <= from ? \"\" : value.substring(from, to);",
+        "  }",
+        "",
+      );
+    }
+    if (has("substring")) {
+      lines.push(
+        "  private static String ntsStringSubstring(String value, double start, double end) {",
+        "    int from = ntsStringPosition(start, value.length());",
+        "    int to = ntsStringPosition(end, value.length());",
+        "    return from <= to ? value.substring(from, to) : value.substring(to, from);",
+        "  }",
+        "",
+      );
+    }
+    if (has("repeat")) {
+      lines.push(
+        "  private static String ntsStringRepeat(String value, double count) {",
+        "    double integer = ntsToIntegerOrInfinity(count);",
+        "    if (integer < 0.0d || integer == Double.POSITIVE_INFINITY ||",
+        "        integer > Integer.MAX_VALUE ||",
+        "        (integer > 0.0d && value.length() > Integer.MAX_VALUE / integer)) {",
+        "      throw new NtsRangeError(\"Invalid count value\");",
+        "    }",
+        "    return value.repeat((int)integer);",
+        "  }",
+        "",
+      );
+    }
+    if (has("padStart", "padEnd")) {
+      lines.push(
+        "  private static String ntsStringPad(String value, double target, String fill, boolean start) {",
+        "    double integer = ntsToIntegerOrInfinity(target);",
+        "    if (integer <= value.length() || fill.isEmpty()) return value;",
+        "    if (!Double.isFinite(integer) || integer > Integer.MAX_VALUE) {",
+        "      throw new NtsRangeError(\"Invalid string length\");",
+        "    }",
+        "    int paddingLength = (int)integer - value.length();",
+        "    StringBuilder padding = new StringBuilder(paddingLength);",
+        "    while (paddingLength >= fill.length()) {",
+        "      padding.append(fill);",
+        "      paddingLength -= fill.length();",
+        "    }",
+        "    if (paddingLength > 0) padding.append(fill, 0, paddingLength);",
+        "    return start ? padding.append(value).toString() : value + padding;",
+        "  }",
+        "",
+      );
+    }
+    if (has("trim", "trimStart", "trimEnd")) {
+      lines.push(
+        "  private static boolean ntsStringWhitespace(char value) {",
+        "    return (value >= 0x0009 && value <= 0x000d) || value == 0x0020 ||",
+        "      value == 0x00a0 || value == 0x1680 ||",
+        "      (value >= 0x2000 && value <= 0x200a) ||",
+        "      value == 0x2028 || value == 0x2029 || value == 0x202f ||",
+        "      value == 0x205f || value == 0x3000 || value == 0xfeff;",
+        "  }",
+        "",
+        "  private static String ntsStringTrim(String value, boolean start, boolean end) {",
+        "    int from = 0;",
+        "    int to = value.length();",
+        "    if (start) while (from < to && ntsStringWhitespace(value.charAt(from))) from++;",
+        "    if (end) while (to > from && ntsStringWhitespace(value.charAt(to - 1))) to--;",
+        "    return from == 0 && to == value.length() ? value : value.substring(from, to);",
+        "  }",
+        "",
+      );
+    }
+    if (has("isWellFormed", "toWellFormed")) {
+      lines.push(
+        "  private static boolean ntsStringIsWellFormed(String value) {",
+        "    for (int index = 0; index < value.length(); index++) {",
+        "      char unit = value.charAt(index);",
+        "      if (Character.isHighSurrogate(unit)) {",
+        "        if (++index >= value.length() || !Character.isLowSurrogate(value.charAt(index))) return false;",
+        "      } else if (Character.isLowSurrogate(unit)) {",
+        "        return false;",
+        "      }",
+        "    }",
+        "    return true;",
+        "  }",
+        "",
+      );
+    }
+    if (has("toWellFormed")) {
+      lines.push(
+        "  private static String ntsStringToWellFormed(String value) {",
+        "    if (ntsStringIsWellFormed(value)) return value;",
+        "    StringBuilder result = new StringBuilder(value.length());",
+        "    for (int index = 0; index < value.length(); index++) {",
+        "      char unit = value.charAt(index);",
+        "      if (Character.isHighSurrogate(unit) && index + 1 < value.length() &&",
+        "          Character.isLowSurrogate(value.charAt(index + 1))) {",
+        "        result.append(unit).append(value.charAt(++index));",
+        "      } else if (Character.isSurrogate(unit)) {",
+        "        result.append((char)0xfffd);",
+        "      } else {",
+        "        result.append(unit);",
+        "      }",
+        "    }",
+        "    return result.toString();",
+        "  }",
+        "",
+      );
+    }
+    if (has("cpAt")) {
+      lines.push(
+        "  private static String ntsStringCodePointAt(String value, double index) {",
+        "    double integer = ntsToIntegerOrInfinity(index);",
+        "    if (integer < 0.0d || integer >= value.length()) return \"\";",
+        "    int position = (int)integer;",
+        "    char first = value.charAt(position);",
+        "    int end = Character.isHighSurrogate(first) && position + 1 < value.length() &&",
+        "        Character.isLowSurrogate(value.charAt(position + 1)) ? position + 2 : position + 1;",
+        "    return value.substring(position, end);",
+        "  }",
+        "",
+      );
+    }
+    return lines;
+  }
+
   #emitBoxSupport(): string[] {
-    const kinds = new Set<"boolean" | "double" | "reference">();
+    const kinds = new Set<"boolean" | "double" | "long" | "reference">();
     for (const fn of this.#module.functions) {
       for (const local of fn.locals) {
         if (local.boxed === true && local.mutable) {
@@ -555,6 +929,32 @@ class JavaEmitter {
       }
     }
     const lines: string[] = [];
+    if (
+      this.#needsI64ToNumber ||
+      this.#needsUint8ArrayLength ||
+      this.#stringIntrinsics.has("repeat") ||
+      this.#stringIntrinsics.has("padStart") ||
+      this.#stringIntrinsics.has("padEnd")
+    ) {
+      lines.push(
+        "  private static final class NtsRangeError extends RuntimeException {",
+        "    private NtsRangeError(String message) {",
+        "      super(message);",
+        "    }",
+        "  }",
+        "",
+      );
+    }
+    if (this.#needsUint8SetHelper) {
+      lines.push(
+        "  private static final class NtsTrapError extends Error {",
+        "    private NtsTrapError(String message) {",
+        "      super(message);",
+        "    }",
+        "  }",
+        "",
+      );
+    }
     if (kinds.has("double")) {
       lines.push(
         "  private static final class NtsDoubleBox {",
@@ -573,6 +973,18 @@ class JavaEmitter {
         "    private boolean value;",
         "",
         "    private NtsBooleanBox(boolean value) {",
+        "      this.value = value;",
+        "    }",
+        "  }",
+        "",
+      );
+    }
+    if (kinds.has("long")) {
+      lines.push(
+        "  private static final class NtsLongBox {",
+        "    private long value;",
+        "",
+        "    private NtsLongBox(long value) {",
         "      this.value = value;",
         "    }",
         "  }",
@@ -971,8 +1383,9 @@ class JavaEmitter {
       if (
         local.nativeFrame !== undefined &&
         local.type.kind !== "nativeHandle" &&
+        local.type.kind !== "string" &&
         !isJvmByteArray(local.type) &&
-        this.#nullableHandle(local.type) === null
+        this.#nullableReference(local.type) === null
       ) {
         throw new JvmUnsupportedError("frame-bounded non-handle locals", fn.loc);
       }
@@ -1060,6 +1473,25 @@ class JavaEmitter {
               : this.#expr(stmt.value)
           };`,
         ];
+      case "bytesSet": {
+        if (
+          !isJvmByteArray(stmt.arr.type) ||
+          stmt.index.type.kind !== "f64" ||
+          stmt.value.type.kind !== "f64"
+        ) {
+          throw new JvmUnsupportedError("non-Uint8Array element write", stmt.loc);
+        }
+        const array = this.#expr(stmt.arr);
+        const index = this.#directIntExpr(stmt.index);
+        if (index === null) {
+          return [
+            `${pad}ntsSetUint8(${array}, ${this.#expr(stmt.index)}, ${this.#expr(stmt.value)});`,
+          ];
+        }
+        const integerValue = this.#directIntExpr(stmt.value);
+        const value = integerValue ?? `ntsToUint32(${this.#expr(stmt.value)})`;
+        return [`${pad}(${array})[${index}] = (byte)(${value});`];
+      }
       case "exprStmt":
         return [`${pad}${this.#expr(stmt.expr)};`];
       case "return":
@@ -1145,24 +1577,163 @@ class JavaEmitter {
   #expr(expr: IrExpr): string {
     switch (expr.kind) {
       case "numLit": return numberLiteral(expr.value);
-      case "boolLit": return expr.value ? "true" : "false";
-      case "strLit": return javaString(expr.value);
-      case "strIntrinsic": {
-        if (
-          expr.method !== "length" ||
-          expr.receiver.type.kind !== "string" ||
-          expr.args.length !== 0 ||
-          expr.type.kind !== "f64"
-        ) {
+      case "nativeScalarLit": {
+        if (expr.type.scalar !== "i64") {
           throw new JvmUnsupportedError(
-            `string intrinsic '${expr.method}'`,
+            `native scalar literal '${expr.type.scalar}'`,
             expr.loc,
           );
         }
-        /* A ScriptC string is already java.lang.String in this backend.
-         * Java length() and JavaScript length both count UTF-16 code units,
-         * so no encoding bridge or temporary representation is needed. */
-        return `(double)((${this.#expr(expr.receiver)}).length())`;
+        return expr.value === "-9223372036854775808"
+          ? "Long.MIN_VALUE"
+          : `${expr.value}L`;
+      }
+      case "nativeIntegerBin": {
+        if (
+          expr.type.scalar !== "i64" ||
+          expr.left.type.kind !== "nativeScalar" ||
+          expr.left.type.scalar !== "i64" ||
+          expr.right.type.kind !== "nativeScalar" ||
+          expr.right.type.scalar !== "i64" ||
+          !["+", "-", "*", "&", "|", "^"].includes(expr.op)
+        ) {
+          throw new JvmUnsupportedError(
+            `native integer operator '${expr.op}' over '${expr.type.scalar}'`,
+            expr.loc,
+          );
+        }
+        return `(${this.#expr(expr.left)} ${expr.op} ${this.#expr(expr.right)})`;
+      }
+      case "nativeScalarToNumber": {
+        if (
+          expr.value.type.kind !== "nativeScalar" ||
+          expr.value.type.scalar !== "i64"
+        ) {
+          throw new JvmUnsupportedError(
+            `native scalar '${expr.value.type.kind === "nativeScalar" ? expr.value.type.scalar : expr.value.type.kind}' to number`,
+            expr.loc,
+          );
+        }
+        return `ntsI64ToNumber(${this.#expr(expr.value)})`;
+      }
+      case "boolLit": return expr.value ? "true" : "false";
+      case "strLit": return javaString(expr.value);
+      case "strConcat": {
+        if (
+          expr.left.type.kind !== "string" ||
+          expr.right.type.kind !== "string" ||
+          expr.type.kind !== "string"
+        ) {
+          throw new JvmUnsupportedError("non-string concatenation", expr.loc);
+        }
+        return `(${this.#expr(expr.left)} + ${this.#expr(expr.right)})`;
+      }
+      case "strEq": {
+        if (
+          expr.left.type.kind !== "string" ||
+          expr.right.type.kind !== "string" ||
+          expr.type.kind !== "bool"
+        ) {
+          throw new JvmUnsupportedError("non-string equality", expr.loc);
+        }
+        return `${expr.negated ? "!" : ""}(${this.#expr(expr.left)}).equals(${this.#expr(expr.right)})`;
+      }
+      case "toString": {
+        if (expr.operand.type.kind === "string") return this.#expr(expr.operand);
+        if (expr.operand.type.kind === "bool") {
+          return `Boolean.toString(${this.#expr(expr.operand)})`;
+        }
+        if (expr.operand.type.kind === "f64") {
+          const integer = this.#directIntExpr(expr.operand);
+          return integer === null
+            ? `ntsNumberToString(${this.#expr(expr.operand)})`
+            : `Integer.toString(${integer})`;
+        }
+        throw new JvmUnsupportedError(
+          `string conversion from '${expr.operand.type.kind}'`,
+          expr.loc,
+        );
+      }
+      case "strIntrinsic": {
+        if (expr.receiver.type.kind !== "string") {
+          throw new JvmUnsupportedError(
+            `string intrinsic '${expr.method}' on '${expr.receiver.type.kind}'`,
+            expr.loc,
+          );
+        }
+        const receiver = this.#expr(expr.receiver);
+        const argument = (index: number): string => this.#expr(expr.args[index]!);
+        switch (expr.method) {
+          case "length":
+            /* Java and JavaScript both count UTF-16 code units. */
+            return `(double)((${receiver}).length())`;
+          case "charCodeAt":
+            return `ntsStringCharCodeAt(${receiver}, ${argument(0)})`;
+          case "charAt":
+            return `ntsStringCharAt(${receiver}, ${argument(0)})`;
+          case "indexOf":
+            return `(double)ntsStringIndexOf(${receiver}, ${argument(0)}, ${
+              expr.args[1] === undefined ? "0.0d" : argument(1)
+            })`;
+          case "includes":
+            return `(ntsStringIndexOf(${receiver}, ${argument(0)}, ${
+              expr.args[1] === undefined ? "0.0d" : argument(1)
+            }) >= 0)`;
+          case "startsWith":
+            return `((${receiver}).startsWith(${argument(0)}))`;
+          case "endsWith":
+            return `((${receiver}).endsWith(${argument(0)}))`;
+          case "slice":
+            return `ntsStringSlice(${receiver}, ${
+              expr.args[0] === undefined ? "0.0d" : argument(0)
+            }, ${
+              expr.args[1] === undefined ? "Double.POSITIVE_INFINITY" : argument(1)
+            })`;
+          case "substring":
+            return `ntsStringSubstring(${receiver}, ${argument(0)}, ${
+              expr.args[1] === undefined ? "Double.POSITIVE_INFINITY" : argument(1)
+            })`;
+          case "repeat":
+            return `ntsStringRepeat(${receiver}, ${argument(0)})`;
+          case "trim":
+            return `ntsStringTrim(${receiver}, true, true)`;
+          case "trimStart":
+            return `ntsStringTrim(${receiver}, true, false)`;
+          case "trimEnd":
+            return `ntsStringTrim(${receiver}, false, true)`;
+          case "split":
+            throw new JvmUnsupportedError("string intrinsic 'split'", expr.loc);
+          case "padStart":
+            return `ntsStringPad(${receiver}, ${argument(0)}, ${argument(1)}, true)`;
+          case "padEnd":
+            return `ntsStringPad(${receiver}, ${argument(0)}, ${argument(1)}, false)`;
+          case "toLowerCase":
+            return `((${receiver}).toLowerCase(java.util.Locale.ROOT))`;
+          case "toUpperCase":
+            return `((${receiver}).toUpperCase(java.util.Locale.ROOT))`;
+          case "isWellFormed":
+            return `ntsStringIsWellFormed(${receiver})`;
+          case "toWellFormed":
+            return `ntsStringToWellFormed(${receiver})`;
+          case "cpAt":
+            return `ntsStringCodePointAt(${receiver}, ${argument(0)})`;
+        }
+      }
+      case "bytesNew": {
+        if (!isJvmByteArray(expr.type)) {
+          throw new JvmUnsupportedError("non-Uint8Array byte construction", expr.loc);
+        }
+        if (expr.source === null) return "new byte[0]";
+        if (expr.source.type.kind === "f64") {
+          return `new byte[ntsUint8ArrayLength(${this.#expr(expr.source)})]`;
+        }
+        if (isJvmByteArray(expr.source.type)) {
+          return `((${this.#expr(expr.source)}).clone())`;
+        }
+        throw new JvmUnsupportedError(
+          `Uint8Array construction from '${expr.source.type.kind}'`,
+          expr.loc,
+        );
       }
       case "bytesIntrinsic": {
         if (
@@ -1271,9 +1842,9 @@ class JavaEmitter {
       case "ternary":
         return `(${this.#expr(expr.cond)} ? ${this.#expr(expr.then)} : ${this.#expr(expr.else_)})`;
       case "unionWrap": {
-        const nullable = this.#nullableHandle(expr.type);
+        const nullable = this.#nullableReference(expr.type);
         if (nullable === null || expr.unionId !== nullable.unionId) {
-          throw new JvmUnsupportedError("non-nullable-handle union construction", expr.loc);
+          throw new JvmUnsupportedError("non-nullable-reference union construction", expr.loc);
         }
         if (expr.tag === nullable.nullTag) {
           if (expr.value.kind !== "unitLit" || expr.value.type.kind !== "nullT") {
@@ -1284,39 +1855,43 @@ class JavaEmitter {
           return "null";
         }
         if (
-          expr.tag !== nullable.handleTag ||
-          expr.value.type.kind !== "nativeHandle" ||
-          expr.value.type.typeId !== nullable.typeId
+          expr.tag !== nullable.valueTag ||
+          (nullable.kind === "handle"
+            ? expr.value.type.kind !== "nativeHandle" ||
+              expr.value.type.typeId !== nullable.typeId
+            : expr.value.type.kind !== "string")
         ) {
           throw new Error(
-            `JVM nullable-handle union '${expr.unionId}' received the wrong arm`,
+            `JVM nullable-reference union '${expr.unionId}' received the wrong arm`,
           );
         }
         return this.#expr(expr.value);
       }
       case "unionNarrow": {
-        const nullable = this.#nullableHandle(expr.value.type);
+        const nullable = this.#nullableReference(expr.value.type);
         if (
           nullable === null ||
           expr.unionId !== nullable.unionId ||
-          expr.tag !== nullable.handleTag ||
-          expr.type.kind !== "nativeHandle" ||
-          expr.type.typeId !== nullable.typeId
+          expr.tag !== nullable.valueTag ||
+          (nullable.kind === "handle"
+            ? expr.type.kind !== "nativeHandle" ||
+              expr.type.typeId !== nullable.typeId
+            : expr.type.kind !== "string")
         ) {
-          throw new JvmUnsupportedError("non-nullable-handle union narrowing", expr.loc);
+          throw new JvmUnsupportedError("non-nullable-reference union narrowing", expr.loc);
         }
         /* The checked IR proves this arm is live. A nullable Java reference
          * carries the same proof without a tag box or ownership operation. */
         return this.#expr(expr.value);
       }
       case "unionIsTag": {
-        const nullable = this.#nullableHandle(expr.value.type);
+        const nullable = this.#nullableReference(expr.value.type);
         if (
           nullable === null ||
           expr.unionId !== nullable.unionId ||
-          (expr.tag !== nullable.handleTag && expr.tag !== nullable.nullTag)
+          (expr.tag !== nullable.valueTag && expr.tag !== nullable.nullTag)
         ) {
-          throw new JvmUnsupportedError("non-nullable-handle union tag tests", expr.loc);
+          throw new JvmUnsupportedError("non-nullable-reference union tag tests", expr.loc);
         }
         const equality = (expr.tag === nullable.nullTag) !== expr.negated;
         return `(${this.#expr(expr.value)} ${equality ? "==" : "!="} null)`;
@@ -1412,8 +1987,9 @@ class JavaEmitter {
     if (
       expr.resultMode !== undefined &&
       expr.type.kind !== "nativeHandle" &&
+      expr.type.kind !== "string" &&
       !isJvmByteArray(expr.type) &&
-      this.#nullableHandle(expr.type) === null
+      this.#nullableReference(expr.type) === null
     ) {
       throw new JvmUnsupportedError("frame-bounded native call results", expr.loc);
     }
@@ -1729,14 +2305,19 @@ class JavaEmitter {
     if (type.kind === "bool") return descriptor === "Z";
     if (type.kind === "void") return descriptor === "V";
     if (type.kind === "f64") return "BCSIFD".includes(descriptor);
+    if (type.kind === "nativeScalar") {
+      return type.scalar === "i64" && descriptor === "J";
+    }
     if (type.kind === "string") return descriptor === "Ljava/lang/String;";
     if (isJvmByteArray(type)) return descriptor === "[B";
     if (type.kind === "nativeHandle") {
       return descriptor === `L${this.#nativeHandleOwner(type.typeId, loc)};`;
     }
-    const nullable = this.#nullableHandle(type);
+    const nullable = this.#nullableReference(type);
     if (nullable !== null) {
-      return descriptor === `L${this.#nativeHandleOwner(nullable.typeId, loc)};`;
+      return nullable.kind === "string"
+        ? descriptor === "Ljava/lang/String;"
+        : descriptor === `L${this.#nativeHandleOwner(nullable.typeId, loc)};`;
     }
     return false;
   }
@@ -1759,7 +2340,7 @@ class JavaEmitter {
       if (
         expr.type.kind !== "string" &&
         expr.type.kind !== "nativeHandle" &&
-        this.#nullableHandle(expr.type) === null
+        this.#nullableReference(expr.type) === null
       ) {
         throw new JvmUnsupportedError(
           `direct reference argument from '${expr.type.kind}'`,
@@ -1769,6 +2350,13 @@ class JavaEmitter {
       return this.#expr(expr);
     }
     if (descriptor === "Z" && expr.type.kind === "bool") return this.#expr(expr);
+    if (
+      descriptor === "J" &&
+      expr.type.kind === "nativeScalar" &&
+      expr.type.scalar === "i64"
+    ) {
+      return this.#expr(expr);
+    }
     if (expr.type.kind !== "f64") {
       throw new JvmUnsupportedError(
         `direct scalar '${descriptor}' from '${expr.type.kind}'`,
@@ -1914,11 +2502,13 @@ class JavaEmitter {
     if (type.kind === "nativeHandle") {
       return this.#javaHandleType(type.typeId, loc);
     }
-    const nullable = this.#nullableHandle(type);
+    const nullable = this.#nullableReference(type);
     if (nullable !== null) {
       /* Java references already carry null. Keeping T | null unboxed is
        * both the exact representation and what lets javac verify uses. */
-      return this.#javaHandleType(nullable.typeId, loc);
+      return nullable.kind === "string"
+        ? "String"
+        : this.#javaHandleType(nullable.typeId, loc);
     }
     return scalarJavaType(type, loc);
   }
@@ -1927,9 +2517,10 @@ class JavaEmitter {
     return local.boxed === true && local.mutable;
   }
 
-  #boxKind(type: IrType, loc: SrcLoc): "boolean" | "double" | "reference" {
+  #boxKind(type: IrType, loc: SrcLoc): "boolean" | "double" | "long" | "reference" {
     if (type.kind === "f64") return "double";
     if (type.kind === "bool") return "boolean";
+    if (type.kind === "nativeScalar" && type.scalar === "i64") return "long";
     const javaType = this.#javaType(type, loc);
     if (javaType === "void" || javaType === "double" || javaType === "boolean") {
       throw new JvmUnsupportedError(`mutable capture type '${type.kind}'`, loc);
@@ -1941,6 +2532,7 @@ class JavaEmitter {
     switch (this.#boxKind(type, loc)) {
       case "double": return "NtsDoubleBox";
       case "boolean": return "NtsBooleanBox";
+      case "long": return "NtsLongBox";
       case "reference": return `NtsReferenceBox<${this.#javaType(type, loc)}>`;
     }
   }
@@ -1958,6 +2550,7 @@ class JavaEmitter {
     switch (this.#boxKind(type, loc)) {
       case "double": return "0.0d";
       case "boolean": return "false";
+      case "long": return "0L";
       case "reference": return "null";
     }
   }
@@ -1995,6 +2588,29 @@ class JavaEmitter {
     return nullable?.unionId === type.unionId
       ? { ...nullable, typeId: handle.typeId }
       : null;
+  }
+
+  #nullableReference(type: IrType): JvmNullableReference | null {
+    const handle = this.#nullableHandle(type);
+    if (handle !== null) {
+      return {
+        kind: "handle",
+        unionId: handle.unionId,
+        valueTag: handle.handleTag,
+        nullTag: handle.nullTag,
+        typeId: handle.typeId,
+      };
+    }
+    if (type.kind !== "union") return null;
+    const definition = this.#module.unions?.find(
+      (candidate) => candidate.id === type.unionId,
+    );
+    if (definition === undefined || definition.arms.length !== 2) return null;
+    const valueTag = definition.arms.findIndex((arm) => arm.kind === "string");
+    const nullTag = definition.arms.findIndex((arm) => arm.kind === "nullT");
+    return valueTag < 0 || nullTag < 0
+      ? null
+      : { kind: "string", unionId: type.unionId, valueTag, nullTag };
   }
 
   #nativeHandleOwner(typeId: string, loc: SrcLoc): string {
