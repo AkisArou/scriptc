@@ -1894,6 +1894,10 @@ class JavaEmitter {
     if (has("num.parseInt")) {
       lines.push(
         "  private static double ntsParseInt(String value, double radix) {",
+        "    return ntsParseInt(value, ntsToInt32(radix));",
+        "  }",
+        "",
+        "  private static double ntsParseInt(String value, int parsedRadix) {",
         "    int length = value.length();",
         "    int index = 0;",
         "    while (index < length && ntsIsJsWhitespace(value.charAt(index))) index += 1;",
@@ -1902,7 +1906,6 @@ class JavaEmitter {
         "      if (value.charAt(index) == '-') sign = -1.0d;",
         "      index += 1;",
         "    }",
-        "    int parsedRadix = ntsToInt32(radix);",
         "    boolean stripPrefix = true;",
         "    if (parsedRadix != 0) {",
         "      if (parsedRadix < 2 || parsedRadix > 36) return Double.NaN;",
@@ -1916,10 +1919,21 @@ class JavaEmitter {
         "      parsedRadix = 16;",
         "    }",
         "    int digitStart = index;",
-        "    while (index < length && ntsDigitValue(value.charAt(index)) < parsedRadix) index += 1;",
+        "    long shortResult = 0L;",
+        "    int significantDigits = 0;",
+        "    while (index < length) {",
+        "      int digit = ntsDigitValue(value.charAt(index));",
+        "      if (digit >= parsedRadix) break;",
+        "      if (significantDigits != 0 || digit != 0) {",
+        "        significantDigits += 1;",
+        "        if (significantDigits <= 12) shortResult = shortResult * parsedRadix + digit;",
+        "      }",
+        "      index += 1;",
+        "    }",
         "    if (index == digitStart) return Double.NaN;",
-        "    while (digitStart < index && value.charAt(digitStart) == '0') digitStart += 1;",
-        "    if (digitStart == index) return sign * 0.0d;",
+        "    if (significantDigits == 0) return sign * 0.0d;",
+        "    if (significantDigits <= 12) return sign * (double)shortResult;",
+        "    while (value.charAt(digitStart) == '0') digitStart += 1;",
         "    return sign * ntsDigitsToDouble(value, digitStart, index, parsedRadix);",
         "  }",
         "",
@@ -4425,8 +4439,10 @@ class JavaEmitter {
             return `ntsNumberIsSafeInteger(${argument(0)})`;
           case "num.sameValue":
             return `ntsNumberSameValue(${argument(0)}, ${argument(1)})`;
-          case "num.parseInt":
-            return `ntsParseInt(${this.#expr(expr.args[0]!)}, ${argument(1)})`;
+          case "num.parseInt": {
+            const radix = this.#directIntExpr(expr.args[1]!);
+            return `ntsParseInt(${this.#expr(expr.args[0]!)}, ${radix ?? argument(1)})`;
+          }
           case "num.parseFloat":
             return `ntsParseFloat(${this.#expr(expr.args[0]!)})`;
           case "num.fromString":

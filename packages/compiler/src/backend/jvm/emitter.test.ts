@@ -527,6 +527,8 @@ test("the JVM emitter keeps numeric recognition and parsing inside ART", () => {
   expect(source).toContain("Double.doubleToLongBits(");
   expect(source).toContain("ntsIsJsWhitespace(");
   expect(source).toContain("ntsParseInt(");
+  expect(source).toContain("ntsParseInt(String value, int parsedRadix)");
+  expect(source).toContain("if (significantDigits <= 12)");
   expect(source).toContain("ntsParseFloat(");
   expect(source).toContain("ntsStringToNumber(");
   expect(source).toContain("new java.math.BigInteger(");
