@@ -1731,7 +1731,9 @@ class JavaEmitter {
     if (has("math.trunc")) {
       lines.push(
         "  private static double ntsMathTrunc(double value) {",
-        "    if (Double.isNaN(value) || Double.isInfinite(value) || value == 0.0d) return value;",
+        /* Math.ceil/floor already preserve NaN, infinities, and signed zero.
+         * Selecting between them therefore implements truncation without a
+         * redundant special-value classification on every ordinary input. */
         "    return value < 0.0d ? Math.ceil(value) : Math.floor(value);",
         "  }",
         "",
@@ -1740,7 +1742,8 @@ class JavaEmitter {
     if (has("math.round")) {
       lines.push(
         "  private static double ntsMathRound(double value) {",
-        "    if (Double.isNaN(value) || Double.isInfinite(value) || value == 0.0d) return value;",
+        /* The arithmetic below propagates NaN and both infinities. Math.floor
+         * preserves -0, while the final branch supplies -0 for (-0.5, 0). */
         "    double floor = Math.floor(value);",
         "    double result = value - floor < 0.5d ? floor : floor + 1.0d;",
         "    return result == 0.0d && value < 0.0d ? -0.0d : result;",

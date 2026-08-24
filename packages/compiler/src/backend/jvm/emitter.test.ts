@@ -499,6 +499,17 @@ test("the JVM emitter keeps static JavaScript math as primitive JVM operations",
   expect(source).toContain("Math.abs(");
   expect(source).toContain("ntsMathRound(");
   expect(source).toContain("ntsMathMaxArray(");
+  const trunc = source.match(
+    /private static double ntsMathTrunc\(double value\) \{[\s\S]*?^  \}/mu,
+  )?.[0];
+  const round = source.match(
+    /private static double ntsMathRound\(double value\) \{[\s\S]*?^  \}/mu,
+  )?.[0];
+  expect(trunc).toBeDefined();
+  expect(round).toBeDefined();
+  const redundantSpecialCase = /Double\.isNaN|Double\.isInfinite|value == 0\.0d/u;
+  expect(trunc).not.toMatch(redundantSpecialCase);
+  expect(round).not.toMatch(redundantSpecialCase);
   expect(source).not.toContain("JNI");
 });
 

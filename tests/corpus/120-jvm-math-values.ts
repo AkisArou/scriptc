@@ -19,6 +19,15 @@ export function mathEdges(): number {
   if (1 / Math.trunc(-0.1) < 0) checksum += 128;
   if (1 / Math.ceil(-0.1) < 0) checksum += 256;
   if (1 / Math.abs(-0) > 0) checksum += 512;
+  const positiveInfinity = 1 / 0;
+  const negativeInfinity = -1 / 0;
+  if (Math.trunc(nan) !== Math.trunc(nan)) checksum += 1024;
+  if (Math.trunc(positiveInfinity) === positiveInfinity) checksum += 2048;
+  if (Math.trunc(negativeInfinity) === negativeInfinity) checksum += 4096;
+  if (Math.round(nan) !== Math.round(nan)) checksum += 8192;
+  if (Math.round(positiveInfinity) === positiveInfinity) checksum += 16384;
+  if (Math.round(negativeInfinity) === negativeInfinity) checksum += 32768;
+  if (1 / Math.round(-0) < 0) checksum += 65536;
   return checksum;
 }
 
