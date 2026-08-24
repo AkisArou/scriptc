@@ -327,6 +327,9 @@ test("the JVM emitter gives fixed-shape object literals exact Java fields", () =
 test("the JVM emitter keeps optional references nullable and scalar unions exact", () => {
   const roots = [
     "optionalNumber",
+    "optionalNumberIdentity",
+    "optionalNumberKinds",
+    "optionalNumberArray",
     "optionalRecord",
     "optionalString",
     "optionalArray",
@@ -347,6 +350,13 @@ test("the JVM emitter keeps optional references nullable and scalar unions exact
     })),
   });
 
+  expect(source.match(/private static final class NtsUnion/g) ?? []).toHaveLength(1);
+  expect(source.match(/private static int ntsUnion\d+Tag\(long value\)/g) ?? [])
+    .toHaveLength(2);
+  expect(source).toContain("Double.doubleToLongBits");
+  expect(source).toContain("Double.longBitsToDouble");
+  expect(source).toContain("long[] data");
+  expect(source).toMatch(/\blong l_[0-9a-f]+ =/u);
   expect(source).toContain("final int tag");
   expect(source).toContain("final double payload");
   expect(source).toContain("final String payload");
@@ -390,6 +400,9 @@ test("the JVM emitter keeps typed maps in exact key and value arrays", () => {
   expect(source).toContain("double[] values");
   expect(source).toContain("String[] values");
   expect(source).toContain("boolean[] values");
+  expect(source).toMatch(/private long get\(String key\)/u);
+  expect(source).toContain("return Double.doubleToLongBits(values[index]);");
+  expect(source).toContain("Double.longBitsToDouble(");
   expect(source).not.toContain("HashMap");
   expect(source).not.toContain("LinkedHashMap");
   expect(source).not.toContain("Object[]");

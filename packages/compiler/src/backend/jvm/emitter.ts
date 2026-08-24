@@ -151,6 +151,22 @@ interface JvmNullableReference {
   readonly valueType: IrType;
 }
 
+/** A union with one number arm and only null/undefined siblings fits in one
+ * primitive word. Number payloads use Double.doubleToLongBits, which
+ * canonicalizes every NaN while preserving every non-NaN bit including -0.
+ * Distinct non-canonical quiet-NaN words can therefore name the unit arms
+ * without allocating a tag object or losing any JavaScript-observable number
+ * state. */
+interface JvmPrimitiveNumberUnion {
+  readonly unionId: string;
+  readonly className: string;
+  readonly valueTag: number;
+  readonly unitTags: readonly {
+    readonly tag: number;
+    readonly kind: "nullT" | "undefinedT";
+  }[];
+}
+
 function assertJavaIdentifier(value: string, role: string): void {
   if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(value)) {
     throw new Error(`Invalid JVM ${role} '${value}'`);
@@ -1879,6 +1895,18 @@ class JavaEmitter {
         ? `((${left}) == (${right}) || (Double.isNaN(${left}) && Double.isNaN(${right})))`
         : `((${left}) == (${right}))`;
     }
+    const primitiveNumber = this.#primitiveNumberUnion(type);
+    if (primitiveNumber !== null) {
+      const tag = this.#primitiveNumberUnionTagName(primitiveNumber);
+      const leftNumber = `Double.longBitsToDouble(${left})`;
+      const rightNumber = `Double.longBitsToDouble(${right})`;
+      const numberEquality = sameValueZero
+        ? `((${leftNumber}) == (${rightNumber}) || ` +
+          `(Double.isNaN(${leftNumber}) && Double.isNaN(${rightNumber})))`
+        : `((${leftNumber}) == (${rightNumber}))`;
+      return `((${tag}(${left}) == ${tag}(${right})) && ` +
+        `(${tag}(${left}) != ${primitiveNumber.valueTag} || ${numberEquality}))`;
+    }
     if (
       type.kind === "bool" ||
       (type.kind === "nativeScalar" && type.scalar === "i64")
@@ -2002,7 +2030,22 @@ class JavaEmitter {
     const entry = this.#functions.get(this.#module.entry)!;
     const lines: string[] = [];
     for (const plan of this.#unionTypes.values()) {
-      if (this.#nullableReference({ kind: "union", unionId: plan.definition.id }) !== null) {
+      const type = { kind: "union", unionId: plan.definition.id } as const;
+      if (this.#nullableReference(type) !== null) {
+        continue;
+      }
+      const primitiveNumber = this.#primitiveNumberUnion(type);
+      if (primitiveNumber !== null) {
+        lines.push(
+          `  private static int ${this.#primitiveNumberUnionTagName(primitiveNumber)}(long value) {`,
+        );
+        for (const unit of primitiveNumber.unitTags) {
+          lines.push(
+            `    if (value == ${this.#primitiveNumberUnionSentinel(primitiveNumber, unit.tag)}) ` +
+              `return ${unit.tag};`,
+          );
+        }
+        lines.push(`    return ${primitiveNumber.valueTag};`, "  }", "");
         continue;
       }
       const payloads = plan.definition.arms
@@ -2594,6 +2637,14 @@ class JavaEmitter {
       }
       return "null";
     }
+    const primitiveNumber = this.#primitiveNumberUnion(type);
+    if (primitiveNumber !== null) {
+      const unit = primitiveNumber.unitTags.find(({ kind }) => kind === "undefinedT");
+      if (unit === undefined) {
+        throw new Error("JVM emitter bug: map get primitive union lacks undefined");
+      }
+      return this.#primitiveNumberUnionSentinel(primitiveNumber, unit.tag);
+    }
     const plan = this.#unionPlan(type.unionId, loc);
     const tag = plan.definition.arms.findIndex((arm) => arm.kind === "undefinedT");
     if (tag < 0) throw new Error("JVM emitter bug: map get union lacks undefined");
@@ -2620,6 +2671,7 @@ class JavaEmitter {
       return [`      return ${expression};`];
     }
     const result = this.#unionPlan(getType.unionId, loc);
+    const resultPrimitiveNumber = this.#primitiveNumberUnion(getType);
     const resultTag = (arm: IrType): number => {
       const tag = result.definition.arms.findIndex(
         (candidate) => typeKey(candidate) === typeKey(arm),
@@ -2629,6 +2681,15 @@ class JavaEmitter {
     };
     const resultValue = (arm: IrType, payload: string): string => {
       const tag = resultTag(arm);
+      if (resultPrimitiveNumber !== null) {
+        if (this.#isUnitType(arm)) {
+          return this.#primitiveNumberUnionSentinel(resultPrimitiveNumber, tag);
+        }
+        if (arm.kind !== "f64") {
+          throw new Error("JVM emitter bug: primitive Map union has a non-number value");
+        }
+        return `Double.doubleToLongBits(${payload})`;
+      }
       return this.#isUnitType(arm)
         ? `${result.className}.unit${tag}`
         : `${result.className}.wrap${tag}(${payload})`;
@@ -2646,6 +2707,27 @@ class JavaEmitter {
         )};`,
         `      return ${resultValue(sourceNullable.valueType, "value")};`,
       ];
+    }
+    const sourcePrimitiveNumber = this.#primitiveNumberUnion(valueType);
+    if (sourcePrimitiveNumber !== null) {
+      const source = this.#unionPlan(valueType.unionId, loc);
+      const lines = [
+        `      long value = ${expression};`,
+        `      switch (${this.#primitiveNumberUnionTagName(sourcePrimitiveNumber)}(value)) {`,
+      ];
+      for (const [tag, arm] of source.definition.arms.entries()) {
+        lines.push(
+          `        case ${tag}: return ${resultValue(
+            arm,
+            this.#isUnitType(arm) ? "value" : "Double.longBitsToDouble(value)",
+          )};`,
+        );
+      }
+      lines.push(
+        "        default: throw new NtsTrapError(\"Invalid stored Map union tag\");",
+        "      }",
+      );
+      return lines;
     }
     const source = this.#unionPlan(valueType.unionId, loc);
     const lines = [
@@ -3985,6 +4067,33 @@ class JavaEmitter {
           }
           return this.#expr(expr.value);
         }
+        const primitiveNumber = this.#primitiveNumberUnion(expr.type);
+        if (primitiveNumber !== null) {
+          if (expr.unionId !== primitiveNumber.unionId) {
+            throw new Error(
+              `JVM primitive number union '${expr.unionId}' has the wrong type`,
+            );
+          }
+          if (expr.tag === primitiveNumber.valueTag) {
+            if (expr.value.type.kind !== "f64") {
+              throw new Error(
+                `JVM primitive number union '${expr.unionId}' received a non-number payload`,
+              );
+            }
+            return `Double.doubleToLongBits(${this.#expr(expr.value)})`;
+          }
+          const unit = primitiveNumber.unitTags.find(({ tag }) => tag === expr.tag);
+          if (
+            unit === undefined ||
+            expr.value.kind !== "unitLit" ||
+            expr.value.type.kind !== unit.kind
+          ) {
+            throw new Error(
+              `JVM primitive number union '${expr.unionId}' received the wrong unit arm`,
+            );
+          }
+          return this.#primitiveNumberUnionSentinel(primitiveNumber, expr.tag);
+        }
         const plan = this.#unionPlan(expr.unionId, expr.loc);
         const arm = plan.definition.arms[expr.tag];
         if (
@@ -4019,6 +4128,19 @@ class JavaEmitter {
            * carries the same proof without a tag box or ownership operation. */
           return this.#expr(expr.value);
         }
+        const primitiveNumber = this.#primitiveNumberUnion(expr.value.type);
+        if (primitiveNumber !== null) {
+          if (
+            expr.unionId !== primitiveNumber.unionId ||
+            expr.tag !== primitiveNumber.valueTag ||
+            expr.type.kind !== "f64"
+          ) {
+            throw new Error(
+              `JVM primitive number union '${expr.unionId}' narrows the wrong arm`,
+            );
+          }
+          return `Double.longBitsToDouble(${this.#expr(expr.value)})`;
+        }
         const plan = this.#unionPlan(expr.unionId, expr.loc);
         const arm = plan.definition.arms[expr.tag];
         if (
@@ -4045,6 +4167,20 @@ class JavaEmitter {
           }
           const equality = (expr.tag === nullable.unitTag) !== expr.negated;
           return `(${this.#expr(expr.value)} ${equality ? "==" : "!="} null)`;
+        }
+        const primitiveNumber = this.#primitiveNumberUnion(expr.value.type);
+        if (primitiveNumber !== null) {
+          if (
+            expr.unionId !== primitiveNumber.unionId ||
+            (expr.tag !== primitiveNumber.valueTag &&
+              !primitiveNumber.unitTags.some(({ tag }) => tag === expr.tag))
+          ) {
+            throw new Error(
+              `JVM primitive number union '${expr.unionId}' tests an unknown arm`,
+            );
+          }
+          return `(${this.#primitiveNumberUnionTagName(primitiveNumber)}(` +
+            `${this.#expr(expr.value)}) ${expr.negated ? "!=" : "=="} ${expr.tag})`;
         }
         const plan = this.#unionPlan(expr.unionId, expr.loc);
         if (
@@ -4803,6 +4939,9 @@ class JavaEmitter {
        * declared null arm; undefined is never silently projected to JNI. */
       return this.#javaType(nullable.valueType, loc);
     }
+    if (this.#primitiveNumberUnion(type) !== null) {
+      return "long";
+    }
     if (type.kind === "union") {
       return this.#unionPlan(type.unionId, loc).className;
     }
@@ -4894,6 +5033,7 @@ class JavaEmitter {
     if (type.kind === "bool") return "boolean";
     if (type.kind === "nativeScalar" && type.scalar === "i64") return "long";
     const javaType = this.#javaType(type, loc);
+    if (javaType === "long") return "long";
     if (javaType === "void" || javaType === "double" || javaType === "boolean") {
       throw new JvmUnsupportedError(`mutable capture type '${type.kind}'`, loc);
     }
@@ -4978,6 +5118,48 @@ class JavaEmitter {
       unitKind: unit.kind as "nullT" | "undefinedT",
       valueType: definition.arms[valueTag]!,
     };
+  }
+
+  #primitiveNumberUnion(type: IrType): JvmPrimitiveNumberUnion | null {
+    if (type.kind !== "union") return null;
+    const plan = this.#unionTypes.get(type.unionId);
+    if (plan === undefined || plan.definition.arms.length < 2) return null;
+    const valueTags = plan.definition.arms
+      .map((arm, tag) => ({ arm, tag }))
+      .filter(({ arm }) => arm.kind === "f64");
+    if (valueTags.length !== 1) return null;
+    const unitTags = plan.definition.arms
+      .map((arm, tag) => ({ arm, tag }))
+      .filter(({ arm }) => this.#isUnitType(arm))
+      .map(({ arm, tag }) => ({
+        tag,
+        kind: arm.kind as "nullT" | "undefinedT",
+      }));
+    if (unitTags.length !== plan.definition.arms.length - 1) return null;
+    return {
+      unionId: type.unionId,
+      className: plan.className,
+      valueTag: valueTags[0]!.tag,
+      unitTags,
+    };
+  }
+
+  #primitiveNumberUnionSentinel(
+    union: JvmPrimitiveNumberUnion,
+    tag: number,
+  ): string {
+    const index = union.unitTags.findIndex((unit) => unit.tag === tag);
+    if (index < 0) {
+      throw new Error(
+        `JVM primitive number union '${union.unionId}' has no unit tag ${tag}`,
+      );
+    }
+    const bits = 0x7ff8000000000000n + BigInt(index + 1);
+    return `0x${bits.toString(16)}L`;
+  }
+
+  #primitiveNumberUnionTagName(union: JvmPrimitiveNumberUnion): string {
+    return `nts${union.className.slice("Nts".length)}Tag`;
   }
 
   #nativeHandleOwner(typeId: string, loc: SrcLoc): string {
