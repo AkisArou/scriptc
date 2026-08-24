@@ -48,3 +48,40 @@ export function namedPipeline(seed: number): number {
     .map(addIndex)
     .reduce((sum, value) => sum + value, 0);
 }
+
+let spreadEvaluation = 0;
+
+function evaluatedNumber(marker: number): number {
+  spreadEvaluation = spreadEvaluation * 10 + marker;
+  return marker;
+}
+
+function evaluatedPair(marker: number): number[] {
+  spreadEvaluation = spreadEvaluation * 10 + marker;
+  return [marker, marker + 1];
+}
+
+export function spreadLiteralOrder(): number {
+  spreadEvaluation = 0;
+  const values = [
+    evaluatedNumber(1),
+    ...evaluatedPair(2),
+    evaluatedNumber(3),
+    ...evaluatedPair(4),
+    evaluatedNumber(5),
+  ];
+  return spreadEvaluation +
+    values[0]! +
+    values[1]! * 10 +
+    values[2]! * 100 +
+    values[3]! * 1_000 +
+    values[4]! * 10_000 +
+    values[5]! * 100_000 +
+    values[6]! * 1_000_000;
+}
+
+export function selfSpreadArray(): number {
+  const values = [1, 2, 3];
+  const length = values.push(...values);
+  return length * 1_000 + values[3]! * 100 + values[4]! * 10 + values[5]!;
+}

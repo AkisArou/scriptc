@@ -270,6 +270,11 @@ interface JvmArrayPlan {
   readonly className: string;
 }
 
+interface JvmArrayLiteralPlan {
+  readonly expression: Extract<IrExpr, { readonly kind: "arrayLit" }>;
+  readonly factoryName: string;
+}
+
 interface JvmMapPlan {
   readonly type: Extract<IrType, { readonly kind: "map" }>;
   readonly className: string;
@@ -279,6 +284,13 @@ interface JvmMapPlan {
 interface JvmMapLiteralPlan {
   readonly expression: Extract<IrExpr, { readonly kind: "mapNew" }>;
   readonly factoryName: string;
+}
+
+interface JvmSetPlan {
+  readonly type: Extract<IrType, { readonly kind: "set" }>;
+  readonly className: string;
+  readonly seeded: boolean;
+  readonly toArray: boolean;
 }
 
 interface JvmFunctionPlan {
@@ -387,6 +399,33 @@ function irArrayTypes(value: unknown): ReadonlyMap<string, JvmArrayPlan> {
   );
 }
 
+function irArrayLiterals(
+  value: unknown,
+): ReadonlyMap<Extract<IrExpr, { readonly kind: "arrayLit" }>, JvmArrayLiteralPlan> {
+  const expressions: Extract<IrExpr, { readonly kind: "arrayLit" }>[] = [];
+  const visit = (candidate: unknown): void => {
+    if (Array.isArray(candidate)) {
+      for (const entry of candidate) visit(entry);
+      return;
+    }
+    if (candidate === null || typeof candidate !== "object") return;
+    const record = candidate as Readonly<Record<string, unknown>>;
+    if (
+      record["kind"] === "arrayLit" &&
+      Array.isArray(record["spreads"]) &&
+      record["spreads"].length > 0
+    ) {
+      expressions.push(candidate as Extract<IrExpr, { readonly kind: "arrayLit" }>);
+    }
+    for (const child of Object.values(record)) visit(child);
+  };
+  visit(value);
+  return new Map(expressions.map((expression, index) => [expression, Object.freeze({
+    expression,
+    factoryName: `ntsArrayLiteral${index}`,
+  })]));
+}
+
 function irMapTypes(value: unknown): ReadonlyMap<string, JvmMapPlan> {
   const types = new Map<string, {
     type: Extract<IrType, { readonly kind: "map" }>;
@@ -474,6 +513,70 @@ function irMapLiterals(
     expression,
     factoryName: `ntsMapLiteral${index}`,
   })]));
+}
+
+function irSetTypes(value: unknown): ReadonlyMap<string, JvmSetPlan> {
+  const types = new Map<string, {
+    type: Extract<IrType, { readonly kind: "set" }>;
+    seeded: boolean;
+    toArray: boolean;
+  }>();
+  const note = (
+    type: Extract<IrType, { readonly kind: "set" }>,
+    seeded = false,
+    toArray = false,
+  ): void => {
+    const key = typeKey(type);
+    const prior = types.get(key);
+    types.set(key, {
+      type,
+      seeded: (prior?.seeded ?? false) || seeded,
+      toArray: (prior?.toArray ?? false) || toArray,
+    });
+  };
+  const visit = (candidate: unknown): void => {
+    if (Array.isArray(candidate)) {
+      for (const entry of candidate) visit(entry);
+      return;
+    }
+    if (candidate === null || typeof candidate !== "object") return;
+    const record = candidate as Readonly<Record<string, unknown>>;
+    if (
+      record["kind"] === "set" &&
+      record["elem"] !== null &&
+      typeof record["elem"] === "object"
+    ) {
+      note(candidate as Extract<IrType, { readonly kind: "set" }>);
+    }
+    const expressionType = record["type"] as
+      | Readonly<Record<string, unknown>>
+      | undefined;
+    if (record["kind"] === "setNew" && expressionType?.["kind"] === "set") {
+      note(
+        expressionType as Extract<IrType, { readonly kind: "set" }>,
+        record["seed"] !== undefined,
+      );
+    }
+    const receiver = record["receiver"] as Readonly<Record<string, unknown>> | undefined;
+    const receiverType = receiver?.["type"] as Readonly<Record<string, unknown>> | undefined;
+    if (record["kind"] === "setIntrinsic" && receiverType?.["kind"] === "set") {
+      note(
+        receiverType as Extract<IrType, { readonly kind: "set" }>,
+        false,
+        record["method"] === "toArray",
+      );
+    }
+    for (const child of Object.values(record)) visit(child);
+  };
+  visit(value);
+  return new Map(
+    [...types.entries()]
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([key, plan], index) => [key, Object.freeze({
+        ...plan,
+        className: `NtsSet${index}`,
+      })]),
+  );
 }
 
 function irFunctionTypes(value: unknown): ReadonlyMap<string, JvmFunctionPlan> {
@@ -644,11 +747,16 @@ class JavaEmitter {
   readonly #needsUint8SetHelper: boolean;
   readonly #stringIntrinsics: ReadonlySet<string>;
   readonly #arrayTypes: ReadonlyMap<string, JvmArrayPlan>;
+  readonly #arrayLiterals: ReadonlyMap<
+    Extract<IrExpr, { readonly kind: "arrayLit" }>,
+    JvmArrayLiteralPlan
+  >;
   readonly #mapTypes: ReadonlyMap<string, JvmMapPlan>;
   readonly #mapLiterals: ReadonlyMap<
     Extract<IrExpr, { readonly kind: "mapNew" }>,
     JvmMapLiteralPlan
   >;
+  readonly #setTypes: ReadonlyMap<string, JvmSetPlan>;
   readonly #functionTypes: ReadonlyMap<string, JvmFunctionPlan>;
   readonly #functionValues: ReadonlyMap<string, JvmFunctionValuePlan>;
   readonly #recordTypes: ReadonlyMap<string, JvmRecordPlan>;
@@ -817,8 +925,10 @@ class JavaEmitter {
       module.unions,
     ];
     this.#arrayTypes = irArrayTypes(programTypes);
+    this.#arrayLiterals = irArrayLiterals(module.functions);
     this.#mapTypes = irMapTypes(programTypes);
     this.#mapLiterals = irMapLiterals(module.functions);
+    this.#setTypes = irSetTypes(programTypes);
     this.#functionTypes = irFunctionTypes(programTypes);
     this.#functionValues = irFunctionValues(module.functions, this.#functions);
     this.#recordTypes = irRecordTypes(module.records ?? []);
@@ -976,6 +1086,8 @@ class JavaEmitter {
     lines.push(...this.#emitUnionSupport());
 
     lines.push(...this.#emitMapSupport());
+
+    lines.push(...this.#emitSetSupport());
 
     lines.push(...this.#emitBoxSupport());
 
@@ -1345,6 +1457,18 @@ class JavaEmitter {
         "      return (double)length;",
         "    }",
         "",
+        `    private double pushSpread(${plan.className} values) {`,
+        "      int count = values.length;",
+        "      if (count > Integer.MAX_VALUE - length) {",
+        "        throw new NtsRangeError(\"Invalid array length\");",
+        "      }",
+        "      int next = length + count;",
+        "      ensure(next);",
+        "      System.arraycopy(values.data, 0, data, length, count);",
+        "      length = next;",
+        "      return (double)length;",
+        "    }",
+        "",
         `    private ${elementType} pop() {`,
         "      if (length == 0) throw new NtsTrapError(\"Cannot pop an empty array\");",
         `      ${elementType} value = data[--length];`,
@@ -1368,6 +1492,28 @@ class JavaEmitter {
         "  }",
         "",
       );
+    }
+    for (const literal of this.#arrayLiterals.values()) {
+      const { expression } = literal;
+      if (expression.type.kind !== "array") {
+        throw new Error("JVM emitter bug: arrayLit has a non-array type");
+      }
+      const array = this.#arrayClassName(expression.type, expression.loc);
+      const elementType = this.#javaType(expression.type.elem, expression.loc);
+      const spreads = new Set(expression.spreads ?? []);
+      const parameters = expression.elems.map((_, index) =>
+        `${spreads.has(index) ? array : elementType} v${index}`
+      );
+      lines.push(
+        `  private static ${array} ${literal.factoryName}(${parameters.join(", ")}) {`,
+        `    ${array} value = new ${array}(new ${elementType}[]{});`,
+      );
+      for (const [index] of expression.elems.entries()) {
+        lines.push(
+          `    value.${spreads.has(index) ? "pushSpread" : "push"}(v${index});`,
+        );
+      }
+      lines.push("    return value;", "  }", "");
     }
     return lines;
   }
@@ -1838,6 +1984,258 @@ class JavaEmitter {
     return lines;
   }
 
+  /** Sets share Map's hashed insertion-order discipline but have no value
+   * payload. Keeping a separate exact element array avoids both generic Java
+   * collections and the otherwise-wasted unit/value storage. */
+  #emitSetSupport(): string[] {
+    if (this.#setTypes.size === 0) return [];
+    const entry = this.#functions.get(this.#module.entry)!;
+    const lines = [
+      "  private static int ntsSetIndex(double value, int count) {",
+      "    if (!Double.isFinite(value) || value != Math.rint(value) ||",
+      "        value < 0.0d || value >= count) {",
+      "      throw new NtsTrapError(\"Set iteration index out of bounds\");",
+      "    }",
+      "    return (int)value;",
+      "  }",
+      "",
+    ];
+    for (const plan of this.#setTypes.values()) {
+      const { elem } = plan.type;
+      if (elem.kind !== "string" && elem.kind !== "f64") {
+        throw new JvmUnsupportedError(`set element type '${elem.kind}'`, entry.loc);
+      }
+      const elementType = this.#javaType(elem, entry.loc);
+      const elementZero = this.#defaultJavaValue(elem, entry.loc);
+      const arrayType: Extract<IrType, { readonly kind: "array" }> = {
+        kind: "array",
+        elem,
+      };
+      const arrayClass = plan.seeded || plan.toArray
+        ? this.#arrayClassName(arrayType, entry.loc)
+        : null;
+      const elementHash = elem.kind === "string"
+        ? "element.hashCode()"
+        : [
+            "long bits = element == 0.0d ? 0L : Double.doubleToLongBits(element);",
+            "int hash = (int)(bits ^ (bits >>> 32));",
+            "return hash;",
+          ];
+      const equality = this.#arrayElementEquality(
+        elem,
+        "elements[entry]",
+        "element",
+        true,
+      );
+      lines.push(
+        `  private static final class ${plan.className} {`,
+        `    private ${elementType}[] elements = new ${elementType}[8];`,
+        "    private boolean[] live = new boolean[8];",
+        "    private int[] table = new int[16];",
+        "    private int entryCount;",
+        "    private int liveCount;",
+        "    private int tableUsed;",
+        "    private int iterationDepth;",
+        "",
+        `    private ${plan.className}() {}`,
+        "",
+      );
+      if (plan.seeded) {
+        if (arrayClass === null) {
+          throw new Error("JVM emitter bug: seeded Set has no array representation");
+        }
+        lines.push(
+          `    private ${plan.className}(${arrayClass} seed) {`,
+          "      this();",
+          "      for (int index = 0; index < seed.length; index++) {",
+          "        add(seed.data[index]);",
+          "      }",
+          "    }",
+          "",
+        );
+      }
+      lines.push(`    private int elementHash(${elementType} element) {`);
+      if (Array.isArray(elementHash)) {
+        for (const line of elementHash) lines.push(`      ${line}`);
+      } else {
+        lines.push(`      return ${elementHash};`);
+      }
+      lines.push(
+        "    }",
+        "",
+        "    private int spread(int hash) {",
+        "      hash ^= hash >>> 16;",
+        "      hash *= 0x7feb352d;",
+        "      hash ^= hash >>> 15;",
+        "      hash *= 0x846ca68b;",
+        "      return hash ^ (hash >>> 16);",
+        "    }",
+        "",
+        `    private int lookupSlot(${elementType} element) {`,
+        "      int slot = spread(elementHash(element)) & (table.length - 1);",
+        "      int deleted = -1;",
+        "      while (true) {",
+        "        int encoded = table[slot];",
+        "        if (encoded == 0) {",
+        "          int insertion = deleted >= 0 ? deleted : slot;",
+        "          return -insertion - 1;",
+        "        }",
+        "        if (encoded < 0) {",
+        "          if (deleted < 0) deleted = slot;",
+        "        } else {",
+        "          int entry = encoded - 1;",
+        `          if (live[entry] && ${equality}) return slot;`,
+        "        }",
+        "        slot = (slot + 1) & (table.length - 1);",
+        "      }",
+        "    }",
+        "",
+        "    private void rebuildTable(int capacity) {",
+        "      table = new int[capacity];",
+        "      tableUsed = 0;",
+        "      for (int entry = 0; entry < entryCount; entry++) {",
+        "        if (!live[entry]) continue;",
+        "        int slot = -lookupSlot(elements[entry]) - 1;",
+        "        table[slot] = entry + 1;",
+        "        tableUsed++;",
+        "      }",
+        "    }",
+        "",
+        "    private void ensureEntries(int need) {",
+        "      if (need <= elements.length) return;",
+        "      int capacity = elements.length;",
+        "      while (capacity < need) {",
+        "        if (capacity > Integer.MAX_VALUE / 2) {",
+        "          capacity = need;",
+        "          break;",
+        "        }",
+        "        capacity *= 2;",
+        "      }",
+        "      elements = java.util.Arrays.copyOf(elements, capacity);",
+        "      live = java.util.Arrays.copyOf(live, capacity);",
+        "    }",
+        "",
+        "    private void compact() {",
+        "      if (iterationDepth != 0 || entryCount == liveCount) return;",
+        "      int next = 0;",
+        "      int oldCount = entryCount;",
+        "      for (int entry = 0; entry < oldCount; entry++) {",
+        "        if (!live[entry]) continue;",
+        "        if (next != entry) elements[next] = elements[entry];",
+        "        live[next] = true;",
+        "        next++;",
+        "      }",
+        `      java.util.Arrays.fill(elements, next, oldCount, ${elementZero});`,
+        "      java.util.Arrays.fill(live, next, oldCount, false);",
+        "      entryCount = next;",
+        "      rebuildTable(table.length);",
+        "    }",
+        "",
+        `    private void add(${elementType} element) {`,
+        "      int slot = lookupSlot(element);",
+        "      if (slot >= 0) return;",
+        "      if (iterationDepth == 0 && entryCount > 16 && entryCount > liveCount * 2) {",
+        "        compact();",
+        "      }",
+        "      if ((long)(tableUsed + 1) * 4L >= (long)table.length * 3L) {",
+        "        int capacity = table.length;",
+        "        if ((long)(liveCount + 1) * 4L >= (long)table.length * 3L) {",
+        "          if (capacity > (1 << 29)) throw new NtsRangeError(\"Set is too large\");",
+        "          capacity *= 2;",
+        "        }",
+        "        rebuildTable(capacity);",
+        "      }",
+        "      ensureEntries(entryCount + 1);",
+        "      slot = lookupSlot(element);",
+        "      if (slot >= 0) return;",
+        "      int insertion = -slot - 1;",
+        "      if (table[insertion] == 0) tableUsed++;",
+        "      elements[entryCount] = element;",
+        "      live[entryCount] = true;",
+        "      table[insertion] = entryCount + 1;",
+        "      entryCount++;",
+        "      liveCount++;",
+        "    }",
+        "",
+        `    private boolean has(${elementType} element) {`,
+        "      return lookupSlot(element) >= 0;",
+        "    }",
+        "",
+        `    private boolean delete(${elementType} element) {`,
+        "      int slot = lookupSlot(element);",
+        "      if (slot < 0) return false;",
+        "      int index = table[slot] - 1;",
+        "      table[slot] = -1;",
+        "      live[index] = false;",
+        `      elements[index] = ${elementZero};`,
+        "      liveCount--;",
+        "      return true;",
+        "    }",
+        "",
+        "    private double size() {",
+        "      return (double)liveCount;",
+        "    }",
+        "",
+        "    private void clear() {",
+        `      java.util.Arrays.fill(elements, 0, entryCount, ${elementZero});`,
+        "      java.util.Arrays.fill(live, 0, entryCount, false);",
+        "      java.util.Arrays.fill(table, 0);",
+        "      liveCount = 0;",
+        "      tableUsed = 0;",
+        "      if (iterationDepth == 0) entryCount = 0;",
+        "    }",
+        "",
+        "    private double iterCount() {",
+        "      return (double)entryCount;",
+        "    }",
+        "",
+        "    private boolean iterLive(double position) {",
+        "      return live[ntsSetIndex(position, entryCount)];",
+        "    }",
+        "",
+        `    private ${elementType} iterKey(double position) {`,
+        "      int index = ntsSetIndex(position, entryCount);",
+        "      if (!live[index]) throw new NtsTrapError(\"Set iterator read a deleted element\");",
+        "      return elements[index];",
+        "    }",
+        "",
+        "    private void iterEnter() {",
+        "      if (iterationDepth == Integer.MAX_VALUE) {",
+        "        throw new NtsRangeError(\"Set iteration nesting is too deep\");",
+        "      }",
+        "      iterationDepth++;",
+        "    }",
+        "",
+        "    private void iterExit() {",
+        "      if (iterationDepth == 0) {",
+        "        throw new NtsTrapError(\"Set iterator exited without entering\");",
+        "      }",
+        "      iterationDepth--;",
+        "      if (iterationDepth == 0) compact();",
+        "    }",
+        "",
+      );
+      if (plan.toArray) {
+        if (arrayClass === null) {
+          throw new Error("JVM emitter bug: Set toArray has no array representation");
+        }
+        lines.push(
+          `    private ${arrayClass} toArray() {`,
+          `      ${elementType}[] result = new ${elementType}[liveCount];`,
+          "      int next = 0;",
+          "      for (int entry = 0; entry < entryCount; entry++) {",
+          "        if (live[entry]) result[next++] = elements[entry];",
+          "      }",
+          `      return new ${arrayClass}(result);`,
+          "    }",
+          "",
+        );
+      }
+      lines.push("  }", "");
+    }
+    return lines;
+  }
+
   #mapGetMiss(type: IrType, loc: SrcLoc): string {
     if (type.kind !== "union") {
       throw new Error("JVM emitter bug: map get result is not a union");
@@ -1967,6 +2365,7 @@ class JavaEmitter {
       this.#needsUint8ArrayLength ||
       this.#arrayTypes.size > 0 ||
       this.#mapTypes.size > 0 ||
+      this.#setTypes.size > 0 ||
       this.#stringIntrinsics.has("repeat") ||
       this.#stringIntrinsics.has("padStart") ||
       this.#stringIntrinsics.has("padEnd")
@@ -1983,7 +2382,8 @@ class JavaEmitter {
     if (
       this.#needsUint8SetHelper ||
       this.#arrayTypes.size > 0 ||
-      this.#mapTypes.size > 0
+      this.#mapTypes.size > 0 ||
+      this.#setTypes.size > 0
     ) {
       lines.push(
         "  private static final class NtsTrapError extends Error {",
@@ -2828,7 +3228,13 @@ class JavaEmitter {
           throw new Error("JVM emitter bug: arrayLit has a non-array type");
         }
         if ((expr.spreads?.length ?? 0) !== 0) {
-          throw new JvmUnsupportedError("array literal spreads", expr.loc);
+          const literal = this.#arrayLiterals.get(expr);
+          if (literal === undefined) {
+            throw new Error("JVM emitter bug: spread array literal was not planned");
+          }
+          return `${literal.factoryName}(${expr.elems.map((element) =>
+            this.#expr(element)
+          ).join(", ")})`;
         }
         const elementType = this.#javaType(expr.type.elem, expr.loc);
         return `new ${this.#arrayClassName(expr.type, expr.loc)}(new ${elementType}[]{${
@@ -2890,6 +3296,50 @@ class JavaEmitter {
             return `(${receiver}).iterExit()`;
         }
       }
+      case "setNew": {
+        if (expr.type.kind !== "set") {
+          throw new Error("JVM emitter bug: setNew has a non-set type");
+        }
+        const plan = this.#setPlan(expr.type, expr.loc);
+        return expr.seed === undefined
+          ? `new ${plan.className}()`
+          : `new ${plan.className}(${this.#expr(expr.seed)})`;
+      }
+      case "setIntrinsic": {
+        if (expr.receiver.type.kind !== "set") {
+          throw new Error("JVM emitter bug: setIntrinsic on a non-set value");
+        }
+        const plan = this.#setPlan(expr.receiver.type, expr.loc);
+        const receiver = this.#expr(expr.receiver);
+        const args = expr.args.map((arg) => this.#expr(arg));
+        switch (expr.method) {
+          case "add":
+            return `(${receiver}).add(${args[0]})`;
+          case "has":
+            return `(${receiver}).has(${args[0]})`;
+          case "delete":
+            return `(${receiver}).delete(${args[0]})`;
+          case "size":
+            return `(${receiver}).size()`;
+          case "clear":
+            return `(${receiver}).clear()`;
+          case "iterCount":
+            return `(${receiver}).iterCount()`;
+          case "iterLive":
+            return `(${receiver}).iterLive(${args[0]})`;
+          case "iterKey":
+            return `(${receiver}).iterKey(${args[0]})`;
+          case "iterEnter":
+            return `(${receiver}).iterEnter()`;
+          case "iterExit":
+            return `(${receiver}).iterExit()`;
+          case "toArray":
+            if (!plan.toArray) {
+              throw new Error("JVM emitter bug: Set toArray result was not planned");
+            }
+            return `(${receiver}).toArray()`;
+        }
+      }
       case "recordLit": {
         const plan = this.#recordLiterals.get(expr);
         if (plan === undefined) {
@@ -2927,6 +3377,8 @@ class JavaEmitter {
             return `(${receiver}).length()`;
           case "push":
             return `(${receiver}).push(${expr.args.map((arg) => this.#expr(arg)).join(", ")})`;
+          case "pushSpread":
+            return `(${receiver}).pushSpread(${this.#expr(expr.args[0]!)})`;
           case "pop":
             return `(${receiver}).pop()`;
           case "indexOf":
@@ -3822,6 +4274,9 @@ class JavaEmitter {
     if (type.kind === "map") {
       return this.#mapPlan(type, loc).className;
     }
+    if (type.kind === "set") {
+      return this.#setPlan(type, loc).className;
+    }
     if (type.kind === "func") {
       return this.#functionInterfaceName(type, loc);
     }
@@ -3871,6 +4326,20 @@ class JavaEmitter {
     if (plan === undefined) {
       throw new JvmUnsupportedError(
         `unplanned map type '${typeKey(type)}'`,
+        loc,
+      );
+    }
+    return plan;
+  }
+
+  #setPlan(
+    type: Extract<IrType, { readonly kind: "set" }>,
+    loc: SrcLoc,
+  ): JvmSetPlan {
+    const plan = this.#setTypes.get(typeKey(type));
+    if (plan === undefined) {
+      throw new JvmUnsupportedError(
+        `unplanned set type '${typeKey(type)}'`,
         loc,
       );
     }
@@ -3975,6 +4444,7 @@ class JavaEmitter {
       case "string":
       case "array":
       case "map":
+      case "set":
       case "object":
       case "record":
       case "nativeHandle":

@@ -36,6 +36,9 @@ const unionValues = fileURLToPath(
 const mapValues = fileURLToPath(
   new URL("../../../../../tests/corpus/118-jvm-map-values.ts", import.meta.url),
 );
+const setValues = fileURLToPath(
+  new URL("../../../../../tests/corpus/119-jvm-set-values.ts", import.meta.url),
+);
 const classFields = fileURLToPath(
   new URL("../../../../../tests/corpus/111-jvm-class-fields.ts", import.meta.url),
 );
@@ -256,6 +259,8 @@ test("the JVM emitter specializes ordinary arrays instead of boxing their elemen
     "capturedPipeline",
     "mutateCapturedTotal",
     "namedPipeline",
+    "spreadLiteralOrder",
+    "selfSpreadArray",
   ];
   const planned = planExecutableCompilation(arrayValues, {
     backend: "c",
@@ -276,6 +281,8 @@ test("the JVM emitter specializes ordinary arrays instead of boxing their elemen
   expect(source).toContain("String[] data");
   expect(source).toContain("boolean[] data");
   expect(source).toContain("double push(double... values)");
+  expect(source).toContain("double pushSpread(NtsArray");
+  expect(source).toContain("System.arraycopy(values.data, 0, data, length, count)");
   expect(source).toContain("boolean includes(String value)");
   expect(source).not.toContain("ArrayList");
   expect(source).not.toContain("Object[] data");
@@ -376,6 +383,42 @@ test("the JVM emitter keeps typed maps in exact key and value arrays", () => {
   expect(source).not.toContain("HashMap");
   expect(source).not.toContain("LinkedHashMap");
   expect(source).not.toContain("Object[]");
+  expect(source).not.toContain("Double.valueOf");
+  expect(source).not.toContain("JNI");
+});
+
+test("the JVM emitter keeps typed sets in exact element arrays", () => {
+  const roots = [
+    "stringSet",
+    "numberSet",
+    "seededEvaluationOrderSet",
+    "spreadSet",
+    "liveIterationSet",
+    "clearDuringIterationSet",
+    "combinedSets",
+    "rehashAndCompactSet",
+  ];
+  const planned = planExecutableCompilation(setValues, {
+    backend: "c",
+    externalFunctionRoots: roots,
+  });
+  expect(planned.ok).toBe(true);
+  if (!planned.ok) return;
+
+  const source = emitJvmSerializedModule(planned.plan.ir, {
+    className: "SetValues",
+    functionExports: roots.map((functionName) => ({
+      functionName,
+      methodName: functionName,
+    })),
+  });
+
+  expect(source).toContain("String[] elements");
+  expect(source).toContain("double[] elements");
+  expect(source).toContain("int[] table");
+  expect(source).not.toContain("Object[]");
+  expect(source).not.toContain("HashSet");
+  expect(source).not.toContain("LinkedHashSet");
   expect(source).not.toContain("Double.valueOf");
   expect(source).not.toContain("JNI");
 });
