@@ -103,6 +103,9 @@ export function emitModule(
 export interface Temp {
   name: string;
   type: IrType;
+  /** Call-scoped view into storage owned by a stable lexical binding. It is
+   * neither released nor moved by the operation consuming the view. */
+  borrowed?: boolean;
   /** A statically allocated value whose refcount is permanently immortal.
    * It obeys ordinary move/ownership semantics without joining a release
    * frame: retaining or releasing it cannot change its lifetime. */
@@ -1867,7 +1870,7 @@ export class CEmitter {
   newBorrowedTemp(type: IrType, init: string): Temp {
     const name = `sc_t${this.tempCounter++}`;
     this.line(`${cDecl(type, name)} = ${init};`);
-    return { name, type };
+    return { name, type, borrowed: true };
   }
 
   /** A statically allocated refcounted value. Unlike a borrow, it is safe to

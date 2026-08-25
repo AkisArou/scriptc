@@ -1254,3 +1254,117 @@ export function nativeArgumentHandle(
     }
   }
 }
+
+/** The storage a synchronous borrowed-handle argument may read without
+ * manufacturing an owned temporary. `unionTag` is descriptive rather than a
+ * check: a `unionNarrow` has already been proved by frontend control flow, so
+ * the emitters perform the same unchecked peek as ordinary narrowing. */
+export interface NativeCallHandleBorrowSource {
+  readonly localId: string;
+  readonly unionTag: number | null;
+}
+
+/** Whether one logical argument is used solely as a non-owning native handle.
+ *
+ * A logical argument can feed more than one physical parameter. Borrowing is
+ * valid only when every physical use of this argument is the ordinary handle
+ * projection and none transfers ownership. This is deliberately phrased in
+ * terms of the binding contract, before either backend has emitted a value. */
+function nativeCallArgumentBorrowsHandle(
+  binding: IrNativeBinding,
+  argument: number,
+): boolean {
+  let found = false;
+  for (const parameter of binding.parameters) {
+    const projection = parameter.projection;
+    if (!("argument" in projection) || projection.argument !== argument) continue;
+    if (
+      projection.kind !== "argument" ||
+      parameter.type.kind !== "nativeHandle" ||
+      parameter.ownership.kind === "owned"
+    ) {
+      return false;
+    }
+    found = true;
+  }
+  return found;
+}
+
+/** A deliberately small effect-free subset for expressions evaluated after a
+ * borrowed local has been read and before the native call begins. Calls,
+ * assignments, allocation-bearing conversions, property access, and anything
+ * newly added to IrExpr all fall back to an owned snapshot. The subset covers
+ * the scalar/string selection expressions normally accompanying DOM setters. */
+function nativeCallBorrowFollowupIsStable(e: IrExpr): boolean {
+  switch (e.kind) {
+    case "numLit":
+    case "nativeScalarLit":
+    case "strLit":
+    case "boolLit":
+    case "unitLit":
+    case "varRef":
+    case "selfRef":
+      return true;
+    case "nativeIntegerBin":
+    case "bin":
+    case "strEq":
+    case "strCmp":
+      return (
+        nativeCallBorrowFollowupIsStable(e.left) &&
+        nativeCallBorrowFollowupIsStable(e.right)
+      );
+    case "unary":
+    case "toBool":
+      return nativeCallBorrowFollowupIsStable(e.operand);
+    case "logical":
+      return (
+        nativeCallBorrowFollowupIsStable(e.left) &&
+        nativeCallBorrowFollowupIsStable(e.right)
+      );
+    case "ternary":
+      return (
+        nativeCallBorrowFollowupIsStable(e.cond) &&
+        nativeCallBorrowFollowupIsStable(e.then) &&
+        nativeCallBorrowFollowupIsStable(e.else_)
+      );
+    case "unionNarrow":
+      return nativeCallBorrowFollowupIsStable(e.value);
+    default:
+      return false;
+  }
+}
+
+/** Resolve a call-scoped native-handle borrow from an ordinary lexical local.
+ *
+ * The backend still decides whether that local is actually ordinary storage:
+ * captured/boxed, global, TDZ, and frame-bounded bindings are rejected there.
+ * This shared half proves the source expression shape, the non-owning ABI
+ * contract, and the source-order fact that later argument evaluation cannot
+ * replace the owner before the call. */
+export function nativeCallHandleBorrowSource(
+  binding: IrNativeBinding,
+  args: readonly IrExpr[],
+  argument: number,
+): NativeCallHandleBorrowSource | null {
+  if (!nativeCallArgumentBorrowsHandle(binding, argument)) return null;
+  if (!args.slice(argument + 1).every(nativeCallBorrowFollowupIsStable)) return null;
+  let expr = args[argument];
+  /* Nominal native-handle inheritance is representation-preserving: every
+   * upcast keeps the same managed cell and only changes the tag accepted by
+   * the eventual require. Peel those compiler-generated identity nodes so a
+   * DOM Text -> CharacterData receiver reaches its lexical owner. */
+  while (expr?.kind === "upcast" && expr.type.kind === "nativeHandle") {
+    expr = expr.value;
+  }
+  if (expr?.kind === "varRef" && expr.type.kind === "nativeHandle") {
+    return { localId: expr.localId, unionTag: null };
+  }
+  if (
+    expr?.kind === "unionNarrow" &&
+    expr.type.kind === "nativeHandle" &&
+    expr.value.kind === "varRef"
+  ) {
+    return { localId: expr.value.localId, unionTag: expr.tag };
+  }
+  return null;
+}

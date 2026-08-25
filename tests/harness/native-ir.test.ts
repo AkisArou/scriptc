@@ -7166,6 +7166,26 @@ describe.each(["c", "llvm"] as const)("Native IR opaque handles, %s backend", (b
         id: "scriptc.fixture.c-v1@0.0.0#type:counter",
       }),
     );
+    const generated = readFileSync(
+      join(outDir, backend === "c" ? `${stem}.c` : `${stem}.ll`),
+      "utf8",
+    );
+    if (source === "handle-automatic.ts") {
+      /* The local owns the cell through the call. A borrowed receiver needs
+       * validation but no manufactured +1 temporary around counter.add(). */
+      expect(generated).not.toMatch(
+        backend === "c"
+          ? /scr_native_handle_retain\(/u
+          : /call ptr @scr_native_handle_retain_v\(/u,
+      );
+    }
+    if (source === "handle-captured.ts") {
+      /* Captured storage remains conservative: the shared box read returns an
+       * owned +1 value, because re-entrant code can replace the binding. */
+      expect(generated).toContain(
+        backend === "c" ? "scr_box_get_ref(" : "call ptr @scr_box_get_ref(",
+      );
+    }
     const run = spawnSync(result.binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({
       status: 42,

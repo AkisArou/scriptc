@@ -10,7 +10,7 @@ import { dynDestrCheckHelper, dynIterNHelper, dynKeyGetHelper } from "./emit-wal
 import { genResultThunkFor } from "./emit-async.js";
 import { nativeCallbackCancellationArgument } from "../native-callbacks.js";
 import { nativeCallLifecycle } from "../native-callbacks.js";
-import { nativeArgumentBorrow, nativeArgumentHandle, nativeArgumentForm, nativeCallDisposal, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultAcquisition, nativeResultCopy, nativeResultForm, nativeResultHandle, type NativeArgumentFormExhausted } from "../native-call-plan.js";
+import { nativeArgumentBorrow, nativeArgumentHandle, nativeArgumentForm, nativeCallDisposal, nativeCallHandleBorrowSource, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultAcquisition, nativeResultCopy, nativeResultForm, nativeResultHandle, type NativeArgumentFormExhausted } from "../native-call-plan.js";
 
 function streamTypedRefCommitAdapter(
   E: CEmitter,
@@ -2260,9 +2260,31 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         if (!binding) {
           throw new Error(`emitter bug: unknown Native IR binding ${e.binding}`);
         }
-        const args = e.args.map((arg) => E.emitExpr(arg));
+        const args = e.args.map((arg, argument) => {
+          const source = nativeCallHandleBorrowSource(binding, e.args, argument);
+          if (source !== null) {
+            const local = E.currentLocals.get(source.localId);
+            if (
+              local !== undefined &&
+              local.boxed !== true &&
+              local.tdz !== true &&
+              local.nativeFrame === undefined
+            ) {
+              const owner = mangleLocal(source.localId);
+              return E.newBorrowedTemp(
+                arg.type,
+                source.unionTag === null
+                  ? owner
+                  : `(${cType(arg.type).trim()})scr_union_peek(${owner})`,
+              );
+            }
+          }
+          return E.emitExpr(arg);
+        });
         const releaseArguments = (): void => {
           for (const arg of args) {
+            /* A call-scoped view is kept alive by its lexical owner. */
+            if (arg.borrowed === true) continue;
             /* A frame-bounded handle reference is a raw borrow from the
              * lexical local that owns its exact release. It creates no
              * temporary resource for this argument evaluation. */

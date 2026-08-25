@@ -92,7 +92,7 @@ import { nullableNativeHandleUnion, canMarshalFuncIntoIsland, CAUGHT, DYN, F64, 
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
 import { NATIVE_CALLBACK_INVOCATION_BASE_FIELDS, allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, nativeCallLifecycle, nativeCallbackPayloads, nativeQueuedPayloadCleanup, nativeTrampolineForm, type NativeCallbackAbsentPayload, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
-import { nativeArgumentBorrow, nativeArgumentHandle, nativeArgumentForm, nativeCallDisposal, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultAcquisition, nativeResultCopy, nativeResultForm, nativeResultHandle, type NativeArgumentFormExhausted } from "../native-call-plan.js";
+import { nativeArgumentBorrow, nativeArgumentHandle, nativeArgumentForm, nativeCallDisposal, nativeCallHandleBorrowSource, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultAcquisition, nativeResultCopy, nativeResultForm, nativeResultHandle, type NativeArgumentFormExhausted } from "../native-call-plan.js";
 import { computeMayThrow } from "../emission/may-throw.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleNativeHandleTag, mangleNativeStruct, mangleRecordClone, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
@@ -170,6 +170,8 @@ interface LlValue {
   name: string;
   type: IrType;
   slot?: boolean;
+  /** Call-scoped view into storage owned by a stable lexical binding. */
+  borrowed?: boolean;
   /** Static storage with a permanently immortal refcount. Ownership may move
    * anywhere, but it never needs a retain/release frame entry. */
   immortal?: boolean;
@@ -7538,9 +7540,30 @@ class LlEmitter {
         if (!binding) {
           throw new Error(`llvm emitter bug: unknown Native IR binding ${e.binding}`);
         }
-        const args = e.args.map((arg) => this.emitExpr(arg));
+        const args = e.args.map((arg, argument) => {
+          const source = nativeCallHandleBorrowSource(binding, e.args, argument);
+          if (source !== null) {
+            const owner = this.binding(source.localId);
+            if (
+              owner.kind === "local" &&
+              owner.local?.tdz !== true &&
+              owner.local?.nativeFrame === undefined
+            ) {
+              const value = B.tmp();
+              B.line(`${value} = load ptr, ptr ${owner.slot}`);
+              return {
+                name: source.unionTag === null ? value : this.unionPeek(value),
+                type: arg.type,
+                borrowed: true,
+              };
+            }
+          }
+          return this.emitExpr(arg);
+        });
         const releaseArguments = (): void => {
           for (const arg of args) {
+            /* A call-scoped view is kept alive by its lexical owner. */
+            if (arg.borrowed === true) continue;
             /* A frame-bounded handle reference is a raw borrow from the
              * lexical local that owns its exact release. It creates no
              * temporary resource for this argument evaluation. */

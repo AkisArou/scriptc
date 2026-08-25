@@ -12,9 +12,13 @@
  * above a comment promising the backends shared their decisions.
  */
 import { expect, test } from "vitest";
-import { nativeCallIsThrowCheckpoint, nativeResultCopy } from "../src/backend/native-call-plan.js";
+import {
+  nativeCallHandleBorrowSource,
+  nativeCallIsThrowCheckpoint,
+  nativeResultCopy,
+} from "../src/backend/native-call-plan.js";
 import type { NativeResultCopyForm } from "../src/backend/native-call-plan.js";
-import type { IrNativeBinding } from "../src/ir/nodes.js";
+import type { IrExpr, IrNativeBinding } from "../src/ir/nodes.js";
 
 type CallbackOwnerKind = "call" | "result" | "argument" | "process";
 
@@ -136,4 +140,94 @@ test("every copying form is described, none throws", () => {
     { kind: "utf8CStringArrayOrNull", release: null, unionId: "u", arrayTag: 1, nullTag: 0 },
   ];
   for (const form of forms) expect(nativeResultCopy(form).adopt).toBeDefined();
+});
+
+const loc = { file: "borrow.ts", start: 0, end: 0 };
+const HANDLE = { kind: "nativeHandle", typeId: "type:handle" } as const;
+const I32 = { kind: "nativeScalar", scalar: "i32" } as const;
+
+function handleCallBinding(ownership: "borrowed" | "owned" = "borrowed"): IrNativeBinding {
+  return {
+    parameters: [
+      {
+        type: HANDLE,
+        projection: { kind: "argument", argument: 0 },
+        ownership: ownership === "borrowed"
+          ? { kind: "borrowed", scope: "call" }
+          : { kind: "owned", transfer: "to-native" },
+      },
+      {
+        type: I32,
+        projection: { kind: "argument", argument: 1 },
+        ownership: { kind: "value" },
+      },
+    ],
+  } as unknown as IrNativeBinding;
+}
+
+function handleRef(localId = "handle"): IrExpr {
+  return { kind: "varRef", localId, type: HANDLE, loc };
+}
+
+test("a non-owning handle local with stable following arguments is call-borrowable", () => {
+  const zero: IrExpr = { kind: "numLit", value: 0, type: { kind: "f64" }, loc };
+  const value: IrExpr = {
+    kind: "ternary",
+    cond: { kind: "boolLit", value: true, type: { kind: "bool" }, loc },
+    then: { kind: "nativeScalarLit", value: "1", type: I32, loc },
+    else_: { kind: "nativeScalarLit", value: "2", type: I32, loc },
+    type: I32,
+    loc,
+  };
+  expect(nativeCallHandleBorrowSource(handleCallBinding(), [handleRef(), value], 0))
+    .toEqual({ localId: "handle", unionTag: null });
+  /* The scalar literal above is the Chromium setter shape; keep a plain
+   * scalar alongside it so a future narrowing of the whitelist stays clear. */
+  expect(nativeCallHandleBorrowSource(handleCallBinding(), [handleRef(), zero], 0))
+    .toEqual({ localId: "handle", unionTag: null });
+});
+
+test("a narrowed nullable-handle local borrows its proven arm", () => {
+  const nullable = {
+    kind: "unionNarrow",
+    unionId: "handle-or-null",
+    tag: 1,
+    value: {
+      kind: "varRef",
+      localId: "optional",
+      type: { kind: "union", unionId: "handle-or-null" },
+      loc,
+    },
+    type: HANDLE,
+    loc,
+  } as const satisfies IrExpr;
+  expect(nativeCallHandleBorrowSource(handleCallBinding(), [nullable, {
+    kind: "nativeScalarLit", value: "0", type: I32, loc,
+  }], 0)).toEqual({ localId: "optional", unionTag: 1 });
+
+  const derived = { kind: "nativeHandle", typeId: "type:derived" } as const;
+  const upcast = {
+    kind: "upcast",
+    value: { ...nullable, type: derived },
+    type: HANDLE,
+    loc,
+  } as const satisfies IrExpr;
+  expect(nativeCallHandleBorrowSource(handleCallBinding(), [upcast, {
+    kind: "nativeScalarLit", value: "0", type: I32, loc,
+  }], 0)).toEqual({ localId: "optional", unionTag: 1 });
+});
+
+test("ownership transfer and effectful following evaluation keep owned snapshots", () => {
+  const mutation = {
+    kind: "assignExpr",
+    localId: "handle",
+    value: handleRef("replacement"),
+    type: HANDLE,
+    loc,
+  } as const satisfies IrExpr;
+  expect(nativeCallHandleBorrowSource(handleCallBinding("owned"), [handleRef(), {
+    kind: "nativeScalarLit", value: "1", type: I32, loc,
+  }], 0)).toBeNull();
+  expect(nativeCallHandleBorrowSource(handleCallBinding(), [handleRef(), mutation], 0))
+    .toBeNull();
 });
