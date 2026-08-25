@@ -20,6 +20,7 @@ function nonEscaping(): i32 {
   frameResourceReset();
   {
     const counter = createFrameCounter(40 as i32);
+    if (counter.value() !== (40 as i32)) return 9 as i32;
     if (counter.add(2 as i32) !== (42 as i32)) return 10 as i32;
   }
   if (frameGlobalPromotions() !== (0 as i32)) return 11 as i32;
@@ -38,6 +39,15 @@ function escaping(): i32 {
   if (frameGlobalPromotions() !== (1 as i32)) return 21 as i32;
   if (frameLocalReleases() !== (1 as i32)) return 22 as i32;
   if (frameManagedCells() !== frameExpectedManagedCells(1 as i32)) return 23 as i32;
+  return 0 as i32;
+}
+
+function discarded(): i32 {
+  frameResourceReset();
+  createFrameCounter(42 as i32);
+  if (frameGlobalPromotions() !== (0 as i32)) return 60 as i32;
+  if (frameLocalReleases() !== (1 as i32)) return 61 as i32;
+  if (frameManagedCells() !== frameExpectedManagedCells(0 as i32)) return 62 as i32;
   return 0 as i32;
 }
 
@@ -84,6 +94,8 @@ const local = nonEscaping();
 if (local !== (0 as i32)) exit(local);
 const stable = escaping();
 if (stable !== (0 as i32)) exit(stable);
+const ignored = discarded();
+if (ignored !== (0 as i32)) exit(ignored);
 const nullablePresent = nullableNonEscapingPresent();
 if (nullablePresent !== (0 as i32)) exit(nullablePresent);
 const nullableAbsent = nullableNonEscapingAbsent();

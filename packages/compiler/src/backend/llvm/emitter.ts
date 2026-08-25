@@ -9108,6 +9108,9 @@ class LlEmitter {
         // temp to the result temp (struck so the one +1 releases exactly
         // once, under the RESULT type's release).
         const v = this.emitExpr(e.value);
+        if (v.nativeFrame !== undefined) {
+          return { name: v.name, type: e.type, nativeFrame: v.nativeFrame };
+        }
         if (isRefCounted(v.type)) this.moveTemp(v);
         return this.own({ name: v.name, type: e.type });
       }

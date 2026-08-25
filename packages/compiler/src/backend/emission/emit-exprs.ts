@@ -3181,6 +3181,13 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         // pointer with only the static type changing (one ScrClassObj
         // struct covers every class), so the cast is a no-op spelling.
         const v = E.emitExpr(e.value);
+        if (v.nativeFrame !== undefined) {
+          return E.newBorrowedNativeFrameTemp(
+            e.type,
+            `(${cType(e.type).trim()})${v.name}`,
+            v.nativeFrame,
+          );
+        }
         E.moveTemp(v);
         return E.newTemp(e.type, `(${cType(e.type).trim()})${v.name}`);
       }
