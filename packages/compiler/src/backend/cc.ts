@@ -43,6 +43,7 @@ const RETAINED_CALLBACK_SOURCES = [
   "scr_callback_token.c",
   "scr_callback_table.c",
   "scr_callback_handle.c",
+  "scr_direct_callback.c",
   "scr_retained_callbacks.c",
   /* The default wake, for an executable with no embedder to supply one. It
    * stands aside when a host has already configured the service. */
@@ -1864,6 +1865,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
           "scr_callback_token.c",
           "scr_callback_table.c",
           "scr_callback_handle.c",
+          "scr_direct_callback.c",
           "scr_retained_callbacks.c",
           "scr_owner_loop.c",
         ]

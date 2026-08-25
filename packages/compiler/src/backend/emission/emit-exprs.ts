@@ -2277,6 +2277,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           E.ffiHasRetainedCallback,
         );
         const retainedTokens = new Map<number, string>();
+        const directOwnedCallbacks = new Set<number>();
         /* Vectors this call borrowed, by the argument they came from. The
          * release runs after the call whatever it did, so it cannot be a
          * statement the argument conversion emits. */
@@ -2305,11 +2306,16 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           const token = `sc_t${E.tempCounter++}`;
           if (step.kind === "registerOwned") {
             const adapter = E.nativeCallbackAdapter(binding.id, step.argument);
-            E.line(
-              `ScrCallbackToken *${token} = scr_retained_callbacks_register(` +
-                `${closure}, &${adapter.symbol}_signature, ` +
-                `${step.ownerArgument === null ? "NULL" : args[step.ownerArgument]!.name});`,
-            );
+            if (step.direct) {
+              E.line(`ScrDirectCallback *${token};`);
+              directOwnedCallbacks.add(step.argument);
+            } else {
+              E.line(
+                `ScrCallbackToken *${token} = scr_retained_callbacks_register(` +
+                  `${closure}, &${adapter.symbol}_signature, ` +
+                  `${step.ownerArgument === null ? "NULL" : args[step.ownerArgument]!.name});`,
+              );
+            }
           } else if (step.kind === "registerProcess") {
             const adapter = E.nativeCallbackAdapter(binding.id, step.argument);
             /* A program with no embedder has nobody to configure the delivery
@@ -2951,8 +2957,15 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
                 `${args[retainedOwnerArgument]!.name});`,
             );
           }
-          for (const token of retainedTokens.values()) {
-            E.line(`scr_retained_callbacks_prepare(${prepared}, ${token});`);
+          for (const [argument, token] of retainedTokens) {
+            if (directOwnedCallbacks.has(argument)) {
+              E.line(
+                `${token} = scr_native_handle_prepare_direct_callback(` +
+                  `${prepared}, ${args[argument]!.name});`,
+              );
+            } else {
+              E.line(`scr_retained_callbacks_prepare(${prepared}, ${token});`);
+            }
           }
           E.line(`void *${raw} = ${call};${E.srcComment(e.loc)}`);
           /* An interned type answers about the object, not about which call

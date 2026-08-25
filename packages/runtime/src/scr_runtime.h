@@ -3120,6 +3120,14 @@ void scr_native_handle_prepare_owner(ScrNativeHandle *child,
 void scr_native_handle_prepare_callback(ScrNativeHandle *handle,
                                         ScrCallbackTable *table,
                                         ScrCallbackToken *token);
+/* A result-owned callback that the contract confines to synchronous calls on
+ * the runtime owner thread. The opaque context is also the native handle's
+ * lifecycle edge, so cancellation deactivates it before foreign teardown and
+ * closure ownership follows the registration without a transport table. */
+typedef struct ScrDirectCallback ScrDirectCallback;
+ScrDirectCallback *scr_native_handle_prepare_direct_callback(
+    ScrNativeHandle *handle, ScrClosure *closure);
+ScrClosure *scr_direct_callback_acquire(ScrDirectCallback *callback);
 /* Per-ScriptC-instance retained-callback service. The target configures its
  * thread-safe owner wake before registrations can be created. Registration
  * borrows the closure and installs an explicit table root. Generated native

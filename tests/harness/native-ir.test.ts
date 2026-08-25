@@ -5089,7 +5089,10 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
     /* The answer has to exist before the emitting call returns, so the
      * trampoline reads the closure and calls it rather than queueing an
      * invocation for a later turn. */
-    expect(generated).toContain("scr_callback_table_acquire");
+    expect(generated).toContain("scr_direct_callback_acquire");
+    expect(generated).toContain("scr_native_handle_prepare_direct_callback");
+    expect(generated).not.toContain("scr_retained_callbacks_register");
+    expect(generated).not.toContain("scr_callback_table_acquire");
     expect(generated).not.toContain("scr_callback_token_admit");
     const run = spawnSync(result.binaryPath);
     expect({ status: run.status, signal: run.signal, stderr: run.stderr.toString() }).toEqual({

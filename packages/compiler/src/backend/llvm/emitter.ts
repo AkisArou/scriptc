@@ -1949,41 +1949,63 @@ class LlEmitter {
             `promote${payload.slot}.ok:`,
           );
         }
-        const tok = form.closure.kind === "tokenGlobal" ? "%tok" : "%ctx";
-        this.declare(`declare ptr @scr_callback_table_acquire(ptr, ${this.sizeType}, i64, ptr)`);
         this.declare(`declare void @scr_closure_release(ptr)`);
-        this.declare(`declare i32 @scr_callback_token_state(ptr)`);
-        this.declare(`declare ptr @scr_callback_token_owner_context(ptr)`);
-        this.declare(`declare ${this.sizeType} @scr_callback_token_slot(ptr)`);
-        this.declare(`declare i64 @scr_callback_token_generation(ptr)`);
+        const ownerContext = form.closure.kind === "ownerContext";
+        const tok = form.closure.kind === "tokenGlobal" ? "%tok" : "%ctx";
+        let acquireClosure: string[];
+        if (ownerContext) {
+          this.declare(`declare ptr @scr_direct_callback_acquire(ptr)`);
+          acquireClosure = [
+            `  %absent = icmp eq ptr %ctx, null`,
+            `  br i1 %absent, label %skip, label %present`,
+            `present:`,
+            `  %pending = call zeroext i1 @scr_exc_pending()`,
+            `  br i1 %pending, label %skip, label %acquire`,
+            `skip:`,
+            `  ${bail}`,
+            `acquire:`,
+            `  %cb = call ptr @scr_direct_callback_acquire(ptr %ctx)`,
+            `  %gone = icmp eq ptr %cb, null`,
+            `  br i1 %gone, label %skip, label %invoke`,
+          ];
+        } else {
+          this.declare(`declare ptr @scr_callback_table_acquire(ptr, ${this.sizeType}, i64, ptr)`);
+          this.declare(`declare i32 @scr_callback_token_state(ptr)`);
+          this.declare(`declare ptr @scr_callback_token_owner_context(ptr)`);
+          this.declare(`declare ${this.sizeType} @scr_callback_token_slot(ptr)`);
+          this.declare(`declare i64 @scr_callback_token_generation(ptr)`);
+          acquireClosure = [
+            ...(form.closure.kind === "tokenGlobal"
+              ? [`  ${tok} = load ptr, ptr @${form.closure.slot}`]
+              : []),
+            `  %absent = icmp eq ptr ${tok}, null`,
+            `  br i1 %absent, label %skip, label %present`,
+            `present:`,
+            `  %state = call i32 @scr_callback_token_state(ptr ${tok})`,
+            `  %disposed = icmp ne i32 %state, 0`,
+            `  br i1 %disposed, label %skip, label %live`,
+            `skip:`,
+            `  ${bail}`,
+            `live:`,
+            `  %pending = call zeroext i1 @scr_exc_pending()`,
+            `  br i1 %pending, label %skip, label %acquire`,
+            `acquire:`,
+            `  %table = call ptr @scr_callback_token_owner_context(ptr ${tok})`,
+            `  %slot = call ${this.sizeType} @scr_callback_token_slot(ptr ${tok})`,
+            `  %generation = call i64 @scr_callback_token_generation(ptr ${tok})`,
+            `  %cb = call ptr @scr_callback_table_acquire(ptr %table, ${this.sizeType} %slot, i64 %generation, ptr ${signatureId})`,
+            `  %gone = icmp eq ptr %cb, null`,
+            `  br i1 %gone, label %skip, label %invoke`,
+          ];
+        }
         defs.push(
-          `${signatureId} = internal constant i8 0`,
+          ...(ownerContext ? [] : [`${signatureId} = internal constant i8 0`]),
           ...(form.closure.kind === "tokenGlobal"
             ? [`@${form.closure.slot} = internal global ptr null`]
             : []),
           `define internal ${externalRet} @${adapter.symbol}(${params.join(", ")}) ${FN_ATTRS} {`,
           `entry:`,
-          ...(form.closure.kind === "tokenGlobal"
-            ? [`  ${tok} = load ptr, ptr @${form.closure.slot}`]
-            : []),
-          `  %absent = icmp eq ptr ${tok}, null`,
-          `  br i1 %absent, label %skip, label %present`,
-          `present:`,
-          `  %state = call i32 @scr_callback_token_state(ptr ${tok})`,
-          `  %disposed = icmp ne i32 %state, 0`,
-          `  br i1 %disposed, label %skip, label %live`,
-          `skip:`,
-          `  ${bail}`,
-          `live:`,
-          `  %pending = call zeroext i1 @scr_exc_pending()`,
-          `  br i1 %pending, label %skip, label %acquire`,
-          `acquire:`,
-          `  %table = call ptr @scr_callback_token_owner_context(ptr ${tok})`,
-          `  %slot = call ${this.sizeType} @scr_callback_token_slot(ptr ${tok})`,
-          `  %generation = call i64 @scr_callback_token_generation(ptr ${tok})`,
-          `  %cb = call ptr @scr_callback_table_acquire(ptr %table, ${this.sizeType} %slot, i64 %generation, ptr ${signatureId})`,
-          `  %gone = icmp eq ptr %cb, null`,
-          `  br i1 %gone, label %skip, label %invoke`,
+          ...acquireClosure,
           `invoke:`,
           `  %fnp = getelementptr inbounds %ScrClosure, ptr %cb, i64 0, i32 1`,
           `  %fn = load ptr, ptr %fnp`,
@@ -7533,6 +7555,7 @@ class LlEmitter {
           this.ffiHasRetainedCallback,
         );
         const retainedTokens = new Map<number, string>();
+        const directOwnedCallbacks = new Set<number>();
         /* Vectors this call borrowed, by the argument they came from; released
          * after the call whatever it did. */
         const borrowedArrays = new Map<number, string>();
@@ -7562,12 +7585,16 @@ class LlEmitter {
           const token = B.tmp();
           if (step.kind === "registerOwned") {
             const adapter = this.nativeCallbackAdapter(binding.id, step.argument);
-            this.declare(`declare ptr @scr_retained_callbacks_register(ptr, ptr, ptr)`);
-            B.line(
-              `${token} = call ptr @scr_retained_callbacks_register(` +
-                `ptr ${closure}, ptr @${adapter.symbol}_signature, ` +
-                `ptr ${step.ownerArgument === null ? "null" : args[step.ownerArgument]!.name})`,
-            );
+            if (step.direct) {
+              directOwnedCallbacks.add(step.argument);
+            } else {
+              this.declare(`declare ptr @scr_retained_callbacks_register(ptr, ptr, ptr)`);
+              B.line(
+                `${token} = call ptr @scr_retained_callbacks_register(` +
+                  `ptr ${closure}, ptr @${adapter.symbol}_signature, ` +
+                  `ptr ${step.ownerArgument === null ? "null" : args[step.ownerArgument]!.name})`,
+              );
+            }
           } else if (step.kind === "registerProcess") {
             const adapter = this.nativeCallbackAdapter(binding.id, step.argument);
             /* A program with no embedder configures the delivery service
@@ -8683,8 +8710,18 @@ class LlEmitter {
             );
           }
           if (retainedTokens.size > 0) {
-            this.declare(`declare void @scr_retained_callbacks_prepare(ptr, ptr)`);
-            for (const token of retainedTokens.values()) {
+            for (const [argument, token] of retainedTokens) {
+              if (directOwnedCallbacks.has(argument)) {
+                this.declare(
+                  `declare ptr @scr_native_handle_prepare_direct_callback(ptr, ptr)`,
+                );
+                B.line(
+                  `${token} = call ptr @scr_native_handle_prepare_direct_callback(` +
+                    `ptr ${prepared}, ptr ${args[argument]!.name})`,
+                );
+                continue;
+              }
+              this.declare(`declare void @scr_retained_callbacks_prepare(ptr, ptr)`);
               B.line(
                 `call void @scr_retained_callbacks_prepare(ptr ${prepared}, ptr ${token})`,
               );

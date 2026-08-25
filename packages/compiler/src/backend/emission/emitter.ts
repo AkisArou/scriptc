@@ -2307,28 +2307,40 @@ export class CEmitter {
         const bail = bailReleases === ""
           ? bailReturn
           : `{ ${bailReleases}${bailReturn} }`;
+        const ownerContext = form.closure.kind === "ownerContext";
+        const acquireClosure = ownerContext
+          ? [
+              `  ScrDirectCallback *sc_direct = (ScrDirectCallback *)sc_ctx;`,
+              `  if (sc_direct == NULL) ${bail}`,
+              `  if (scr_exc_pending()) ${bail}`,
+              `  ScrClosure *sc_cb = scr_direct_callback_acquire(sc_direct);`,
+              `  if (sc_cb == NULL) ${bail}`,
+            ]
+          : [
+              `  ScrCallbackToken *sc_token = ${
+                form.closure.kind === "tokenGlobal"
+                  ? form.closure.slot
+                  : "(ScrCallbackToken *)sc_ctx"
+              };`,
+              `  if (sc_token == NULL) ${bail}`,
+              `  if (scr_callback_token_state(sc_token) != SCR_CALLBACK_TOKEN_ACTIVE) ${bail}`,
+              `  if (scr_exc_pending()) ${bail}`,
+              `  ScrClosure *sc_cb = (ScrClosure *)scr_callback_table_acquire(`,
+              `      (ScrCallbackTable *)scr_callback_token_owner_context(sc_token),`,
+              `      scr_callback_token_slot(sc_token),`,
+              `      scr_callback_token_generation(sc_token), &${signatureId});`,
+              `  if (sc_cb == NULL) ${bail}`,
+            ];
         out.push(
-          `static const unsigned char ${signatureId};`,
+          ...(ownerContext ? [] : [`static const unsigned char ${signatureId};`]),
           ...(form.closure.kind === "tokenGlobal"
             ? [`static ScrCallbackToken *${form.closure.slot};`]
             : []),
           `static ${ret} ${adapter.symbol}(${nativeParams.join(", ")}) {`,
-          `  ScrCallbackToken *sc_token = ${
-            form.closure.kind === "tokenGlobal"
-              ? form.closure.slot
-              : "(ScrCallbackToken *)sc_ctx"
-          };`,
           /* A disposed registration answers with the ABI zero rather than
            * reading a closure that is gone; so does an already-unwinding
            * turn, which must not start another handler. */
-          `  if (sc_token == NULL) ${bail}`,
-          `  if (scr_callback_token_state(sc_token) != SCR_CALLBACK_TOKEN_ACTIVE) ${bail}`,
-          `  if (scr_exc_pending()) ${bail}`,
-          `  ScrClosure *sc_cb = (ScrClosure *)scr_callback_table_acquire(`,
-          `      (ScrCallbackTable *)scr_callback_token_owner_context(sc_token),`,
-          `      scr_callback_token_slot(sc_token),`,
-          `      scr_callback_token_generation(sc_token), &${signatureId});`,
-          `  if (sc_cb == NULL) ${bail}`,
+          ...acquireClosure,
           ...promotionLines,
           ...handleCells,
           ...(voids

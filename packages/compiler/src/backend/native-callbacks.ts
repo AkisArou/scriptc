@@ -313,7 +313,7 @@ export function nativeCallbackPayloads(
 
 /** Where a trampoline finds the closure it must invoke.
  *
- * There are exactly four answers and they follow from the contract, not from
+ * There are exactly five answers and they follow from the contract, not from
  * the backend: what owns the registration decides whether the library hands
  * back a closure or a token, and whether the signature has a userdata slot
  * decides whether it hands back anything at all. */
@@ -323,6 +323,10 @@ export type NativeClosureSource =
   /** No userdata slot, and only this call's extent to survive: the closure is
    * lent through a thread-local for that extent. */
   | { readonly kind: "threadLocal"; readonly slot: string }
+  /** The context is a lightweight lifecycle edge owned by the registration
+   * result. This is sufficient when every invocation is synchronous on the
+   * owner thread: no transport token or callback table is needed. */
+  | { readonly kind: "ownerContext" }
   /** The context slot is the registration's token; the closure is read
    * through the table, which is what keeps it alive between calls. */
   | { readonly kind: "tokenContext" }
@@ -333,8 +337,9 @@ export type NativeClosureSource =
 /** Which trampoline a contract calls for.
  *
  * `call-scoped` invokes the closure directly and dies with the call.
- * `direct` reads the closure through its token and invokes it now, which is
- * what a library that calls a stored callback from inside a later call does.
+ * `direct` reads the closure from its result-owned local context when the
+ * contract proves owner-thread delivery, or through a token for a process
+ * registration, and invokes it now.
  * `queued` copies the payload where the event is raised and delivers on a
  * later turn, because the raising thread may not be the script's. */
 export type NativeTrampolineShape = "call-scoped" | "direct" | "queued";
@@ -362,6 +367,13 @@ export function nativeTrampolineForm(
         : { kind: "threadLocal", slot: adapter.tls },
     };
   }
+  if (
+    nativeCallbackIsOwnerScoped(adapter.contract) &&
+    adapter.contract.synchronousReturn &&
+    adapter.global === null
+  ) {
+    return { shape: "direct", closure: { kind: "ownerContext" } };
+  }
   const closure: NativeClosureSource = adapter.global === null
     ? { kind: "tokenContext" }
     : { kind: "tokenGlobal", slot: adapter.global };
@@ -381,6 +393,9 @@ export type NativeCallSetup =
       readonly kind: "registerOwned";
       readonly argument: number;
       readonly ownerArgument: number | null;
+      /** A synchronous owner-thread registration can store its closure on
+       * the result lifecycle directly instead of entering callback transport. */
+      readonly direct: boolean;
     }
   /** Register a callback nothing owns, pinning it before the call so a
    * library that fires on subscribe already reaches a rooted closure. */
@@ -486,6 +501,7 @@ export function nativeCallLifecycle(
             contract.owner.kind === "argument"
             ? contract.owner.argument
             : null,
+        direct: nativeTrampolineForm(adapter).closure.kind === "ownerContext",
       });
       if (contract.owner.kind === "argument") {
         registrationOwnerArguments.add(contract.owner.argument);
