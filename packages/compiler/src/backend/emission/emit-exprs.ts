@@ -2277,12 +2277,15 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               local.nativeFrame === undefined
             ) {
               const owner = mangleLocal(source.localId);
-              return E.newBorrowedTemp(
-                arg.type,
-                source.unionTag === null
-                  ? owner
-                  : `(${cType(arg.type).trim()})scr_union_peek(${owner})`,
-              );
+              return {
+                ...E.newBorrowedTemp(
+                  arg.type,
+                  source.unionTag === null
+                    ? owner
+                    : `(${cType(arg.type).trim()})scr_union_peek(${owner})`,
+                ),
+                nativeHandleExactTypeId: source.typeId,
+              };
             }
           }
           return E.emitExpr(arg);
@@ -2605,6 +2608,25 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
                 : "scr_native_handle_require";
               const raw = `sc_t${E.tempCounter++}`;
               const tag = handle.source.unionTag;
+              const exactTypeId = !handle.surrenders && tag === null
+                ? arg.nativeHandleExactTypeId
+                : undefined;
+              if (exactTypeId !== undefined) {
+                E.line(
+                  `void *${raw} = scr_native_handle_try_require_exact(` +
+                    `${arg.name}, &${mangleNativeHandleTag(exactTypeId)});`,
+                );
+                E.line(`if (${raw} == NULL) {`);
+                E.indent++;
+                E.line(
+                  `${raw} = scr_native_handle_require(` +
+                    `${arg.name}, ${tagRef}, ${operation});`,
+                );
+                E.indent--;
+                E.line(`}`);
+                emitConversionPendingCheck();
+                return raw;
+              }
               E.line(
                 tag !== null
                   ? `void *${raw} = ${arg.name}->tag == ${tag} ` +

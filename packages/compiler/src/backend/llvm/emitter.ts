@@ -173,6 +173,8 @@ interface LlValue {
   slot?: boolean;
   /** Call-scoped view into storage owned by a stable lexical binding. */
   borrowed?: boolean;
+  /** Exact nominal tag of a stable lexical native-handle borrow. */
+  nativeHandleExactTypeId?: string;
   /** Static storage with a permanently immortal refcount. Ownership may move
    * anywhere, but it never needs a retain/release frame entry. */
   immortal?: boolean;
@@ -2839,6 +2841,7 @@ class LlEmitter {
       `%ScrIslandModule = type { ptr, ptr, ${this.sizeType}, ${this.sizeType}, i32, ptr, ${this.sizeType}, ${this.sizeType} }`,
       `%ScrIslandEdge = type { ptr, ptr, ptr, i32 }`,
       `%ScrNativeHandleType = type { ptr, ${this.sizeType}, i1, i1 }`,
+      `%ScrNativeHandleFastPrefix = type { ${this.sizeType}, ptr, ptr, ptr }`,
     ];
     for (const definition of this.mod.nativeTypes ?? []) {
       if (definition.kind === "handle") {
@@ -7562,6 +7565,7 @@ class LlEmitter {
                 name: source.unionTag === null ? value : this.unionPeek(value),
                 type: arg.type,
                 borrowed: true,
+                nativeHandleExactTypeId: source.typeId,
               };
             }
           }
@@ -8067,6 +8071,57 @@ class LlEmitter {
                 B.line(
                   `${value} = phi ptr [ ${required}, %${present} ], [ null, %${absent} ]`,
                 );
+              } else if (
+                !handle.surrenders && arg.nativeHandleExactTypeId !== undefined
+              ) {
+                /* The source is a stable lexical borrow of a non-nullable
+                 * handle. Probe the runtime-pinned prefix directly; a
+                 * disposed cell or nominal mismatch takes the existing
+                 * checked helper and therefore keeps identical diagnostics. */
+                const source = valueOf(handle.source.argument);
+                const foreignPointer = B.tmp();
+                const foreign = B.tmp();
+                const typePointer = B.tmp();
+                const actualType = B.tmp();
+                const hasForeign = B.tmp();
+                const exactType = B.tmp();
+                const fast = B.tmp();
+                B.line(
+                  `${foreignPointer} = getelementptr inbounds ` +
+                    `%ScrNativeHandleFastPrefix, ptr ${source}, i64 0, i32 1`,
+                );
+                B.line(`${foreign} = load ptr, ptr ${foreignPointer}`);
+                B.line(
+                  `${typePointer} = getelementptr inbounds ` +
+                    `%ScrNativeHandleFastPrefix, ptr ${source}, i64 0, i32 3`,
+                );
+                B.line(`${actualType} = load ptr, ptr ${typePointer}`);
+                B.line(`${hasForeign} = icmp ne ptr ${foreign}, null`);
+                B.line(
+                  `${exactType} = icmp eq ptr ${actualType}, ` +
+                    `@${mangleNativeHandleTag(arg.nativeHandleExactTypeId)}`,
+                );
+                B.line(`${fast} = and i1 ${hasForeign}, ${exactType}`);
+                const fastBlock = B.newLabel("native.handle.fast");
+                const slowBlock = B.newLabel("native.handle.slow");
+                const joined = B.newLabel("native.handle.join");
+                const slot = B.slot();
+                B.entryAllocas.push(`${slot} = alloca ptr`);
+                B.condBr(fast, fastBlock, slowBlock);
+                B.startBlock(fastBlock);
+                B.line(`store ptr ${foreign}, ptr ${slot}`);
+                B.br(joined);
+                B.startBlock(slowBlock);
+                const required = B.tmp();
+                B.line(
+                  `${required} = call ptr @${symbol}(ptr ${source}, ` +
+                    `ptr @${tag}, ptr ${operation})`,
+                );
+                B.line(`store ptr ${required}, ptr ${slot}`);
+                B.br(joined);
+                B.startBlock(joined);
+                value = B.tmp();
+                B.line(`${value} = load ptr, ptr ${slot}`);
               } else {
                 value = B.tmp();
                 B.line(

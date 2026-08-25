@@ -53,6 +53,22 @@ struct ScrNativeHandle {
   ScrNativeHandleState state;
 };
 
+_Static_assert(offsetof(ScrNativeHandle, rc) ==
+                   offsetof(ScrNativeHandleFastPrefix, rc),
+               "native handle fast prefix rc offset drifted");
+_Static_assert(offsetof(ScrNativeHandle, foreign) ==
+                   offsetof(ScrNativeHandleFastPrefix, foreign),
+               "native handle fast prefix foreign offset drifted");
+_Static_assert(offsetof(ScrNativeHandle, destructor) ==
+                   offsetof(ScrNativeHandleFastPrefix, destructor),
+               "native handle fast prefix destructor offset drifted");
+_Static_assert(offsetof(ScrNativeHandle, type) ==
+                   offsetof(ScrNativeHandleFastPrefix, type),
+               "native handle fast prefix type offset drifted");
+_Static_assert(sizeof(ScrNativeHandleFastPrefix) ==
+                   offsetof(ScrNativeHandle, type_name),
+               "native handle fast prefix size drifted");
+
 #ifdef SCR_RC_AUDIT
 static _Thread_local size_t scr_native_handle_prepares;
 #endif

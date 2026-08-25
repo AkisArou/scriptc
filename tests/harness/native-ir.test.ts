@@ -7172,11 +7172,23 @@ describe.each(["c", "llvm"] as const)("Native IR opaque handles, %s backend", (b
     );
     if (source === "handle-automatic.ts") {
       /* The local owns the cell through the call. A borrowed receiver needs
-       * validation but no manufactured +1 temporary around counter.add(). */
+       * no manufactured +1 temporary around counter.add(). Its exact live
+       * tag takes the inline probe, while the checked helper remains in the
+       * emitted slow path for disposal and type failures. */
       expect(generated).not.toMatch(
         backend === "c"
           ? /scr_native_handle_retain\(/u
           : /call ptr @scr_native_handle_retain_v\(/u,
+      );
+      expect(generated).toContain(
+        backend === "c"
+          ? "scr_native_handle_try_require_exact("
+          : "%ScrNativeHandleFastPrefix",
+      );
+      expect(generated).toContain(
+        backend === "c"
+          ? "scr_native_handle_require("
+          : "call ptr @scr_native_handle_require(",
       );
     }
     if (source === "handle-captured.ts") {

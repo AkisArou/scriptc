@@ -3058,6 +3058,30 @@ typedef struct ScrNativeHandleType {
   bool interned;
 } ScrNativeHandleType;
 
+/* Stable common prefix of the runtime-owned handle cell. Generated code may
+ * inspect only `foreign` and `type`, and only to attempt the exact-type fast
+ * path below; every miss goes through scr_native_handle_require(), which
+ * remains the authority for subtype validation and catchable diagnostics.
+ *
+ * The view is copied with memcpy because ScrNativeHandle deliberately stays
+ * opaque here. That makes the access alias-safe while Clang scalarizes the two
+ * fields used by the inline probe into ordinary loads. scr_native_handle.c
+ * pins every offset with static assertions. */
+typedef struct ScrNativeHandleFastPrefix {
+  size_t rc;
+  void *foreign;
+  ScrNativeDestructor destructor;
+  const ScrNativeHandleType *type;
+} ScrNativeHandleFastPrefix;
+
+static inline void *scr_native_handle_try_require_exact(
+    ScrNativeHandle *handle, const ScrNativeHandleType *type) {
+  if (handle == NULL) return NULL;
+  ScrNativeHandleFastPrefix prefix;
+  memcpy(&prefix, handle, sizeof prefix);
+  return prefix.foreign != NULL && prefix.type == type ? prefix.foreign : NULL;
+}
+
 /* The live cell for this pointer, retained, or NULL if there is none. Only
  * meaningful for an interned type; the caller commits a new cell when this
  * answers NULL. */

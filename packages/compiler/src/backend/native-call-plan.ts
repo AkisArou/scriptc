@@ -1262,6 +1262,10 @@ export function nativeArgumentHandle(
 export interface NativeCallHandleBorrowSource {
   readonly localId: string;
   readonly unionTag: number | null;
+  /** The exact nominal type before representation-preserving upcasts. A
+   * matching runtime tag permits an inline live-handle probe; every miss
+   * retains the ordinary checked path. */
+  readonly typeId: string;
 }
 
 /** Whether one logical argument is used solely as a non-owning native handle.
@@ -1357,14 +1361,18 @@ export function nativeCallHandleBorrowSource(
     expr = expr.value;
   }
   if (expr?.kind === "varRef" && expr.type.kind === "nativeHandle") {
-    return { localId: expr.localId, unionTag: null };
+    return { localId: expr.localId, unionTag: null, typeId: expr.type.typeId };
   }
   if (
     expr?.kind === "unionNarrow" &&
     expr.type.kind === "nativeHandle" &&
     expr.value.kind === "varRef"
   ) {
-    return { localId: expr.value.localId, unionTag: expr.tag };
+    return {
+      localId: expr.value.localId,
+      unionTag: expr.tag,
+      typeId: expr.type.typeId,
+    };
   }
   return null;
 }

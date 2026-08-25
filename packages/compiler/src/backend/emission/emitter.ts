@@ -106,6 +106,9 @@ export interface Temp {
   /** Call-scoped view into storage owned by a stable lexical binding. It is
    * neither released nor moved by the operation consuming the view. */
   borrowed?: boolean;
+  /** Exact nominal tag of a stable lexical native-handle borrow. This is a
+   * speculative fast-path fact only; misses retain full runtime validation. */
+  nativeHandleExactTypeId?: string;
   /** A statically allocated value whose refcount is permanently immortal.
    * It obeys ordinary move/ownership semantics without joining a release
    * frame: retaining or releasing it cannot change its lifetime. */

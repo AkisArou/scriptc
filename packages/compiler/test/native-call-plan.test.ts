@@ -180,11 +180,11 @@ test("a non-owning handle local with stable following arguments is call-borrowab
     loc,
   };
   expect(nativeCallHandleBorrowSource(handleCallBinding(), [handleRef(), value], 0))
-    .toEqual({ localId: "handle", unionTag: null });
+    .toEqual({ localId: "handle", unionTag: null, typeId: "type:handle" });
   /* The scalar literal above is the Chromium setter shape; keep a plain
    * scalar alongside it so a future narrowing of the whitelist stays clear. */
   expect(nativeCallHandleBorrowSource(handleCallBinding(), [handleRef(), zero], 0))
-    .toEqual({ localId: "handle", unionTag: null });
+    .toEqual({ localId: "handle", unionTag: null, typeId: "type:handle" });
 });
 
 test("a narrowed nullable-handle local borrows its proven arm", () => {
@@ -203,7 +203,11 @@ test("a narrowed nullable-handle local borrows its proven arm", () => {
   } as const satisfies IrExpr;
   expect(nativeCallHandleBorrowSource(handleCallBinding(), [nullable, {
     kind: "nativeScalarLit", value: "0", type: I32, loc,
-  }], 0)).toEqual({ localId: "optional", unionTag: 1 });
+  }], 0)).toEqual({
+    localId: "optional",
+    unionTag: 1,
+    typeId: "type:handle",
+  });
 
   const derived = { kind: "nativeHandle", typeId: "type:derived" } as const;
   const upcast = {
@@ -214,7 +218,11 @@ test("a narrowed nullable-handle local borrows its proven arm", () => {
   } as const satisfies IrExpr;
   expect(nativeCallHandleBorrowSource(handleCallBinding(), [upcast, {
     kind: "nativeScalarLit", value: "0", type: I32, loc,
-  }], 0)).toEqual({ localId: "optional", unionTag: 1 });
+  }], 0)).toEqual({
+    localId: "optional",
+    unionTag: 1,
+    typeId: "type:derived",
+  });
 });
 
 test("ownership transfer and effectful following evaluation keep owned snapshots", () => {
