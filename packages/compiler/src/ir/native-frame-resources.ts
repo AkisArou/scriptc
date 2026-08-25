@@ -263,6 +263,31 @@ function discardedFrameCallsFor(
   return calls;
 }
 
+/** An owned handle produced directly as a synchronous borrowed native
+ * argument cannot escape between the two calls. Keep the inner result in its
+ * foreign frame and release it after the containing statement instead of
+ * allocating a stable managed cell solely to lend that cell back to native
+ * code. Identity upcasts remain eligible; registration-owner arguments do
+ * not, through borrowedHandleUse's binding check. */
+function nestedBorrowedFrameCallsFor(
+  fn: IrFunction,
+  bindings: ReadonlyMap<string, IrNativeBinding>,
+): Set<Extract<IrExpr, { kind: "nativeCall" }>> {
+  const calls = new Set<Extract<IrExpr, { kind: "nativeCall" }>>();
+  if (fn.async === true || fn.generator !== undefined) return calls;
+  walkExecutable(fn.body, (node, parent) => {
+    if (node.kind !== "nativeCall") return;
+    const call = node as Extract<IrExpr, { kind: "nativeCall" }>;
+    if (
+      hasFrameBoundedOwnedHandleResult(bindings.get(call.binding)) &&
+      borrowedHandleUse(call, parent, bindings)
+    ) {
+      calls.add(call);
+    }
+  });
+  return calls;
+}
+
 function frameResourceForCallbackParameter(
   fn: IrFunction,
   parameterIndex: number,
@@ -472,11 +497,12 @@ function callbackFrameAnalysis(mod: IrModule): CallbackFrameAnalysis {
   return { eligibleSources, locals, sourceLocals };
 }
 
-/** Select the conservative frame-bounded slice: ignored capable results, plus
- * immutable, unboxed locals initialized directly by a capable handle result
- * with every use as a whole synchronous borrowed native argument or, for
- * nullable handles, an exact null/handle tag test. Everything else remains on
- * the stable path. */
+/** Select the conservative frame-bounded slice: ignored capable results,
+ * capable results nested directly in synchronous borrowed native arguments,
+ * plus immutable, unboxed locals initialized directly by a capable handle
+ * result with every use as a whole synchronous borrowed native argument or,
+ * for nullable handles, an exact null/handle tag test. Everything else remains
+ * on the stable path. */
 export function specializeNativeFrameResources(mod: IrModule): void {
   const bindings = new Map((mod.nativeBindings ?? []).map((binding) => [binding.id, binding]));
   for (const fn of mod.functions) {
@@ -486,6 +512,9 @@ export function specializeNativeFrameResources(mod: IrModule): void {
       candidate.call.resultMode = "frameBounded";
     }
     for (const call of discardedFrameCallsFor(fn, bindings)) {
+      call.resultMode = "frameBounded";
+    }
+    for (const call of nestedBorrowedFrameCallsFor(fn, bindings)) {
       call.resultMode = "frameBounded";
     }
   }
@@ -527,6 +556,7 @@ function validateFunctionNativeFrameResources(
   const issues: NativeFrameResourceIssue[] = [];
   const candidates = candidatesFor(fn, bindings, mod);
   const discardedCalls = discardedFrameCallsFor(fn, bindings);
+  const nestedBorrowedCalls = nestedBorrowedFrameCallsFor(fn, bindings);
   const callbackLocals = new Map<string, IrNativeFrameResource>();
   for (const binding of mod.nativeBindings ?? []) {
     for (const argument of binding.arguments) {
@@ -572,6 +602,7 @@ function validateFunctionNativeFrameResources(
     if (candidate !== undefined) annotatedCalls.delete(candidate.call);
   }
   for (const call of discardedCalls) annotatedCalls.delete(call);
+  for (const call of nestedBorrowedCalls) annotatedCalls.delete(call);
   for (const call of annotatedCalls) {
     issues.push({
       message: `Native IR call ${call.binding} selects a frame-bounded result outside an eligible local or discarded expression`,

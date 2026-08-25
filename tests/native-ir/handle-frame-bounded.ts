@@ -51,6 +51,17 @@ function discarded(): i32 {
   return 0 as i32;
 }
 
+function nestedBorrowed(): i32 {
+  frameResourceReset();
+  if (createFrameCounter(40 as i32).add(2 as i32) !== (42 as i32)) {
+    return 63 as i32;
+  }
+  if (frameGlobalPromotions() !== (0 as i32)) return 64 as i32;
+  if (frameLocalReleases() !== (1 as i32)) return 65 as i32;
+  if (frameManagedCells() !== frameExpectedManagedCells(0 as i32)) return 66 as i32;
+  return 0 as i32;
+}
+
 function nullableNonEscapingPresent(): i32 {
   frameResourceReset();
   {
@@ -96,6 +107,8 @@ const stable = escaping();
 if (stable !== (0 as i32)) exit(stable);
 const ignored = discarded();
 if (ignored !== (0 as i32)) exit(ignored);
+const nested = nestedBorrowed();
+if (nested !== (0 as i32)) exit(nested);
 const nullablePresent = nullableNonEscapingPresent();
 if (nullablePresent !== (0 as i32)) exit(nullablePresent);
 const nullableAbsent = nullableNonEscapingAbsent();
