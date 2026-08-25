@@ -93,6 +93,7 @@ import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
 import { NATIVE_CALLBACK_INVOCATION_BASE_FIELDS, allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, nativeCallLifecycle, nativeCallbackPayloads, nativeQueuedPayloadCleanup, nativeTrampolineForm, type NativeCallbackAbsentPayload, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
 import { nativeArgumentBorrow, nativeArgumentHandle, nativeArgumentForm, nativeCallDisposal, nativeCallHandleBorrowSource, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultAcquisition, nativeResultCopy, nativeResultForm, nativeResultHandle, type NativeArgumentFormExhausted } from "../native-call-plan.js";
+import { expressionResultIsImmortal } from "../immortal-values.js";
 import { computeMayThrow } from "../emission/may-throw.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleNativeHandleTag, mangleNativeStruct, mangleRecordClone, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
@@ -6327,8 +6328,10 @@ class LlEmitter {
       }
       case "ternary": {
         // Exactly one arm evaluates; each arm runs in its own frame and
-        // moves the chosen value into the result slot.
+        // moves the chosen value into the result slot. If every arm is
+        // immortal, the join is too and needs no ownership-frame entry.
         const ty = this.llType(e.type);
+        const immortal = expressionResultIsImmortal(e);
         const c = this.emitExpr(e.cond);
         const slot = B.slot();
         B.entryAllocas.push(`${slot} = alloca ${ty}`);
@@ -6345,7 +6348,11 @@ class LlEmitter {
         B.startBlock(lj);
         const t = B.tmp();
         B.line(`${t} = load ${ty}, ptr ${slot}`);
-        return this.own({ name: t, type: e.type });
+        return this.own({
+          name: t,
+          type: e.type,
+          ...(immortal && { immortal: true }),
+        });
       }
       case "strConcat": {
         const l = this.emitExpr(e.left);

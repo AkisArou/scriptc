@@ -137,6 +137,59 @@ test("immortal string literals do not enter backend ownership frames", () => {
   expect(llvm).not.toMatch(/call void @scr_str_release\(ptr @sc_lit_/u);
 });
 
+test("ternaries preserve immortal string ownership only when every arm is immortal", () => {
+  const loc = { file: "literal-ternary.ts", start: 0, end: 0 };
+  const literal = (value: string): IrExpr => ({
+    kind: "strLit",
+    value,
+    type: STRING,
+    loc,
+  });
+  const conditional = (else_: IrExpr): IrExpr => ({
+    kind: "ternary",
+    cond: { kind: "boolLit", value: true, type: BOOL, loc },
+    then: literal("left"),
+    else_,
+    type: STRING,
+    loc,
+  });
+  const moduleFor = (expr: IrExpr, locals: IrModule["functions"][number]["locals"] = []): IrModule => ({
+    irVersion: IR_VERSION,
+    sourceFile: "literal-ternary.ts",
+    entry: "__main",
+    functions: [{
+      name: "__main",
+      params: [],
+      returnType: VOID,
+      locals,
+      body: [{ kind: "exprStmt", expr, loc }],
+      loc,
+    }],
+  });
+
+  const immortal = moduleFor(conditional(literal("right")));
+  const cImmortal = emitModule(immortal);
+  expect(cImmortal).not.toMatch(/scr_str_release\(sc_t\d+\)/u);
+  const llvmImmortal = emitLlvmModule(immortal);
+  expect(llvmImmortal).not.toMatch(/call void @scr_str_release\(ptr %t\d+\)/u);
+
+  const local = { id: "value.0", name: "value", type: STRING, mutable: false };
+  const owned = moduleFor(
+    conditional({ kind: "varRef", localId: local.id, type: STRING, loc }),
+    [local],
+  );
+  owned.functions[0]!.body.unshift({
+    kind: "varDecl",
+    localId: local.id,
+    init: literal("local"),
+    loc,
+  });
+  const cOwned = emitModule(owned);
+  expect(cOwned).toMatch(/scr_str_release\(sc_t\d+\)/u);
+  const llvmOwned = emitLlvmModule(owned);
+  expect(llvmOwned).toMatch(/call void @scr_str_release\(ptr %t\d+\)/u);
+});
+
 test("short-circuit: right operand of && only evaluates when left is true", async () => {
   const loc = { file: "l.ts", start: 0, end: 0 };
   const num = (value: number): IrExpr => ({ kind: "numLit", value, type: F64, loc });

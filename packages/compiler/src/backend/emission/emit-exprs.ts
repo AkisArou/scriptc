@@ -11,6 +11,7 @@ import { genResultThunkFor } from "./emit-async.js";
 import { nativeCallbackCancellationArgument } from "../native-callbacks.js";
 import { nativeCallLifecycle } from "../native-callbacks.js";
 import { nativeArgumentBorrow, nativeArgumentHandle, nativeArgumentForm, nativeCallDisposal, nativeCallHandleBorrowSource, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultAcquisition, nativeResultCopy, nativeResultForm, nativeResultHandle, type NativeArgumentFormExhausted } from "../native-call-plan.js";
+import { expressionResultIsImmortal } from "../immortal-values.js";
 
 function streamTypedRefCommitAdapter(
   E: CEmitter,
@@ -912,8 +913,11 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
       case "ternary": {
         // Exactly one arm evaluates. Each arm runs in its own frame: the
         // chosen value's ownership moves to the result temp, everything
-        // else the arm allocated is released inside its branch.
+        // else the arm allocated is released inside its branch. A join made
+        // exclusively from immortal values remains immortal: control flow
+        // changes which static address wins, not its lifetime.
         const c = E.emitExpr(e.cond);
+        const immortal = expressionResultIsImmortal(e);
         const name = `sc_t${E.tempCounter++}`;
         E.line(`${cDecl(e.type, name)};`);
         const emitArm = (arm: IrExpr) => {
@@ -926,8 +930,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         E.line(`} else {`);
         emitArm(e.else_);
         E.line(`}`);
-        if (isRefCounted(e.type)) E.currentFrame().push({ name, type: e.type });
-        return { name, type: e.type };
+        if (isRefCounted(e.type) && !immortal) {
+          E.currentFrame().push({ name, type: e.type });
+        }
+        return { name, type: e.type, ...(immortal && { immortal: true }) };
       }
       case "optChain": {
         // `a?.b` / `f?.()`: the nullish test inverted. The receiver
