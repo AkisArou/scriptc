@@ -103,6 +103,10 @@ export function emitModule(
 export interface Temp {
   name: string;
   type: IrType;
+  /** A statically allocated value whose refcount is permanently immortal.
+   * It obeys ordinary move/ownership semantics without joining a release
+   * frame: retaining or releasing it cannot change its lifetime. */
+  immortal?: boolean;
   /** Raw frame-bounded foreign resource, owned when present on a statement
    * frame or scope entry and borrowed on a varRef temp. */
   nativeFrame?: IrNativeFrameResource;
@@ -1866,6 +1870,14 @@ export class CEmitter {
     return { name, type };
   }
 
+  /** A statically allocated refcounted value. Unlike a borrow, it is safe to
+   * move into any owner; unlike an ordinary owned temp, no release is needed. */
+  newImmortalTemp(type: IrType, init: string): Temp {
+    const name = `sc_t${this.tempCounter++}`;
+    this.line(`${cDecl(type, name)} = ${init};`);
+    return { name, type, immortal: true };
+  }
+
   /** A raw foreign pointer whose exact release is part of the legalized
    * result plan. It joins the statement frame before any pending check, just
    * like an ordinary owned temp, but never allocates a managed handle cell. */
@@ -1910,6 +1922,7 @@ export class CEmitter {
 
   /** Strike a refcounted temp from its frame: ownership is being moved. */
   moveTemp(t: Temp): void {
+    if (t.immortal === true) return;
     if (t.nativeFrame === undefined && !isRefCounted(t.type)) return;
     for (let i = this.frames.length - 1; i >= 0; i--) {
       const idx = this.frames[i]!.findIndex((e) => e.name === t.name);

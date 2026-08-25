@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { expect, test } from "vitest";
 import { emitModule } from "../src/backend/emission/emitter.js";
+import { emitLlvmModule } from "../src/backend/llvm/emitter.js";
 import { compileC } from "../src/backend/cc.js";
 import { validateModule } from "../src/ir/validate.js";
 import { fibModule } from "./fixtures/fib-ir.js";
@@ -104,6 +105,36 @@ test("strings: literals, concat in a loop, toString, RC-clean under audit", asyn
     ],
   };
   expect(await emitCompileRun(mod)).toBe("x-0-1-2 true true\n");
+});
+
+test("immortal string literals do not enter backend ownership frames", () => {
+  const loc = { file: "literal.ts", start: 0, end: 0 };
+  const mod: IrModule = {
+    irVersion: IR_VERSION,
+    sourceFile: "literal.ts",
+    entry: "__main",
+    functions: [{
+      name: "__main",
+      params: [],
+      returnType: VOID,
+      locals: [],
+      body: [{
+        kind: "exprStmt",
+        expr: { kind: "strLit", value: "static", type: STRING, loc },
+        loc,
+      }],
+      loc,
+    }],
+  };
+
+  const c = emitModule(mod);
+  expect(c).toMatch(/ScrStr \*sc_t\d+ = \(ScrStr \*\)&sc_lit_\d+;/u);
+  expect(c).not.toMatch(/scr_str_retain\(\(ScrStr \*\)&sc_lit_/u);
+  expect(c).not.toMatch(/scr_str_release\(sc_t\d+\)/u);
+
+  const llvm = emitLlvmModule(mod);
+  expect(llvm).not.toMatch(/call ptr @scr_str_retain\(ptr @sc_lit_/u);
+  expect(llvm).not.toMatch(/call void @scr_str_release\(ptr @sc_lit_/u);
 });
 
 test("short-circuit: right operand of && only evaluates when left is true", async () => {

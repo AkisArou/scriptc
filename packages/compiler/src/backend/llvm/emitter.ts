@@ -170,6 +170,9 @@ interface LlValue {
   name: string;
   type: IrType;
   slot?: boolean;
+  /** Static storage with a permanently immortal refcount. Ownership may move
+   * anywhere, but it never needs a retain/release frame entry. */
+  immortal?: boolean;
   nativeFrame?: IrNativeFrameResource;
 }
 
@@ -4013,7 +4016,10 @@ class LlEmitter {
 
   /** Registers an owned refcounted value on the current statement frame. */
   private own(v: LlValue): LlValue {
-    if (v.nativeFrame !== undefined || isRefCounted(v.type)) this.currentFrame().push(v);
+    if (v.immortal !== true &&
+        (v.nativeFrame !== undefined || isRefCounted(v.type))) {
+      this.currentFrame().push(v);
+    }
     return v;
   }
 
@@ -4025,6 +4031,7 @@ class LlEmitter {
 
   /** Strike a refcounted temp from its frame: ownership is being moved. */
   private moveTemp(v: LlValue): void {
+    if (v.immortal === true) return;
     if (v.nativeFrame === undefined && !isRefCounted(v.type)) return;
     for (let i = this.frames.length - 1; i >= 0; i--) {
       const idx = this.frames[i]!.findIndex((e) => e.name === v.name);
@@ -6088,7 +6095,7 @@ class LlEmitter {
         return { name: e.value ? "true" : "false", type: e.type };
       case "strLit": {
         const sym = this.internLiteral(e.value);
-        return this.own({ name: this.retainValue(sym, e.type), type: e.type });
+        return { name: sym, type: e.type, immortal: true };
       }
       case "bigIntLit": {
         /* Built from its digits at each evaluation, as in the C backend: the
@@ -7518,7 +7525,7 @@ class LlEmitter {
             if (arg.nativeFrame !== undefined) continue;
             if (!isRefCounted(arg.type)) continue;
             this.moveTemp(arg);
-            this.releaseValue(arg.name, arg.type);
+            if (arg.immortal !== true) this.releaseValue(arg.name, arg.type);
           }
         };
         const callbacksMayThrow = nativeCallIsThrowCheckpoint(

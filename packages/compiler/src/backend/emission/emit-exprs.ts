@@ -646,7 +646,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
         return E.newTemp(e.type, e.value ? "true" : "false");
       case "strLit": {
         const sym = E.internLiteral(e.value);
-        return E.newTemp(e.type, retainCallC(e.type, `(ScrStr *)&${sym}`));
+        return E.newImmortalTemp(e.type, `(ScrStr *)&${sym}`);
       }
       case "bigIntLit": {
         /* Built from its digits at each evaluation. A literal in a loop
@@ -2269,7 +2269,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             if (arg.nativeFrame !== undefined) continue;
             if (!isRefCounted(arg.type)) continue;
             E.moveTemp(arg);
-            E.releaseValue(arg.name, arg.type);
+            if (arg.immortal !== true) E.releaseValue(arg.name, arg.type);
           }
         };
         const callbacksMayThrow = nativeCallIsThrowCheckpoint(
