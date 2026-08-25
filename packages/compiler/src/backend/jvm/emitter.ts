@@ -1537,6 +1537,27 @@ class JavaEmitter {
       "    return (int)value;",
       "  }",
       "",
+      "  private static int ntsArrayRelativeIndex(double value, int length) {",
+      "    double integer = Double.isNaN(value) || value == 0.0d ? 0.0d :",
+      "      value < 0.0d ? Math.ceil(value) : Math.floor(value);",
+      "    if (integer < 0.0d) {",
+      "      if (integer <= -length) return 0;",
+      "      return length + (int)integer;",
+      "    }",
+      "    if (integer >= length) return length;",
+      "    return (int)integer;",
+      "  }",
+      "",
+      "  private static int ntsArrayWithIndex(double value, int length) {",
+      "    double integer = Double.isNaN(value) || value == 0.0d ? 0.0d :",
+      "      value < 0.0d ? Math.ceil(value) : Math.floor(value);",
+      "    if (integer < 0.0d) integer += length;",
+      "    if (integer < 0.0d || integer >= length) {",
+      "      throw new NtsRangeError(\"Invalid index\");",
+      "    }",
+      "    return (int)integer;",
+      "  }",
+      "",
     ];
     for (const plan of this.#arrayTypes.values()) {
       const elementType = this.#javaType(plan.type.elem, entry.loc);
@@ -1669,6 +1690,36 @@ class JavaEmitter {
         `      ${elementType} value = data[--length];`,
         `      data[length] = ${zero};`,
         "      return value;",
+        "    }",
+        "",
+        `    private ${plan.className} slice(double start, double end) {`,
+        "      int from = ntsArrayRelativeIndex(start, length);",
+        "      int to = ntsArrayRelativeIndex(end, length);",
+        "      if (to < from) to = from;",
+        `      return new ${plan.className}(java.util.Arrays.copyOfRange(data, from, to));`,
+        "    }",
+        "",
+        `    private ${plan.className} reverse() {`,
+        "      int left = 0;",
+        "      int right = length - 1;",
+        "      while (left < right) {",
+        `        ${elementType} value = data[left];`,
+        "        data[left++] = data[right];",
+        "        data[right--] = value;",
+        "      }",
+        "      return this;",
+        "    }",
+        "",
+        `    private ${plan.className} toReversed() {`,
+        `      ${elementType}[] copy = java.util.Arrays.copyOf(data, length);`,
+        `      return new ${plan.className}(copy).reverse();`,
+        "    }",
+        "",
+        `    private ${plan.className} with(double position, ${elementType} value) {`,
+        "      int index = ntsArrayWithIndex(position, length);",
+        `      ${elementType}[] copy = java.util.Arrays.copyOf(data, length);`,
+        "      copy[index] = value;",
+        `      return new ${plan.className}(copy);`,
         "    }",
         "",
         `    private int indexOf(${elementType} value) {`,
@@ -4031,6 +4082,18 @@ class JavaEmitter {
             return `(${receiver}).pushSpread(${this.#expr(expr.args[0]!)})`;
           case "pop":
             return `(${receiver}).pop()`;
+          case "slice":
+            return `(${receiver}).slice(${
+              expr.args[0] === undefined ? "0.0d" : this.#expr(expr.args[0])
+            }, ${
+              expr.args[1] === undefined ? "Double.POSITIVE_INFINITY" : this.#expr(expr.args[1])
+            })`;
+          case "reverse":
+            return `(${receiver}).reverse()`;
+          case "toReversed":
+            return `(${receiver}).toReversed()`;
+          case "with":
+            return `(${receiver}).with(${this.#expr(expr.args[0]!)}, ${this.#expr(expr.args[1]!)})`;
           case "indexOf":
             return `(${receiver}).indexOf(${this.#expr(expr.args[0]!)})`;
           case "includes":

@@ -49,6 +49,9 @@ const numberParsing = fileURLToPath(
 const integerParameters = fileURLToPath(
   new URL("../../../../../tests/corpus/122-jvm-integer-parameters.ts", import.meta.url),
 );
+const arrayCopying = fileURLToPath(
+  new URL("../../../../../tests/corpus/123-jvm-array-copying.ts", import.meta.url),
+);
 const classFields = fileURLToPath(
   new URL("../../../../../tests/corpus/111-jvm-class-fields.ts", import.meta.url),
 );
@@ -322,6 +325,32 @@ test("the JVM emitter specializes ordinary arrays instead of boxing their elemen
   expect(source).not.toContain("for (double ");
   expect(source).not.toContain("ArrayList");
   expect(source).not.toContain("Object[] data");
+  expect(source).not.toContain("JNI");
+});
+
+test("the JVM emitter copies and reverses specialized arrays directly", () => {
+  const roots = ["copiedNumbers", "copyingEdges"];
+  const planned = planExecutableCompilation(arrayCopying, {
+    backend: "c",
+    externalFunctionRoots: roots,
+  });
+  expect(planned.ok).toBe(true);
+  if (!planned.ok) return;
+
+  const source = emitJvmSerializedModule(planned.plan.ir, {
+    className: "ArrayCopying",
+    functionExports: roots.map((functionName) => ({
+      functionName,
+      methodName: functionName,
+    })),
+  });
+
+  expect(source).toContain("java.util.Arrays.copyOfRange(data, from, to)");
+  expect(source).toContain("private NtsArray0 reverse()");
+  expect(source).toContain("private NtsArray0 toReversed()");
+  expect(source).toContain("private NtsArray0 with(double position, double value)");
+  expect(source).not.toContain("ArrayList");
+  expect(source).not.toContain("Double.valueOf");
   expect(source).not.toContain("JNI");
 });
 
