@@ -385,6 +385,12 @@ void scr_dyn_release(ScrDyn *d) {
   case SCR_DYN_HANDLE:
     scr_dyn_handle_release(d->v.handle.ptr, d->v.handle.tag);
     break;
+  case SCR_DYN_SYMBOL:
+    /* Installed by scr_dyn_alloc_symbol (the gated constructor in
+     * scr_symbol.c is the only producer) — the promise and jsval story:
+     * a symbol-free link never references the symbol unit. */
+    scr_dyn_symbol_release_fn(d->v.sym);
+    break;
   case SCR_DYN_PROMISE:
     /* Installed by scr_dyn_alloc_promise (the gated boxes are the only
      * constructors) — a promise-free link (the runtime unit tests bind
@@ -1117,6 +1123,18 @@ ScrDyn *scr_dyn_alloc_promise(void (*release_fn)(ScrPromise *p)) {
   return scr_dyn_alloc(SCR_DYN_PROMISE);
 }
 
+/* The gated symbol box (scr_symbol.c) — same allocator-view story as the
+ * promise arm above. `sym` arrives ALREADY retained: ownership moves in,
+ * so the always-linked core never names scr_sym_retain either. */
+void (*scr_dyn_symbol_release_fn)(ScrSym *s) = NULL;
+
+ScrDyn *scr_dyn_alloc_symbol(ScrSym *sym, void (*release_fn)(ScrSym *s)) {
+  scr_dyn_symbol_release_fn = release_fn;
+  ScrDyn *d = scr_dyn_alloc(SCR_DYN_SYMBOL);
+  d->v.sym = sym;
+  return d;
+}
+
 /* ── island values in the checked-dynamic tree (SCR_DYN_JSVAL) ─────────────────────────
  * The gated constructor (scr_dyn_from_jsval, scr_island.c) builds through
  * this allocator view and installs the engine-routing ops — the
@@ -1346,6 +1364,7 @@ bool scr_dyn_truthy(const ScrDyn *d) {
   case SCR_DYN_FUNC:
   case SCR_DYN_HANDLE:
   case SCR_DYN_PROMISE:
+  case SCR_DYN_SYMBOL:
   case SCR_DYN_TYPED_REF: return true;
   case SCR_DYN_JSVAL:
     /* Route to the engine's ToBoolean: objects/arrays/functions are
@@ -1382,6 +1401,7 @@ ScrStr *scr_dyn_typeof(const ScrDyn *d) {
   case SCR_DYN_NUM: s = "number"; break;
   case SCR_DYN_STR: s = "string"; break;
   case SCR_DYN_FUNC: s = "function"; break;
+  case SCR_DYN_SYMBOL: s = "symbol"; break;
   default: s = "undefined"; break;
   }
   return scr_str_new(s, strlen(s));
@@ -1402,6 +1422,7 @@ static bool scr_dyn_json_write(ScrJsonBuf *b, const ScrDyn *d) {
   switch (d->kind) {
   case SCR_DYN_UNDEF:
   case SCR_DYN_FUNC:
+  case SCR_DYN_SYMBOL: /* absent, exactly like undefined and functions */
     return false;
   case SCR_DYN_NULL: scr_jb_puts(b, "null"); return true;
   case SCR_DYN_BOOL: scr_jb_puts(b, d->v.b ? "true" : "false"); return true;
@@ -2023,6 +2044,7 @@ void scr_jb_put_dyn(ScrJsonBuf *b, const ScrDyn *d) {
   case SCR_DYN_NULL:
   case SCR_DYN_UNDEF:
   case SCR_DYN_FUNC: /* JSON.stringify: functions serialize like undefined */
+  case SCR_DYN_SYMBOL: /* and so do symbols — Node drops both */
     scr_jb_puts(b, "null");
     return;
   case SCR_DYN_BOOL:
@@ -2098,7 +2120,8 @@ void scr_jb_put_dyn(ScrJsonBuf *b, const ScrDyn *d) {
     bool first = true;
     for (size_t i = 0; i < d->v.obj.len; i++) {
       const ScrDynEntry *e = &d->v.obj.entries[i];
-      if (e->value->kind == SCR_DYN_UNDEF || e->value->kind == SCR_DYN_FUNC) continue; /* dropped, like Node */
+      if (e->value->kind == SCR_DYN_UNDEF || e->value->kind == SCR_DYN_FUNC ||
+          e->value->kind == SCR_DYN_SYMBOL) continue; /* dropped, like Node */
       if (e->value->kind == SCR_DYN_JSVAL && scr_dyn_isl_typeof_is(e->value, "function")) continue; /* engine functions drop too */
       if (!first) scr_jb_putc(b, ',');
       first = false;
@@ -2152,6 +2175,7 @@ static const char *scr_dyn_kind_name(const ScrDyn *d) {
     * extraction of engine-held values has no armed route yet (lane
     * dom-jsval-long-tail); the failure names the world honestly. */
   case SCR_DYN_TYPED_REF: return "object";
+  case SCR_DYN_SYMBOL: return "symbol";
   }
   return "unknown";
 }
@@ -2706,6 +2730,13 @@ bool scr_dyn_strict_eq(const ScrDyn *a, const ScrDyn *b) {
   case SCR_DYN_PROMISE:
     /* And the PROMISE: one promise crossing twice is one JS value. */
     return a->v.promise == b->v.promise;
+  case SCR_DYN_SYMBOL:
+    /* Same stance, and the reason the kind exists: a symbol is its
+     * identity, so one symbol boxed twice is still one value. Symbol.for
+     * interns per key, so two independent `Symbol.for("x")` calls are
+     * the same pointer and compare equal — which is what a brand test
+     * such as React's `$$typeof` is asking. */
+    return a->v.sym == b->v.sym;
   case SCR_DYN_JSVAL:
     /* Identity is the ENGINE VALUE, not the box or even the cell: two
      * wraps of one engine value compare ===-equal (the engine's own

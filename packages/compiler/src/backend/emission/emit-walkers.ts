@@ -62,6 +62,8 @@ import { OVERFLOW_MEMBER } from "./emit-shapes.js";
         return "Map";
       case "set":
         return "Set";
+      case "symbol":
+        return "symbol";
       default: {
         // Runtime HANDLE targets name the class ("expected
         // IncomingMessage at $, got string").
@@ -1459,6 +1461,12 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
         // Runtime HANDLE targets: a tag-checked reference unwrap (+1 —
         // identity, no copy; the runtime throws the path-annotated
         // TypeError on any other kind or tag).
+        if (t.kind === "symbol") {
+          // Identity unwrap, never a copy — the handle stance, and the
+          // only one that preserves what a symbol is.
+          d.push(`  return scr_dyn_symbol_unbox(d, path, ${want});`);
+          break;
+        }
         const h = DYN_HANDLE_KINDS.get(t.kind);
         if (h) {
           d.push(`  return (${cType(t).trim()})scr_dyn_handle_unbox(d, ${h.tag}, path, ${want});`);
@@ -1682,6 +1690,12 @@ export function jsonWriteHelper(E: CEmitter, t: IrType): string {
         // Runtime HANDLE kinds box by REFERENCE (identity — no copy):
         // scr_dyn_new_handle retains the borrowed operand through the
         // tag's installed ops.
+        if (t.kind === "symbol") {
+          // Boxes by REFERENCE: scr_dyn_new_symbol retains the borrowed
+          // operand, so the box shares the caller's identity.
+          d.push(`  return scr_dyn_new_symbol(v);`);
+          break;
+        }
         const h = DYN_HANDLE_KINDS.get(t.kind);
         if (h) {
           d.push(`  return scr_dyn_new_handle(v, ${h.tag});`);

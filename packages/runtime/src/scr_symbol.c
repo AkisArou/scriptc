@@ -129,3 +129,23 @@ void scr_assert_eq_sym(ScrSym *a, ScrSym *b, bool negated, bool deep,
   scr_str_release(ia);
   scr_str_release(ib);
 }
+
+/* The checked-dynamic box (SCR_DYN_SYMBOL). Built here rather than in the
+ * dyn core so the always-linked core never references the symbol unit:
+ * this retains the identity and hands the allocator both the owned
+ * pointer and the release edge to install. */
+ScrDyn *scr_dyn_new_symbol(ScrSym *sym) {
+  return scr_dyn_alloc_symbol(scr_sym_retain(sym), scr_sym_release);
+}
+
+/* dynCheck's symbol target: a kind-checked identity unwrap (+1 — never a
+ * copy). Any other kind takes the shared path-annotated TypeError, the
+ * scr_dyn_handle_unbox stance. Lives here, not in the dyn core, so the
+ * always-linked core keeps no edge into this unit. */
+ScrSym *scr_dyn_symbol_unbox(const ScrDyn *d, const ScrDynPath *path, const char *want) {
+  if (d->kind != SCR_DYN_SYMBOL) {
+    scr_dyn_check_fail(path, want, d);
+    return NULL;
+  }
+  return scr_sym_retain(d->v.sym);
+}

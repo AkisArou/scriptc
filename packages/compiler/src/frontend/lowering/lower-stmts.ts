@@ -3531,9 +3531,7 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
     const labels = L.takeLabels();
     const disc = L.lowerExpr(stmt.expression);
     const dk = disc.type.kind;
-    if (dk === "dyn") {
-      L.unsupported("SC1100", stmt.expression, "switch statements on 'unknown' values");
-    }
+    if (dk === "dyn") return lowerDynSwitch(L, stmt, disc);
     if (dk === "union") return lowerUnionSwitch(L, stmt, disc);
     if (dk !== "f64" && dk !== "string" && dk !== "bool") {
       L.unsupported("SC1090", stmt.expression, "switch on non-primitive values");
@@ -3584,8 +3582,18 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
    *   the chain's final else reproduces that as long as its body exits or
    *   is last).
    * Case bodies share ONE lexical scope, exactly like the real switch. */
+  /** What distinguishes one chain desugar from another: the wording its
+   * diagnostics use, and how a single case test becomes a condition. The
+   * clause rules above are identical for every discriminant kind, so they
+   * live here once. */
+  interface SwitchChainSpec {
+    /** Names the discriminant in diagnostics ("union-typed", "'unknown'-typed"). */
+    readonly what: string;
+    /** The condition for one case test, already lowered. */
+    makeTest(clause: ts.CaseClause, test: IrExpr): IrExpr;
+  }
+
   export function lowerUnionSwitch(L: Lowerer, stmt: ts.SwitchStatement, disc: IrExpr): IrStmt {
-    const loc = locOf(stmt);
     if (disc.type.kind !== "union") throw new Error("lowerer bug: non-union disc");
     const unionType = disc.type;
     if (!pureReemittable(disc) || !L.eqComparableUnion(unionType.unionId)) {
@@ -3595,6 +3603,85 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
         "switch on union-typed values that aren't plain reads (the tests re-read the discriminant — bind it to a const first, or switch on a discriminant field)",
       );
     }
+    return lowerSwitchChain(L, stmt, disc, {
+      what: "union-typed",
+      makeTest(clause, test) {
+        // A unit-literal test takes the unit-comparison lowering: a tag
+        // test when the arm exists, the constant FALSE when the union
+        // lacks it (`case null:` on a `number | undefined` — legal TS,
+        // never matches; coercing the literal into the union would hit
+        // the stranded-arm trap and throw where JS just skips the case).
+        const unitTest =
+          test.kind === "unitLit"
+            ? L.lowerUnitComparison(disc, test, false, locOf(clause.expression))
+            : null;
+        if (unitTest) return unitTest;
+        return {
+          kind: "unionEq",
+          unionId: unionType.unionId,
+          negated: false,
+          sameValue: false,
+          left: disc,
+          right: L.coerceInto(clause.expression, test, unionType),
+          type: BOOL,
+          loc: locOf(clause.expression),
+        };
+      },
+    });
+  }
+
+  /** Switch on a checked-dynamic discriminant — the same chain, testing with
+   * the runtime's whole-value strict equality. A case test that is not
+   * already dynamic boxes first (dynFrom), so a scalar, a unit, or a
+   * SYMBOL case label all compare by the rule JS uses for that kind:
+   * scalars by value, reference kinds by identity. Symbol labels are the
+   * shape that motivates this — a branded dispatch (`switch (v.$$typeof)`)
+   * is how JS values carry their own type tag. */
+  export function lowerDynSwitch(L: Lowerer, stmt: ts.SwitchStatement, disc: IrExpr): IrStmt {
+    const loc = locOf(stmt);
+    // The chain re-reads the discriminant at every test, and a dyn read is
+    // NOT re-emittable in general: an island-backed value runs an engine
+    // getter, and a handle read runs its ops. So evaluate ONCE into a
+    // local and test that — which is also what the switch itself does, so
+    // this is the desugar getting closer to JS rather than further from it.
+    const name = "%switch";
+    const n = L.ctx.localCounters.get(name) ?? 0;
+    L.ctx.localCounters.set(name, n + 1);
+    const local: IrLocal = { id: `${name}.${n}`, name, type: DYN, mutable: false };
+    L.ctx.locals.push(local);
+    const bind: IrStmt = { kind: "varDecl", localId: local.id, init: disc, loc };
+    const discRef: IrExpr = { kind: "varRef", localId: local.id, type: DYN, loc };
+    const chain = lowerSwitchChain(L, stmt, discRef, {
+      what: "'unknown'-typed",
+      makeTest(clause, test) {
+        const loc = locOf(clause.expression);
+        // dynScalarEq takes a dyn against a dyn or against an f64/string/
+        // bool directly; anything else convertible boxes first so the
+        // comparison runs the runtime's whole-dyn equality.
+        const k = test.type.kind;
+        const right: IrExpr =
+          k === "dyn" || k === "f64" || k === "string" || k === "bool"
+            ? test
+            : L.dynConvertible(test.type)
+              ? { kind: "dynFrom", value: test, type: DYN, loc }
+              : (L.unsupported(
+                  "SC1100",
+                  clause.expression,
+                  `case tests of type '${L.fmt(test.type)}' against an 'unknown' discriminant (the value has no dynamic representation to compare against)`,
+                ) as never);
+        return { kind: "dynScalarEq", left: discRef, right, type: BOOL, loc };
+      },
+    });
+    return { kind: "block", body: [bind, chain], loc };
+  }
+
+  function lowerSwitchChain(
+    L: Lowerer,
+    stmt: ts.SwitchStatement,
+    disc: IrExpr,
+    spec: SwitchChainSpec,
+  ): IrStmt {
+    const loc = locOf(stmt);
     const clauses = stmt.caseBlock.clauses;
     // An unlabeled break at a clause's END exits the switch — the chain's
     // own exit; anywhere else (conditional early breaks) the desugar would
@@ -3620,7 +3707,7 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
           L.unsupported(
             "SC1090",
             stray,
-            "early 'break' inside a union-typed switch (only a trailing break exits the desugared chain — restructure with if/else)",
+            `early 'break' inside a ${spec.what} switch (only a trailing break exits the desugared chain — restructure with if/else)`,
           );
         }
       }
@@ -3659,30 +3746,10 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
             L.unsupported(
               "SC1090",
               clause.expression,
-              "effectful case tests in a union-typed switch (bind the test value to a const first)",
+              `effectful case tests in a ${spec.what} switch (bind the test value to a const first)`,
             );
           }
-          // A unit-literal test takes the unit-comparison lowering: a tag
-          // test when the arm exists, the constant FALSE when the union
-          // lacks it (`case null:` on a `number | undefined` — legal TS,
-          // never matches; coercing the literal into the union would hit
-          // the stranded-arm trap and throw where JS just skips the case).
-          const unitTest =
-            test.kind === "unitLit"
-              ? L.lowerUnitComparison(disc, test, false, locOf(clause.expression))
-              : null;
-          pendingTests.push(
-            unitTest ?? {
-              kind: "unionEq",
-              unionId: unionType.unionId,
-              negated: false,
-              sameValue: false,
-              left: disc,
-              right: L.coerceInto(clause.expression, test, unionType),
-              type: BOOL,
-              loc: locOf(clause.expression),
-            },
-          );
+          pendingTests.push(spec.makeTest(clause, test));
         }
         const isDefault = ts.isDefaultClause(clause);
         if (clause.statements.length === 0 && !isDefault && i < clauses.length - 1) {
@@ -3695,7 +3762,7 @@ export function lowerVarDecl(L: Lowerer, decl: ts.VariableDeclaration, isLet: bo
           L.unsupported(
             "SC1090",
             clause,
-            "fall-through between case bodies in a union-typed switch (end each case with break/return/throw/continue)",
+            `fall-through between case bodies in a ${spec.what} switch (end each case with break/return/throw/continue)`,
           );
         }
         const last = clause.statements[clause.statements.length - 1];
