@@ -227,6 +227,10 @@ export function abiExportSuffixes(profile: LibraryProfile): string[] {
   }
   out.push(strip(profile.sinkRegisterSymbol));
   if (profile.callbackRegisterSymbol !== null) out.push(strip(profile.callbackRegisterSymbol));
+  if (profile.hostedSchedulerConfigureSymbol !== null) {
+    out.push(strip(profile.hostedSchedulerConfigureSymbol));
+    out.push(strip(profile.hostedSchedulerStopSymbol!));
+  }
   out.push(strip(profile.initSymbol));
   if (profile.collectSymbol !== null) out.push(strip(profile.collectSymbol));
   if (profile.resultResetSymbol !== null) out.push(strip(profile.resultResetSymbol));

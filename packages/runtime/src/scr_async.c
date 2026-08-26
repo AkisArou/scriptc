@@ -48,11 +48,13 @@
 #include <unistd.h>
 #endif
 
-#ifdef __wasi__
-/* WASI Preview 1 has no process-spawn capability. The child unit is not
- * linked for this target, but the generic loop keeps its quiescence hooks;
- * their empty implementation makes the absence explicit at link time
- * without weakening async/timer support. */
+#if defined(__wasi__) || defined(SCR_HOSTED_ASYNC)
+/* WASI Preview 1 has no process-spawn capability. A hosted renderer also
+ * deliberately omits ScriptC's child/poller unit: Chromium owns scheduling
+ * and exposes browser capabilities rather than Node child processes. The
+ * PromiseCore still shares this translation unit with the ordinary loop for
+ * now, so provide the loop's dormant child hooks without pulling scr_child.c
+ * into either restricted runtime personality. */
 bool scr_children_pending(void) { return false; }
 bool scr_children_reffed_pending(void) { return false; }
 bool scr_children_failed_pending(void) { return false; }
@@ -93,6 +95,7 @@ void __sanitizer_finish_switch_fiber(void *fake_stack_save, const void **bottom_
 enum { SCR_PROM_PENDING = 0, SCR_PROM_FULFILLED = 1, SCR_PROM_REJECTED = 2 };
 
 typedef struct ScrFiber ScrFiber;
+typedef struct ScrHostedReaction ScrHostedReaction;
 
 struct ScrPromise {
   size_t rc;
@@ -111,6 +114,11 @@ struct ScrPromise {
   /* Fibers parked on this promise. */
   ScrFiber **waiters;
   size_t nwaiters, waiters_cap;
+  /* Heap continuation frames parked by a hosted renderer. Each reaction
+   * owns one frame reference and is indexed by both this promise and its
+   * scheduler so either settlement or realm teardown can detach it in O(1). */
+  ScrHostedReaction *hosted_head;
+  ScrHostedReaction *hosted_tail;
   /* Combinator callbacks (Promise.race / Promise.all): at settle,
    * fulfilled promises run adapt(dst, this) — an emitted adapter
    * converting the payload into the destination's inner type — and
@@ -132,6 +140,37 @@ struct ScrPromise {
    * Node's 'rejectionHandled' moment (scr_prom_observe below). */
   bool reported_unhandled;
 };
+
+struct ScrHostedScheduler {
+  size_t rc;
+  bool accepting;
+  ScrHostedEnqueueFn enqueue;
+  void *context;
+  ScrHostedReaction *head;
+  ScrHostedReaction *tail;
+};
+
+static SCR_TL ScrHostedScheduler *scr_hosted_current_scheduler;
+
+struct ScrHostedReaction {
+  ScrPromise *promise; /* borrowed: the promise owns this reaction */
+  ScrHostedScheduler *scheduler; /* owned +1 */
+  ScrHostedResumeFn resume;
+  ScrHostedFrameReleaseFn release_frame;
+  void *frame; /* owned +1 cycle-headered continuation */
+  ScrHostedReaction *promise_prev;
+  ScrHostedReaction *promise_next;
+  ScrHostedReaction *scheduler_prev;
+  ScrHostedReaction *scheduler_next;
+};
+
+typedef struct ScrHostedJob {
+  ScrHostedScheduler *scheduler; /* owned +1 */
+  ScrPromise *promise;           /* owned +1; NULL for a plain hop */
+  ScrHostedResumeFn resume;
+  ScrHostedFrameReleaseFn release_frame;
+  void *frame;                   /* owned +1 */
+} ScrHostedJob;
 
 #ifdef SCR_RC_AUDIT
 static long scr_live_promises = 0;
@@ -166,6 +205,42 @@ static void scr_oom(void) {
   abort();
 }
 
+static void scr_hosted_reaction_unlink(ScrHostedReaction *r) {
+  ScrPromise *p = r->promise;
+  ScrHostedScheduler *scheduler = r->scheduler;
+  if (r->promise_prev != NULL) r->promise_prev->promise_next = r->promise_next;
+  else p->hosted_head = r->promise_next;
+  if (r->promise_next != NULL) r->promise_next->promise_prev = r->promise_prev;
+  else p->hosted_tail = r->promise_prev;
+  if (r->scheduler_prev != NULL) {
+    r->scheduler_prev->scheduler_next = r->scheduler_next;
+  } else {
+    scheduler->head = r->scheduler_next;
+  }
+  if (r->scheduler_next != NULL) {
+    r->scheduler_next->scheduler_prev = r->scheduler_prev;
+  } else scheduler->tail = r->scheduler_prev;
+  r->promise = NULL;
+  r->promise_prev = NULL;
+  r->promise_next = NULL;
+  r->scheduler_prev = NULL;
+  r->scheduler_next = NULL;
+}
+
+static void scr_hosted_reaction_drop(ScrHostedReaction *r) {
+  ScrHostedScheduler *scheduler = r->scheduler;
+  void *frame = r->frame;
+  ScrHostedFrameReleaseFn release_frame = r->release_frame;
+  scr_hosted_reaction_unlink(r);
+  free(r);
+  release_frame(frame);
+  scr_hosted_scheduler_release(scheduler);
+}
+
+static void scr_hosted_reactions_drop_all(ScrPromise *p) {
+  while (p->hosted_head != NULL) scr_hosted_reaction_drop(p->hosted_head);
+}
+
 static void scr_promise_trace(void *o, ScrTraceVisit visit, void *ctx) {
   ScrPromise *p = (ScrPromise *)o;
   /* Waiters are fibers (not refcounted objects) — the settled payload and
@@ -176,6 +251,10 @@ static void scr_promise_trace(void *o, ScrTraceVisit visit, void *ctx) {
     visit(p->payload, ctx);
   }
   for (size_t i = 0; i < p->ncbs; i++) visit(p->cbs[i].dst, ctx);
+  for (ScrHostedReaction *r = p->hosted_head; r != NULL;
+       r = r->promise_next) {
+    visit(r->frame, ctx);
+  }
 }
 
 /* Teardown for the collector: release the payload only when the trace does
@@ -194,6 +273,15 @@ static void scr_promise_gcfree(void *o) {
    * above; the cb destinations stay untouched (trace visits them). */
   for (size_t i = 0; i < p->ncbs; i++) {
     if (p->cbs[i].all) scr_promise_all_state_release(p->cbs[i].all);
+  }
+  /* Hosted frames were traced above. Trial deletion already accounts for
+   * those edges, so unlink without releasing the frame a second time. */
+  while (p->hosted_head != NULL) {
+    ScrHostedReaction *r = p->hosted_head;
+    ScrHostedScheduler *scheduler = r->scheduler;
+    scr_hosted_reaction_unlink(r);
+    free(r);
+    scr_hosted_scheduler_release(scheduler);
   }
   free(p->waiters);
   free(p->cbs);
@@ -270,6 +358,7 @@ void scr_promise_release(ScrPromise *p) {
       scr_promise_release(p->cbs[i].dst);
       if (p->cbs[i].all) scr_promise_all_state_release(p->cbs[i].all);
     }
+    scr_hosted_reactions_drop_all(p);
     free(p->cbs);
 #ifdef SCR_RC_AUDIT
     scr_live_promises--;
@@ -284,6 +373,174 @@ void *scr_promise_retain_v(void *p) { return scr_promise_retain((ScrPromise *)p)
 void scr_promise_release_v(void *p) { scr_promise_release((ScrPromise *)p); }
 void scr_promise_trace_v(void *p, ScrTraceVisit visit, void *ctx) {
   scr_promise_trace(p, visit, ctx);
+}
+
+/* Hosted scheduler / continuation reactions. */
+ScrHostedScheduler *scr_hosted_scheduler_new(ScrHostedEnqueueFn enqueue,
+                                              void *context) {
+  if (enqueue == NULL) return NULL;
+  ScrHostedScheduler *scheduler = calloc(1, sizeof *scheduler);
+  if (scheduler == NULL) scr_oom();
+  scheduler->rc = 1;
+  scheduler->accepting = true;
+  scheduler->enqueue = enqueue;
+  scheduler->context = context;
+  return scheduler;
+}
+
+ScrHostedScheduler *scr_hosted_scheduler_retain(ScrHostedScheduler *scheduler) {
+  if (scheduler != NULL) scheduler->rc++;
+  return scheduler;
+}
+
+void scr_hosted_scheduler_release(ScrHostedScheduler *scheduler) {
+  if (scheduler == NULL) return;
+  if (--scheduler->rc == 0) {
+    /* Every reaction owns a scheduler reference. Reaching zero with a live
+     * list would therefore be an internal ownership error. */
+    if (scheduler->head != NULL) {
+      fputs("scriptc: internal error: hosted scheduler freed with reactions\n",
+            stderr);
+      abort();
+    }
+    free(scheduler);
+  }
+}
+
+bool scr_hosted_scheduler_is_accepting(const ScrHostedScheduler *scheduler) {
+  return scheduler != NULL && scheduler->accepting;
+}
+
+bool scr_hosted_scheduler_install(ScrHostedEnqueueFn enqueue, void *context) {
+  if (scr_hosted_current_scheduler != NULL || enqueue == NULL) return false;
+  scr_hosted_current_scheduler = scr_hosted_scheduler_new(enqueue, context);
+  return true;
+}
+
+ScrHostedScheduler *scr_hosted_scheduler_current(void) {
+  return scr_hosted_current_scheduler;
+}
+
+void scr_hosted_scheduler_uninstall(void) {
+  ScrHostedScheduler *scheduler = scr_hosted_current_scheduler;
+  if (scheduler == NULL) return;
+  scr_hosted_current_scheduler = NULL;
+  scr_hosted_scheduler_stop(scheduler);
+  scr_hosted_scheduler_release(scheduler);
+}
+
+void scr_hosted_scheduler_stop(ScrHostedScheduler *scheduler) {
+  if (scheduler == NULL || !scheduler->accepting) return;
+  scheduler->accepting = false;
+  while (scheduler->head != NULL) scr_hosted_reaction_drop(scheduler->head);
+}
+
+static void scr_hosted_job_run(void *opaque) {
+  ScrHostedJob *job = (ScrHostedJob *)opaque;
+  ScrHostedScheduler *scheduler = job->scheduler;
+  ScrPromise *promise = job->promise;
+  void *frame = job->frame;
+  ScrHostedResumeFn resume = job->resume;
+  ScrHostedFrameReleaseFn release_frame = job->release_frame;
+  bool accepting = scheduler->accepting;
+  /* Free the envelope first. The callbacks may settle promises, stop the
+   * scheduler, or recursively queue another continuation. */
+  free(job);
+  if (accepting) resume(frame, promise);
+  else release_frame(frame);
+  scr_promise_release(promise);
+  scr_hosted_scheduler_release(scheduler);
+}
+
+static bool scr_hosted_enqueue_owned(ScrHostedScheduler *scheduler,
+                                     ScrPromise *promise,
+                                     ScrHostedResumeFn resume, void *frame,
+                                     ScrHostedFrameReleaseFn release_frame) {
+  if (!scheduler->accepting) {
+    release_frame(frame);
+    return false;
+  }
+  ScrHostedJob *job = malloc(sizeof *job);
+  if (job == NULL) scr_oom();
+  job->scheduler = scr_hosted_scheduler_retain(scheduler);
+  job->promise = scr_promise_retain(promise);
+  job->resume = resume;
+  job->release_frame = release_frame;
+  job->frame = frame;
+  if (!scheduler->enqueue(scheduler->context, &scr_hosted_job_run, job)) {
+    release_frame(frame);
+    scr_promise_release(job->promise);
+    scr_hosted_scheduler_release(job->scheduler);
+    free(job);
+    return false;
+  }
+  return true;
+}
+
+static void scr_hosted_reactions_schedule_all(ScrPromise *promise) {
+  while (promise->hosted_head != NULL) {
+    ScrHostedReaction *r = promise->hosted_head;
+    ScrHostedScheduler *scheduler = r->scheduler;
+    ScrHostedResumeFn resume = r->resume;
+    ScrHostedFrameReleaseFn release_frame = r->release_frame;
+    void *frame = r->frame;
+    scr_hosted_reaction_unlink(r);
+    free(r);
+    (void)scr_hosted_enqueue_owned(scheduler, promise, resume, frame,
+                                   release_frame);
+    scr_hosted_scheduler_release(scheduler);
+  }
+}
+
+bool scr_hosted_scheduler_post(ScrHostedScheduler *scheduler,
+                               ScrHostedResumeFn resume, void *frame,
+                               ScrHostedFrameReleaseFn release_frame) {
+  if (scheduler == NULL || resume == NULL || frame == NULL ||
+      release_frame == NULL) {
+    if (frame != NULL && release_frame != NULL) release_frame(frame);
+    return false;
+  }
+  return scr_hosted_enqueue_owned(scheduler, NULL, resume, frame,
+                                  release_frame);
+}
+
+bool scr_promise_await_hosted(ScrHostedScheduler *scheduler, ScrPromise *promise,
+                              ScrHostedResumeFn resume, void *frame,
+                              ScrHostedFrameReleaseFn release_frame) {
+  if (scheduler == NULL || promise == NULL || resume == NULL || frame == NULL ||
+      release_frame == NULL || !scheduler->accepting) {
+    if (frame != NULL && release_frame != NULL) release_frame(frame);
+    return false;
+  }
+  /* Attaching await is a rejection handler at attachment time, not only
+   * when a later continuation happens to run. */
+  scr_prom_observe(promise);
+  if (promise->state != SCR_PROM_PENDING) {
+    return scr_hosted_enqueue_owned(scheduler, promise, resume, frame,
+                                    release_frame);
+  }
+  ScrHostedReaction *r = calloc(1, sizeof *r);
+  if (r == NULL) scr_oom();
+  r->promise = promise;
+  r->scheduler = scr_hosted_scheduler_retain(scheduler);
+  r->resume = resume;
+  r->release_frame = release_frame;
+  r->frame = frame;
+  r->promise_prev = promise->hosted_tail;
+  if (r->promise_prev != NULL) r->promise_prev->promise_next = r;
+  else promise->hosted_head = r;
+  promise->hosted_tail = r;
+  r->scheduler_prev = scheduler->tail;
+  if (r->scheduler_prev != NULL) r->scheduler_prev->scheduler_next = r;
+  else scheduler->head = r;
+  scheduler->tail = r;
+  return true;
+}
+
+void scr_hosted_schedule_error(void) {
+  static const char message[] =
+      "hosted async continuation was refused because the renderer scheduler is unavailable";
+  scr_throw_error_msg(SCR_ERR_ERROR, message, sizeof message - 1);
 }
 
 /* ── fibers and the scheduler ─────────────────────────────────────────── */
@@ -1013,6 +1270,10 @@ static void scr_promise_all_settle(ScrAllState *st, ScrPromise *result, size_t i
 static void scr_promise_settle_wake(ScrPromise *p) {
   for (size_t i = 0; i < p->nwaiters; i++) scr_ready_push(p->waiters[i]);
   p->nwaiters = 0;
+  /* Each hosted continuation becomes one embedder microtask. Never batch
+   * them behind a single drain callback: doing so would reorder ScriptC
+   * awaits relative to JavaScript promise jobs in the shared queue. */
+  scr_hosted_reactions_schedule_all(p);
   for (size_t i = 0; i < p->ncbs; i++) {
     if (p->cbs[i].all) {
       scr_promise_all_settle(p->cbs[i].all, p->cbs[i].dst, p->cbs[i].all_idx, p);
@@ -1425,6 +1686,48 @@ static void scr_promise_rethrow(ScrPromise *p) {
     scr_throw_str(scr_str_new("undefined", 9));
     break;
   }
+}
+
+/* Hosted continuation extraction. Registration already supplied the one
+ * required microtask hop, so these helpers must never touch either ScriptC's
+ * ready queue or the embedder scheduler. The generated resume wrapper has
+ * installed its frame's exception/ALS context before calling here. */
+static bool scr_hosted_await_settled(ScrPromise *p) {
+  if (p == NULL || p->state == SCR_PROM_PENDING) {
+    fputs("scriptc: internal error: hosted continuation resumed before settlement\n",
+          stderr);
+    abort();
+  }
+  scr_prom_observe(p);
+  if (p->state == SCR_PROM_REJECTED) {
+    scr_promise_rethrow(p);
+    return false;
+  }
+  return true;
+}
+
+double scr_hosted_await_f64(ScrPromise *p) {
+  return scr_hosted_await_settled(p) ? p->f64 : 0;
+}
+
+bool scr_hosted_await_bool(ScrPromise *p) {
+  return scr_hosted_await_settled(p) ? p->b : false;
+}
+
+ScrStr *scr_hosted_await_str(ScrPromise *p) {
+  return scr_hosted_await_settled(p) && p->payload
+      ? scr_str_retain((ScrStr *)p->payload)
+      : NULL;
+}
+
+void *scr_hosted_await_ref(ScrPromise *p) {
+  return scr_hosted_await_settled(p) && p->payload
+      ? p->retain_fn(p->payload)
+      : NULL;
+}
+
+void scr_hosted_await_void(ScrPromise *p) {
+  (void)scr_hosted_await_settled(p);
 }
 
 /* Await result extraction. Rejection re-throws into the awaiter. */

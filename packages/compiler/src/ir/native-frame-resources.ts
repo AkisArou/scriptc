@@ -14,20 +14,77 @@ interface FrameCandidate {
   readonly localId: string;
   readonly declaration: Extract<IrStmt, { kind: "varDecl" }>;
   readonly call: Extract<IrExpr, { kind: "nativeCall" }>;
+  readonly binding: IrNativeBinding;
   readonly resource: IrNativeFrameResource;
 }
 
 function hasFrameBoundedOwnedHandleResult(
   binding: IrNativeBinding | undefined,
 ): binding is IrNativeBinding {
-  return binding !== undefined &&
-    binding.result.frameBounded !== undefined &&
-    binding.result.type.kind === "nativeHandle" &&
-    binding.result.ownership.kind === "owned" &&
-    binding.result.ownership.transfer === "to-runtime" &&
-    (binding.result.projection.kind === "direct" ||
-      binding.result.projection.kind === "nullableHandle") &&
-    !binding.arguments.some((argument) => argument.callback?.owner.kind === "result");
+  if (
+    binding === undefined ||
+    binding.result.frameBounded === undefined ||
+    binding.result.type.kind !== "nativeHandle" ||
+    binding.result.ownership.kind !== "owned" ||
+    binding.result.ownership.transfer !== "to-runtime" ||
+    (binding.result.projection.kind !== "direct" &&
+      binding.result.projection.kind !== "nullableHandle")
+  ) {
+    return false;
+  }
+  /* A result-owned callback normally requires the stable result cell to own
+   * its lifecycle edge. It may use the raw frame result only when the ABI has
+   * an explicit sibling release hook for that same callback context. Native
+   * then owns one standalone context reference and must close admission before
+   * releasing it. No implicit lifetime inference crosses this boundary. */
+  return binding.arguments.every((argument, argumentIndex) => {
+    const callback = argument.callback;
+    if (callback?.owner.kind !== "result") return true;
+    return callback.synchronousReturn === true && binding.parameters.some(
+      (parameter) =>
+        parameter.projection.kind === "callbackContextRelease" &&
+        parameter.projection.argument === argumentIndex,
+    );
+  });
+}
+
+function resultCancellationBindings(binding: IrNativeBinding): ReadonlySet<string> {
+  return new Set(
+    binding.arguments.flatMap((argument) => {
+      const callback = argument.callback;
+      return callback !== undefined && callback.owner.kind === "result" &&
+          "cancellationBinding" in callback
+        ? [callback.cancellationBinding]
+        : [];
+    }),
+  );
+}
+
+/** Recognise the one non-borrowing use a scoped registration may have: its
+ * explicit terminal cancellation. Requiring a direct top-level expression
+ * statement makes the local slot recoverable by both emitters, so they can
+ * transfer the raw resource to the cancellation call and then null the slot.
+ * The caller separately proves that no use follows this one. */
+function terminalFrameCancellationUse(
+  value: Extract<IrExpr, { kind: "varRef" }>,
+  parent: WalkParent | null,
+  candidate: FrameCandidate,
+  fn: IrFunction,
+): boolean {
+  const call = parent?.node.kind === "nativeCall"
+    ? parent.node as Extract<IrExpr, { kind: "nativeCall" }>
+    : null;
+  const statement = parent?.parent?.node.kind === "exprStmt"
+    ? parent.parent.node as Extract<IrStmt, { kind: "exprStmt" }>
+    : null;
+  if (
+    call === null || statement === null || statement.expr !== call ||
+    !fn.body.includes(statement) || call.args.indexOf(value) < 0
+  ) {
+    return false;
+  }
+  const cancellations = resultCancellationBindings(candidate.binding);
+  return cancellations.size === 1 && cancellations.has(call.binding);
 }
 
 interface CallbackFrameAnalysis {
@@ -37,6 +94,20 @@ interface CallbackFrameAnalysis {
     object,
     readonly { fn: IrFunction; localId: string; resource: IrNativeFrameResource }[]
   >;
+}
+
+type ClosureExpr = Extract<IrExpr, { kind: "closure" }>;
+
+interface NativeFrameClosureCandidate {
+  readonly parent: IrFunction;
+  readonly call: Extract<IrExpr, { kind: "nativeCall" }>;
+  readonly closure: ClosureExpr;
+  readonly target: IrFunction;
+}
+
+interface NativeFrameClosureAnalysis {
+  readonly closures: ReadonlySet<object>;
+  readonly locals: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
 interface WalkParent {
@@ -194,16 +265,26 @@ function candidatesFor(
       localId,
       declaration: declaration!,
       call: init,
+      binding,
       resource,
     });
   }
 
   const escaped = new Set<string>();
+  const terminalCancellationSeen = new Set<string>();
   walkExecutable(fn.body, (node, parent) => {
     if (node.kind !== "varRef") return;
-    const localId = (node as Extract<IrExpr, { kind: "varRef" }>).localId;
+    const value = node as Extract<IrExpr, { kind: "varRef" }>;
+    const localId = value.localId;
     if (!candidates.has(localId)) return;
     const candidate = candidates.get(localId)!;
+    /* Once native has consumed the raw registration, even another borrow is a
+     * use-after-dispose. Walking in executable order turns "terminal" into a
+     * checked property rather than an emitter assumption. */
+    if (terminalCancellationSeen.has(localId)) {
+      escaped.add(localId);
+      return;
+    }
     const nullable = candidate.resource.nullable;
     if (nullable !== undefined) {
       const use = parent?.node;
@@ -230,9 +311,12 @@ function candidatesFor(
       escaped.add(localId);
       return;
     }
-    if (!borrowedHandleUse(node as IrExpr, parent, bindings)) {
-      escaped.add(localId);
+    if (borrowedHandleUse(value, parent, bindings)) return;
+    if (terminalFrameCancellationUse(value, parent, candidate, fn)) {
+      terminalCancellationSeen.add(localId);
+      return;
     }
+    escaped.add(localId);
   });
   for (const localId of escaped) candidates.delete(localId);
   return candidates;
@@ -497,6 +581,155 @@ function callbackFrameAnalysis(mod: IrModule): CallbackFrameAnalysis {
   return { eligibleSources, locals, sourceLocals };
 }
 
+/** A stack capture box must be born once in the declaring function's outer
+ * lexical scope. This deliberately excludes params, inherited captures, TDZ
+ * cells, and loop/block declarations: all are supportable in principle, but
+ * none is needed for the renderer hot path and each widens the lifetime proof. */
+function directScalarFrameCapture(fn: IrFunction, localId: string): boolean {
+  if (
+    fn.params.some((parameter) => parameter.localId === localId) ||
+    (fn.captures ?? []).some((capture) => capture.localId === localId)
+  ) {
+    return false;
+  }
+  const local = fn.locals.find((candidate) => candidate.id === localId);
+  if (
+    local?.boxed !== true || local.tdz === true ||
+    (local.type.kind !== "f64" && local.type.kind !== "bool")
+  ) {
+    return false;
+  }
+  const declarations: Extract<IrStmt, { kind: "varDecl" }>[] = [];
+  walkExecutable(fn.body, (node) => {
+    if (node.kind !== "varDecl") return;
+    const declaration = node as Extract<IrStmt, { kind: "varDecl" }>;
+    if (declaration.localId === localId) declarations.push(declaration);
+  });
+  return declarations.length === 1 && declarations[0]!.init !== null &&
+    fn.body.includes(declarations[0]!);
+}
+
+/** A lifted handler may freely read and mutate its scalar captures, but it may
+ * not expose the stack closure itself or put one of its stack boxes into a
+ * nested closure. Either operation could manufacture a reference that outlives
+ * the native registration even though the registration itself is scoped. */
+function targetAcceptsFrameClosure(target: IrFunction): boolean {
+  if (target.async === true || target.generator !== undefined) return false;
+  const captures = new Set((target.captures ?? []).map(({ localId }) => localId));
+  let safe = true;
+  walkExecutable(target.body, (node) => {
+    if (!safe) return;
+    if (node.kind === "selfRef") {
+      safe = false;
+      return;
+    }
+    if (node.kind === "closure") {
+      const nested = node as ClosureExpr;
+      if (nested.captures.some((localId) => captures.has(localId))) safe = false;
+    }
+  });
+  return safe;
+}
+
+/** Select the zero-allocation callback-context slice. The existing
+ * frame-bounded result proof establishes that native teardown happens before
+ * the declaring function returns. This additional proof requires the callback
+ * to run synchronously on that same caller, keeps the closure expression as a
+ * direct callback argument, and closes every alternate escape for its boxes.
+ *
+ * Candidate removal is a fixpoint: when one closure using a local cannot use a
+ * stack context, every sibling using that same local must fall back too. This
+ * is what prevents one ordinary heap closure from retaining a stack box. */
+function nativeFrameClosureAnalysis(mod: IrModule): NativeFrameClosureAnalysis {
+  const functions = new Map(mod.functions.map((fn) => [fn.name, fn]));
+  const bindings = new Map((mod.nativeBindings ?? []).map((binding) => [binding.id, binding]));
+  const users = new Map<string, Map<string, Set<object>>>();
+  const candidates = new Map<object, NativeFrameClosureCandidate>();
+
+  for (const parent of mod.functions) {
+    const byLocal = new Map<string, Set<object>>();
+    users.set(parent.name, byLocal);
+    walkExecutable(parent.body, (node) => {
+      if (node.kind !== "closure") return;
+      const closure = node as ClosureExpr;
+      for (const localId of closure.captures) {
+        const localUsers = byLocal.get(localId) ?? new Set<object>();
+        localUsers.add(closure);
+        byLocal.set(localId, localUsers);
+      }
+    });
+    if (parent.async === true || parent.generator !== undefined) continue;
+    walkExecutable(parent.body, (node) => {
+      if (node.kind !== "nativeCall") return;
+      const call = node as Extract<IrExpr, { kind: "nativeCall" }>;
+      if (call.resultMode !== "frameBounded") return;
+      const binding = bindings.get(call.binding);
+      if (!hasFrameBoundedOwnedHandleResult(binding)) return;
+      binding.arguments.forEach((argument, argumentIndex) => {
+        const contract = argument.callback;
+        const closure = call.args[argumentIndex];
+        if (
+          contract?.owner.kind !== "result" ||
+          contract.synchronousReturn !== true ||
+          contract.allowedInvocationExecutors.length !== 1 ||
+          contract.allowedInvocationExecutors[0] !== "same-as-caller" ||
+          closure?.kind !== "closure" || closure.captures.length === 0 ||
+          !binding.parameters.some(
+            (parameter) =>
+              parameter.projection.kind === "callbackContextRelease" &&
+              parameter.projection.argument === argumentIndex,
+          )
+        ) {
+          return;
+        }
+        const target = functions.get(closure.fnName);
+        if (
+          target?.captures === undefined ||
+          target.captures.length !== closure.captures.length ||
+          !targetAcceptsFrameClosure(target) ||
+          closure.captures.some((localId, index) => {
+            const local = parent.locals.find((candidate) => candidate.id === localId);
+            const capture = target.captures![index];
+            return !directScalarFrameCapture(parent, localId) ||
+              local === undefined || capture === undefined ||
+              !typeEquals(local.type, capture.type);
+          })
+        ) {
+          return;
+        }
+        candidates.set(closure, { parent, call, closure, target });
+      });
+    });
+  }
+
+  const closures = new Set<object>(candidates.keys());
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [key, candidate] of candidates) {
+      if (!closures.has(key)) continue;
+      const byLocal = users.get(candidate.parent.name)!;
+      if (
+        candidate.closure.captures.some((localId) =>
+          [...(byLocal.get(localId) ?? [])].some((user) => !closures.has(user))
+        )
+      ) {
+        closures.delete(key);
+        changed = true;
+      }
+    }
+  }
+
+  const locals = new Map<string, Set<string>>();
+  for (const [key, candidate] of candidates) {
+    if (!closures.has(key)) continue;
+    const selected = locals.get(candidate.parent.name) ?? new Set<string>();
+    for (const localId of candidate.closure.captures) selected.add(localId);
+    locals.set(candidate.parent.name, selected);
+  }
+  return { closures, locals };
+}
+
 /** Select the conservative frame-bounded slice: ignored capable results,
  * capable results nested directly in synchronous borrowed native arguments,
  * plus immutable, unboxed locals initialized directly by a capable handle
@@ -536,6 +769,19 @@ export function specializeNativeFrameResources(mod: IrModule): void {
     for (const [localId, resource] of selected) {
       locals.get(localId)!.nativeFrame = resource;
     }
+  }
+  const frameClosures = nativeFrameClosureAnalysis(mod);
+  for (const fn of mod.functions) {
+    const selectedLocals = frameClosures.locals.get(fn.name);
+    if (selectedLocals !== undefined) {
+      const locals = new Map(fn.locals.map((local) => [local.id, local]));
+      for (const localId of selectedLocals) locals.get(localId)!.nativeFrameCapture = true;
+    }
+    walkExecutable(fn.body, (node) => {
+      if (node.kind === "closure" && frameClosures.closures.has(node)) {
+        (node as ClosureExpr).nativeFrameContext = true;
+      }
+    });
   }
 }
 
@@ -622,6 +868,7 @@ export function validateNativeFrameResources(
 ): NativeFrameResourceIssue[] {
   const issues: NativeFrameResourceIssue[] = [];
   const analysis = callbackFrameAnalysis(mod);
+  const frameClosures = nativeFrameClosureAnalysis(mod);
   for (const binding of mod.nativeBindings ?? []) {
     for (const argument of binding.arguments) {
       for (const source of argument.callback?.sourceArguments ?? []) {
@@ -655,6 +902,35 @@ export function validateNativeFrameResources(
   }
   for (const fn of mod.functions) {
     issues.push(...validateFunctionNativeFrameResources(fn, bindings, mod, analysis));
+    const selectedLocals = frameClosures.locals.get(fn.name) ?? new Set<string>();
+    for (const local of fn.locals) {
+      if (local.nativeFrameCapture === true && !selectedLocals.has(local.id)) {
+        issues.push({
+          message: `local "${local.name}" has an invalid frame-bounded callback capture`,
+          loc: fn.loc,
+        });
+      }
+    }
+    walkExecutable(fn.body, (node) => {
+      if (node.kind !== "closure") return;
+      const closure = node as ClosureExpr;
+      if (closure.nativeFrameContext !== true) return;
+      if (!frameClosures.closures.has(closure)) {
+        issues.push({
+          message: `closure ${closure.fnName} has an invalid frame-bounded native callback context`,
+          loc: closure.loc,
+        });
+        return;
+      }
+      for (const localId of closure.captures) {
+        if (fn.locals.find((local) => local.id === localId)?.nativeFrameCapture !== true) {
+          issues.push({
+            message: `closure ${closure.fnName} uses a frame-bounded context without a frame capture for "${localId}"`,
+            loc: closure.loc,
+          });
+        }
+      }
+    });
   }
   return issues;
 }

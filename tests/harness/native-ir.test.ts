@@ -3625,6 +3625,35 @@ function borrowedUtf8Module(): IrModule {
   return mod;
 }
 
+function borrowedUtf8StaticIdentityModule(dynamic = false): IrModule {
+  const mod = borrowedUtf8Module();
+  mod.nativeBindings![0]!.parameters.push({
+    name: "static_identity",
+    type: USIZE,
+    passMode: "value",
+    ownership: { kind: "value" },
+    projection: { kind: "utf8StaticIdentity", argument: 0 },
+  });
+  if (dynamic) {
+    const exit = mod.functions[0]!.body[0]!;
+    if (exit.kind !== "exprStmt" || exit.expr.kind !== "nativeCall") {
+      throw new Error("test fixture lost its Native IR exit call");
+    }
+    const call = exit.expr.args[0]!;
+    if (call.kind !== "nativeCall") {
+      throw new Error("test fixture lost its nested native call");
+    }
+    call.args = [{
+      kind: "strConcat",
+      left: { kind: "strLit", value: "hel", type: { kind: "string" }, loc },
+      right: { kind: "strLit", value: "lo", type: { kind: "string" }, loc },
+      type: { kind: "string" },
+      loc,
+    }];
+  }
+  return mod;
+}
+
 function borrowedCStringModule(): IrModule {
   const mod = borrowedUtf8Module();
   mod.nativeBindings![0]!.parameters = [
@@ -4533,6 +4562,7 @@ test("Native IR rejects malformed borrowed UTF-8 C-string results", () => {
 
 test("Native IR rejects malformed or ambiguous UTF-8 projections", () => {
   expect(validateModule(borrowedUtf8Module())).toEqual([]);
+  expect(validateModule(borrowedUtf8StaticIdentityModule())).toEqual([]);
   expect(validateModule(borrowedCStringModule())).toEqual([]);
 
   const mutablePointer = borrowedUtf8Module();
@@ -4562,6 +4592,23 @@ test("Native IR rejects malformed or ambiguous UTF-8 projections", () => {
   expect(validateModule(mixed).map((error) => error.message)).toContain(
     'Native IR binding "fixture.i32_identity" argument "data" has an incomplete or ambiguous ABI projection',
   );
+});
+
+test("C and LLVM expose identity only for direct immortal string literals", () => {
+  const literal = borrowedUtf8StaticIdentityModule();
+  const dynamic = borrowedUtf8StaticIdentityModule(true);
+  expect(validateModule(literal)).toEqual([]);
+  expect(validateModule(dynamic)).toEqual([]);
+
+  const literalC = emitModule(literal);
+  const dynamicC = emitModule(dynamic);
+  expect(literalC).toContain("(size_t)(uintptr_t)(const void *)");
+  expect(dynamicC).toContain("(size_t)0");
+
+  const literalLlvm = emitLlvmModule(literal, { pointerBits: 64 });
+  const dynamicLlvm = emitLlvmModule(dynamic, { pointerBits: 64 });
+  expect(literalLlvm).toContain("ptrtoint ptr");
+  expect(dynamicLlvm).toMatch(/call i32 @nts_i32_identity\(ptr [^,]+, i64 [^,]+, i64 0\)/u);
 });
 
 test("Native IR rejects malformed or ambiguous borrowed-byte projections", () => {
@@ -5091,6 +5138,7 @@ describe.each(["c", "llvm"] as const)("Native IR exact integers, %s backend", (b
      * invocation for a later turn. */
     expect(generated).toContain("scr_direct_callback_acquire");
     expect(generated).toContain("scr_native_handle_prepare_direct_callback");
+    expect(generated).toContain("scr_native_handle_prepare_direct_callback_fused");
     expect(generated).not.toContain("scr_retained_callbacks_register");
     expect(generated).not.toContain("scr_callback_table_acquire");
     expect(generated).not.toContain("scr_callback_token_admit");

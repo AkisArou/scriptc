@@ -1,5 +1,6 @@
 /* Unit tests for boxes and closures: RC cascades (closure → box → string),
- * scalar and ref slots, set_ref release of old contents, immortal closures.
+ * scalar and ref slots, set_ref release of old contents, immortal closures,
+ * and compiler-proven frame callback storage.
  * Built with -DSCR_RC_AUDIT; exits nonzero on any failure or leak.
  */
 #include "../src/scr_runtime.h"
@@ -24,6 +25,10 @@ static int failures = 0;
 static double dummy_fn(ScrClosure *env, double x) {
   (void)env;
   return x * 2;
+}
+
+static double captured_fn(ScrClosure *env, double x) {
+  return scr_box_get_f64(env->caps[0]) + x;
 }
 
 int main(void) {
@@ -69,6 +74,34 @@ int main(void) {
   CHECK(scr_closure_retain(ic) == ic);
   scr_closure_release(ic);
   CHECK(ic->rc == SIZE_MAX);
+
+  /* A proven synchronous native callback uses the ordinary ScrClosure ABI,
+   * but its scalar box and closure storage are immortal values in the
+   * enclosing native frame. Retain/release—including the native owner's
+   * release callback—must therefore be allocation-free no-ops. */
+  ScrBox frame_box_storage;
+  ScrBox *frame_box = scr_box_init_frame(&frame_box_storage, SCR_BOX_F64);
+  CHECK(frame_box == &frame_box_storage);
+  CHECK(frame_box->rc == SIZE_MAX);
+  scr_box_set_f64(frame_box, 40);
+  CHECK(scr_box_retain(frame_box) == frame_box);
+  scr_box_release(frame_box);
+  CHECK(scr_box_get_f64(frame_box) == 40);
+
+  void *frame_closure_storage = SCR_STACK_ALLOC(SCR_CLOSURE_FRAME_BYTES(1));
+  ScrClosure *frame_closure =
+      scr_closure_init_frame(frame_closure_storage, (void *)&captured_fn, 1);
+  frame_closure->caps[0] = frame_box;
+  CHECK(frame_closure->rc == SIZE_MAX);
+  CHECK(frame_closure->ncaps == 1);
+  CHECK(((double (*)(ScrClosure *, double))frame_closure->fn)(
+            frame_closure, 2) == 42);
+  CHECK(scr_closure_retain(frame_closure) == frame_closure);
+  scr_closure_release(frame_closure);
+  CHECK(((double (*)(ScrClosure *, double))frame_closure->fn)(
+            frame_closure, 3) == 43);
+  CHECK(scr_box_live_count() == 0);
+  CHECK(scr_closure_live_count() == 0);
 
   fprintf(stderr, "%s\n", failures ? "FAILED" : "all closure tests passed");
   return failures ? 1 : 0;

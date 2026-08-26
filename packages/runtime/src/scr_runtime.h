@@ -1723,6 +1723,10 @@ typedef struct ScrBox {
 ScrBox *scr_box_new(ScrBoxKind kind); /* returns +1, slot zeroed */
 ScrBox *scr_box_new_obj(void *(*retain)(void *), void (*release)(void *),
                          ScrTraceFn trace);
+/* Compiler-proven synchronous native callback capture. `storage` belongs to
+ * the active declaring stack frame; only scalar box kinds are accepted. The
+ * immortal refcount makes ordinary closure retain/release operations no-ops. */
+ScrBox *scr_box_init_frame(ScrBox *storage, ScrBoxKind kind);
 
 static inline ScrBox *scr_box_retain(ScrBox *b) {
   if (b->rc != SIZE_MAX) {
@@ -1761,6 +1765,23 @@ typedef struct ScrClosure {
 } ScrClosure;
 
 ScrClosure *scr_closure_new(void *fn, size_t ncaps); /* +1; caller fills caps with +1 box refs */
+
+/* Stack storage used only after whole-program escape analysis proves that a
+ * result-owned callback and all of its captures die before the declaring
+ * synchronous frame. Generated C expands SCR_STACK_ALLOC once in the
+ * function prologue for each selected closure site, so loops reuse storage
+ * instead of growing the stack on every evaluation. */
+#define SCR_CLOSURE_FRAME_BYTES(ncaps) \
+  (sizeof(ScrClosure) + (size_t)(ncaps) * sizeof(ScrBox *))
+#if defined(_MSC_VER)
+#include <malloc.h>
+#define SCR_STACK_ALLOC(bytes) _alloca(bytes)
+#elif defined(__GNUC__) || defined(__clang__)
+#define SCR_STACK_ALLOC(bytes) __builtin_alloca(bytes)
+#else
+#error "scriptc frame callbacks require a supported stack allocator"
+#endif
+ScrClosure *scr_closure_init_frame(void *storage, void *fn, size_t ncaps);
 
 static inline ScrClosure *scr_closure_retain(ScrClosure *c) {
   if (c->rc != SIZE_MAX) {
@@ -3128,6 +3149,19 @@ void scr_native_handle_prepare_lifecycle(
     ScrNativeLifecycleFn collect_begin,
     ScrNativeLifecycleFn collect_complete,
     ScrNativeLifecycleFn destroy_context);
+/* Fused handle + first-lifecycle allocation. The context storage is aligned
+ * for the runtime's pointer-bearing lifecycle records and remains valid until
+ * the handle is freed. Its destroy hook tears down contents only; it must not
+ * free the inline address. This is an internal runtime construction primitive,
+ * exposed here so lifecycle implementations can remain in separate units. */
+ScrNativeHandle *scr_native_handle_prepare_inline_lifecycle(
+    ScrNativeDestructor destructor, const ScrNativeHandleType *type,
+    const char *type_name, ScrNativeLifecycleKind kind, size_t context_size,
+    ScrNativeLifecycleFn commit, ScrNativeLifecycleFn abandon,
+    ScrNativeLifecycleFn begin, ScrNativeLifecycleFn complete,
+    ScrNativeLifecycleTraceFn trace, ScrNativeLifecycleFn collect_begin,
+    ScrNativeLifecycleFn collect_complete,
+    ScrNativeLifecycleFn destroy_context, void **out_context);
 /* Explicit non-consuming callback cancellation. Begin closes admission before
  * the native cancellation call; complete runs after native quiescence and
  * removes those callback lifecycle edges. Repeated cancellation returns false. */
@@ -3151,6 +3185,13 @@ void scr_native_handle_prepare_callback(ScrNativeHandle *handle,
 typedef struct ScrDirectCallback ScrDirectCallback;
 ScrDirectCallback *scr_native_handle_prepare_direct_callback(
     ScrNativeHandle *handle, ScrClosure *closure);
+/* The common one-callback result-owned case allocates the native handle,
+ * lifecycle edge, and callback context as one object. Additional callbacks on
+ * the same result use scr_native_handle_prepare_direct_callback above. */
+ScrNativeHandle *scr_native_handle_prepare_direct_callback_fused(
+    ScrNativeDestructor destructor, const ScrNativeHandleType *type,
+    const char *type_name, ScrClosure *closure,
+    ScrDirectCallback **out_callback);
 ScrClosure *scr_direct_callback_acquire(ScrDirectCallback *callback);
 /* Per-ScriptC-instance retained-callback service. The target configures its
  * thread-safe owner wake before registrations can be created. Registration
@@ -4220,15 +4261,76 @@ long scr_obj_live_count(void);
 #endif
 
 /* ── async: promises, fibers, event loop ────────────────────────────
- * Async function bodies run on stackful fibers; `await` parks the fiber on
- * a promise; a dependency-free loop (microtasks before timers, FIFO
- * tiebreaks) drives everything after %main returns. See scr_async.c.
+ * Ordinary native executables run async function bodies on stackful fibers;
+ * `await` parks the fiber on a promise and ScriptC's dependency-free loop
+ * drives it after %main returns. Hosted renderer personalities instead use
+ * heap continuation frames and ScrHostedScheduler below: the embedder owns
+ * the one microtask queue, while this PromiseCore still owns settlement,
+ * payloads, rejection observation, and continuation attachment.
  */
 ScrPromise *scr_promise_new(void);
 ScrPromise *scr_promise_retain(ScrPromise *p);
 void scr_promise_release(ScrPromise *p);
 void *scr_promise_retain_v(void *p);
 void scr_promise_release_v(void *p);
+
+/* Hosted stackless suspension.
+ *
+ * A hosted scheduler is a thread-confined adapter to an embedder's existing
+ * microtask queue (Blink's EventLoop for the Chromium renderer). `enqueue`
+ * MUST defer `run(job)`; it must never invoke it inline. Returning false
+ * refuses ownership and makes the runtime tear the job down immediately.
+ *
+ * A continuation frame is a ScriptC cycle-headered object: the compiler
+ * allocates it with scr_cyc_alloc, transfers one owned reference at attach,
+ * and supplies its ordinary release function. This makes the otherwise
+ * hidden Promise -> continuation edge visible to ScriptC's cycle collector.
+ * The resume callback receives the settled promise BORROWED for that call.
+ * It extracts through scr_hosted_await_* (which never schedules a second
+ * hop), then either completes or transfers the frame into another attach.
+ *
+ * stop() closes admission and drops every still-pending reaction. Jobs that
+ * were already accepted by the embedder remain safe: when eventually run,
+ * they observe the closed scheduler and drop instead of resuming. All calls,
+ * including the deferred run callback, must occur on the owning sequence.
+ */
+typedef struct ScrHostedScheduler ScrHostedScheduler;
+typedef void (*ScrHostedJobFn)(void *job);
+typedef bool (*ScrHostedEnqueueFn)(void *context, ScrHostedJobFn run,
+                                   void *job);
+typedef void (*ScrHostedResumeFn)(void *frame, ScrPromise *settled);
+typedef void (*ScrHostedFrameReleaseFn)(void *frame);
+
+ScrHostedScheduler *scr_hosted_scheduler_new(ScrHostedEnqueueFn enqueue,
+                                              void *context);
+ScrHostedScheduler *scr_hosted_scheduler_retain(ScrHostedScheduler *scheduler);
+void scr_hosted_scheduler_release(ScrHostedScheduler *scheduler);
+void scr_hosted_scheduler_stop(ScrHostedScheduler *scheduler);
+bool scr_hosted_scheduler_is_accepting(const ScrHostedScheduler *scheduler);
+bool scr_hosted_scheduler_install(ScrHostedEnqueueFn enqueue, void *context);
+ScrHostedScheduler *scr_hosted_scheduler_current(void); /* borrowed */
+void scr_hosted_scheduler_uninstall(void);
+
+/* Always one host-microtask hop, including an already-settled promise.
+ * `frame` ownership moves on every call, whether it succeeds or fails. */
+bool scr_promise_await_hosted(ScrHostedScheduler *scheduler, ScrPromise *promise,
+                              ScrHostedResumeFn resume, void *frame,
+                              ScrHostedFrameReleaseFn release_frame);
+/* The await-non-thenable primitive: the same one-hop continuation without
+ * a settled promise. The resume callback receives settled == NULL. */
+bool scr_hosted_scheduler_post(ScrHostedScheduler *scheduler,
+                               ScrHostedResumeFn resume, void *frame,
+                               ScrHostedFrameReleaseFn release_frame);
+/* Turns a refused attach (no installed scheduler, or realm teardown) into the
+ * pending Error the generated entry/resume wrapper rejects into its result
+ * promise. The frame has already been released by the refused attach. */
+void scr_hosted_schedule_error(void);
+
+double scr_hosted_await_f64(ScrPromise *promise);
+bool scr_hosted_await_bool(ScrPromise *promise);
+ScrStr *scr_hosted_await_str(ScrPromise *promise); /* +1 */
+void *scr_hosted_await_ref(ScrPromise *promise);   /* +1 */
+void scr_hosted_await_void(ScrPromise *promise);
 
 typedef struct ScrFiber ScrFiber;
 /* Spawn + run eagerly to the first suspension; returns the promise, +1. */

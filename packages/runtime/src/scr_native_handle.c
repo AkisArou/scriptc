@@ -24,6 +24,10 @@ typedef struct ScrNativeLifecycleEdge {
   ScrNativeLifecycleFn destroy_context;
   struct ScrNativeLifecycleEdge *next;
   bool cancelling;
+  /* The first lifecycle edge may share the handle allocation. Its context
+   * lives immediately after the edge, so neither allocation is freed until
+   * the handle itself is. Additional edges keep the ordinary heap form. */
+  bool inline_storage;
 } ScrNativeLifecycleEdge;
 
 typedef struct ScrNativeOwnerEdge {
@@ -72,6 +76,36 @@ _Static_assert(sizeof(ScrNativeHandleFastPrefix) ==
 #ifdef SCR_RC_AUDIT
 static _Thread_local size_t scr_native_handle_prepares;
 #endif
+
+static void scr_native_handle_gc_free(void *opaque);
+
+static ScrNativeHandle *scr_native_handle_allocate(
+    ScrNativeDestructor destructor, const ScrNativeHandleType *type,
+    const char *type_name, size_t allocation_size) {
+  if (!destructor || !type || allocation_size < sizeof(ScrNativeHandle)) {
+    scr_trap("scriptc: invalid native handle metadata\n");
+  }
+#ifdef SCR_RC_AUDIT
+  scr_native_handle_prepares++;
+#endif
+  ScrNativeHandle *handle =
+      type->cycle_collected
+          ? scr_cyc_alloc(allocation_size, &scr_native_handle_trace_v,
+                          &scr_native_handle_gc_free)
+          : calloc(1, allocation_size);
+  if (!handle) scr_trap("scriptc: out of memory\n");
+  /* scr_cyc_alloc does not promise zero-filled payload storage. The collector
+   * header is before this pointer, so clearing the requested object extent is
+   * both sufficient and safe. */
+  if (type->cycle_collected) memset(handle, 0, allocation_size);
+  handle->rc = 1;
+  handle->destructor = destructor;
+  handle->type = type;
+  handle->type_name = type_name;
+  handle->state = SCR_NATIVE_HANDLE_PREPARED;
+  scr_obj_alloc_note();
+  return handle;
+}
 
 void scr_native_handle_audit_reset(void) {
 #ifdef SCR_RC_AUDIT
@@ -205,23 +239,8 @@ static void scr_native_handle_type_error(const ScrNativeHandle *handle,
 ScrNativeHandle *scr_native_handle_prepare(ScrNativeDestructor destructor,
                                            const ScrNativeHandleType *type,
                                            const char *type_name) {
-  if (!destructor || !type) scr_trap("scriptc: invalid native handle metadata\n");
-#ifdef SCR_RC_AUDIT
-  scr_native_handle_prepares++;
-#endif
-  ScrNativeHandle *handle = type->cycle_collected
-                                ? scr_cyc_alloc(sizeof *handle,
-                                                &scr_native_handle_trace_v,
-                                                &scr_native_handle_gc_free)
-                                : calloc(1, sizeof *handle);
-  if (!handle) scr_trap("scriptc: out of memory\n");
-  handle->rc = 1;
-  handle->destructor = destructor;
-  handle->type = type;
-  handle->type_name = type_name;
-  handle->state = SCR_NATIVE_HANDLE_PREPARED;
-  scr_obj_alloc_note();
-  return handle;
+  return scr_native_handle_allocate(destructor, type, type_name,
+                                    sizeof(ScrNativeHandle));
 }
 
 ScrNativeHandle *scr_native_handle_retain(ScrNativeHandle *handle) {
@@ -272,7 +291,7 @@ static void scr_native_handle_destroy_prepared(ScrNativeHandle *handle) {
     ScrNativeLifecycleEdge *next = lifecycle->next;
     lifecycle->abandon(lifecycle->context);
     lifecycle->destroy_context(lifecycle->context);
-    free(lifecycle);
+    if (!lifecycle->inline_storage) free(lifecycle);
     lifecycle = next;
   }
 }
@@ -335,7 +354,7 @@ static void scr_native_handle_destroy_foreign(ScrNativeHandle *handle,
     (collecting ? lifecycle->collect_complete : lifecycle->complete)(
         lifecycle->context);
     lifecycle->destroy_context(lifecycle->context);
-    free(lifecycle);
+    if (!lifecycle->inline_storage) free(lifecycle);
     lifecycle = next;
   }
 }
@@ -368,7 +387,51 @@ void scr_native_handle_prepare_lifecycle(
   edge->destroy_context = destroy_context;
   edge->next = handle->lifecycle;
   edge->cancelling = false;
+  edge->inline_storage = false;
   handle->lifecycle = edge;
+}
+
+ScrNativeHandle *scr_native_handle_prepare_inline_lifecycle(
+    ScrNativeDestructor destructor, const ScrNativeHandleType *type,
+    const char *type_name, ScrNativeLifecycleKind kind, size_t context_size,
+    ScrNativeLifecycleFn commit, ScrNativeLifecycleFn abandon,
+    ScrNativeLifecycleFn begin, ScrNativeLifecycleFn complete,
+    ScrNativeLifecycleTraceFn trace, ScrNativeLifecycleFn collect_begin,
+    ScrNativeLifecycleFn collect_complete,
+    ScrNativeLifecycleFn destroy_context, void **out_context) {
+  if (context_size == 0 || out_context == NULL || commit == NULL ||
+      abandon == NULL || begin == NULL || complete == NULL ||
+      collect_begin == NULL || collect_complete == NULL ||
+      destroy_context == NULL) {
+    scr_trap("scriptc: invalid inline native lifecycle edge\n");
+  }
+  if (context_size > SIZE_MAX - sizeof(ScrNativeHandle) -
+                         sizeof(ScrNativeLifecycleEdge)) {
+    scr_trap("scriptc: native lifecycle allocation overflow\n");
+  }
+  const size_t allocation_size = sizeof(ScrNativeHandle) +
+                                 sizeof(ScrNativeLifecycleEdge) +
+                                 context_size;
+  ScrNativeHandle *handle = scr_native_handle_allocate(
+      destructor, type, type_name, allocation_size);
+  ScrNativeLifecycleEdge *edge = (ScrNativeLifecycleEdge *)(handle + 1);
+  void *context = (void *)(edge + 1);
+  edge->kind = kind;
+  edge->context = context;
+  edge->commit = commit;
+  edge->abandon = abandon;
+  edge->begin = begin;
+  edge->complete = complete;
+  edge->trace = trace;
+  edge->collect_begin = collect_begin;
+  edge->collect_complete = collect_complete;
+  edge->destroy_context = destroy_context;
+  edge->next = NULL;
+  edge->cancelling = false;
+  edge->inline_storage = true;
+  handle->lifecycle = edge;
+  *out_context = context;
+  return handle;
 }
 
 void scr_native_handle_prepare_owner(ScrNativeHandle *child,

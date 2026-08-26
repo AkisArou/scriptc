@@ -4,15 +4,377 @@
 import type { CEmitter } from "./emitter.js";
 import { mangleArgPack, mangleAsyncSpawn, mangleChildDataThunk, mangleChildExitThunk, mangleCloseBindThunk, mangleCloseOverrideWrap, mangleConnectResThunk, mangleConnectSockThunk, mangleDgramMsgThunk, mangleDnsLookupThunk, mangleField, mangleFsRenameThunk, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleRaceThunk, mangleRawParam, mangleNetLookupAnswerThunk, mangleEmitterInvokeThunk, mangleStreamCbThunk, mangleStreamDoneFn, mangleRecordNew, mangleRecordRelease, mangleRecordStruct, mangleResolveThunk, mangleSniAnswerThunk, mangleTrampoline } from "../mangle.js";
 import { cDecl, cType, releaseCallC, retainCallC, vAdapters } from "./emit-types.js";
-import { IrType, isRefCounted, isUnitType, typeEquals, typeKey } from "../../ir/nodes.js";
+import { IrFunction, IrType, isRefCounted, isUnitType, typeEquals, typeKey } from "../../ir/nodes.js";
+import {
+  functionHasHostedSuspension,
+  hostedAsyncEntryOf,
+  hostedAsyncStepOf,
+  hostedCaptureOwnsReference,
+  type HostedAsyncStep,
+  type HostedAsyncSuspendTerminal,
+} from "../../ir/hosted-async.js";
+
+function hostedResumeSymbol(continuation: string): string {
+  return `${mangleFunction(continuation)}_hosted_resume`;
+}
+
+function hostedSuspendSymbol(stepName: string): string {
+  return `${mangleFunction(stepName)}_hosted_suspend`;
+}
+
+function emitHostedSyncSettle(
+  E: CEmitter,
+  lines: string[],
+  ret: IrType,
+  promise: string,
+  value: string,
+): void {
+  switch (ret.kind) {
+    case "void":
+      lines.push(`    scr_promise_fulfill_void(${promise});`);
+      return;
+    case "f64":
+    case "date":
+      lines.push(`    scr_promise_fulfill_f64(${promise}, ${value});`);
+      return;
+    case "bool":
+      lines.push(`    scr_promise_fulfill_bool(${promise}, ${value});`);
+      return;
+    case "string":
+      lines.push(`    scr_promise_fulfill_str(${promise}, ${value});`);
+      return;
+    default: {
+      const v = vAdapters(ret);
+      lines.push(
+        `    scr_promise_fulfill_ref(${promise}, ${value}, ${v.retain}, ${v.release}, ${E.traceArgC(ret)});`,
+      );
+    }
+  }
+}
+
+/** An async function with no suspension still obeys JavaScript's eager-prefix
+ * rule, but it needs neither a native stack nor a continuation frame. Run the
+ * ordinary compiled body inline and settle a fresh PromiseCore object. */
+function emitHostedSynchronousAsync(E: CEmitter, out: string[], fn: IrFunction): void {
+  const lifted = fn.captures !== undefined;
+  const boxedIds = new Set(fn.locals.filter((l) => l.boxed).map((l) => l.id));
+  const pname = (p: { localId: string }) =>
+    boxedIds.has(p.localId) ? mangleRawParam(p.localId) : mangleLocal(p.localId);
+  const spawnParams = [
+    ...(lifted ? ["ScrClosure *sc_env"] : []),
+    ...fn.params.map((p) => cDecl(p.type, pname(p))),
+  ];
+  const callArgs = [
+    ...(lifted ? ["sc_env"] : []),
+    ...fn.params.map((p) => pname(p)),
+  ].join(", ");
+  const cache = fn.asyncCacheGlobal !== undefined ? mangleGlobal(fn.asyncCacheGlobal) : null;
+  const cycleCache =
+    fn.asyncCycleCacheGlobal !== undefined ? mangleGlobal(fn.asyncCycleCacheGlobal) : null;
+  const ret = fn.returnType;
+  const bodyCall = `${mangleFunction(fn.name)}(${callArgs})`;
+  const lines: string[] = [
+    `static ScrPromise *${mangleAsyncSpawn(fn.name)}(${spawnParams.join(", ") || "void"}) {`,
+    ...(cache !== null ? [`  if (${cache}) return scr_promise_retain(${cache});`] : []),
+    `  ScrPromise *sc_p = scr_promise_new();`,
+  ];
+  if (ret.kind === "void") lines.push(`  ${bodyCall};`);
+  else lines.push(`  ${cDecl(ret, "sc_r")} = ${bodyCall};`);
+  lines.push(`  if (scr_exc_pending()) {`);
+  if (ret.kind !== "void" && isRefCounted(ret)) {
+    // The ordinary body's escaping-unwind value is the NULL dummy. Keep the
+    // release anyway: this pins the same ownership contract as the fiber
+    // trampoline and remains correct if a future backend returns a partial.
+    lines.push(`    ${releaseCallC(ret, "sc_r")};`);
+  }
+  lines.push(`    scr_promise_reject_pending(sc_p);`, `  } else {`);
+  emitHostedSyncSettle(E, lines, ret, "sc_p", "sc_r");
+  lines.push(`  }`);
+  if (cache !== null) {
+    lines.push(
+      `  scr_promise_mark_handled(sc_p);`,
+      `  ScrPromise *sc_cache_owned = scr_promise_retain(sc_p);`,
+      `  scr_promise_release(${cache});`,
+      `  ${cache} = sc_cache_owned;`,
+    );
+  }
+  if (cycleCache !== null) {
+    lines.push(
+      `  ScrPromise *sc_cycle_cache_owned = scr_promise_retain(sc_p);`,
+      `  scr_promise_release(${cycleCache});`,
+      `  ${cycleCache} = sc_cycle_cache_owned;`,
+    );
+  }
+  lines.push(`  return sc_p;`, `}`);
+  out.push("", ...lines);
+}
+
+/** Emit the terminal of one ordinary hosted continuation function. Its body
+ * has already been emitted through the normal C ownership/exception path. */
+export function emitHostedAsyncTerminalC(
+  E: CEmitter,
+  fn: IrFunction,
+  step: HostedAsyncStep,
+): void {
+  const terminal = step.terminal;
+  E.frames.push([]);
+  if (terminal.kind === "propagate") {
+    E.releaseForJump(0, 0);
+    E.line(`return;${E.srcComment(terminal.loc)}`);
+    return;
+  }
+  if (terminal.kind === "complete") {
+    const promise = mangleLocal(terminal.resultPromiseLocalId);
+    if (terminal.value === null || terminal.resultType.kind === "void") {
+      E.line(`scr_promise_fulfill_void(${promise});${E.srcComment(terminal.loc)}`);
+    } else {
+      const value = E.emitExpr(terminal.value);
+      if (isRefCounted(value.type)) E.moveTemp(value);
+      emitHostedSyncSettle(E, E.lines, terminal.resultType, promise, value.name);
+    }
+    E.releaseForJump(0, 0);
+    E.line(`return;`);
+    return;
+  }
+  if (terminal.kind === "jump" || terminal.kind === "branch") {
+    const condition = terminal.kind === "branch" ? E.emitExpr(terminal.condition) : null;
+    const arguments_ = terminal.captures.map((capture) => {
+      const value = E.emitExpr({
+        kind: "varRef",
+        localId: capture.localId,
+        type: capture.type,
+        loc: terminal.loc,
+      });
+      E.moveTemp(value); // the selected continuation owns this +1
+      return value.name;
+    });
+    const callArguments = [
+      ...(fn.captures === undefined ? [] : ["sc_env"]),
+      ...arguments_,
+    ].join(", ");
+    if (terminal.kind === "jump") {
+      E.line(`${mangleFunction(terminal.continuation)}(${callArguments});${E.srcComment(terminal.loc)}`);
+    } else {
+      E.line(
+        `if (${condition!.name}) ${mangleFunction(terminal.whenTrue)}(${callArguments}); ` +
+          `else ${mangleFunction(terminal.whenFalse)}(${callArguments});${E.srcComment(terminal.loc)}`,
+      );
+    }
+    E.releaseForJump(0, 0);
+    E.line(`return;`);
+    return;
+  }
+
+  const arguments_: string[] = [];
+  if (terminal.promise !== null) {
+    const promise = E.emitExpr(terminal.promise);
+    E.moveTemp(promise); // helper moves this +1 into the continuation frame
+    arguments_.push(promise.name);
+  }
+  for (const capture of terminal.captures) {
+    if (capture.localId === null) {
+      const value = `scr_closure_retain(sc_env)`;
+      arguments_.push(value);
+      continue;
+    }
+    const value = E.emitExpr({
+      kind: "varRef",
+      localId: capture.localId,
+      type: capture.type,
+      loc: terminal.loc,
+    });
+    E.moveTemp(value); // helper moves each +1 into the continuation frame
+    arguments_.push(value.name);
+  }
+  E.line(
+    `if (!${hostedSuspendSymbol(fn.name)}(${arguments_.join(", ")})) ` +
+      `scr_hosted_schedule_error();${E.srcComment(terminal.loc)}`,
+  );
+  E.releaseForJump(0, 0);
+  E.line(`return;`);
+}
+
+function hostedAwaitReadC(type: IrType, promise: string): { declaration: string | null; value: string } {
+  switch (type.kind) {
+    case "void":
+      return { declaration: `  scr_hosted_await_void(${promise});`, value: "" };
+    case "f64":
+    case "date":
+      return { declaration: `  double sc_awaited = scr_hosted_await_f64(${promise});`, value: "sc_awaited" };
+    case "bool":
+      return { declaration: `  bool sc_awaited = scr_hosted_await_bool(${promise});`, value: "sc_awaited" };
+    case "string":
+      return { declaration: `  ScrStr *sc_awaited = scr_hosted_await_str(${promise});`, value: "sc_awaited" };
+    default:
+      return {
+        declaration: `  ${cDecl(type, "sc_awaited")} = (${cType(type).trim()})scr_hosted_await_ref(${promise});`,
+        value: "sc_awaited",
+      };
+  }
+}
+
+function emitHostedSuspendScaffolding(
+  E: CEmitter,
+  out: string[],
+  fn: IrFunction,
+  terminal: HostedAsyncSuspendTerminal,
+): void {
+  const continuation = E.fnByName.get(terminal.continuation);
+  const shape = E.recordsById.get(terminal.frameShapeId);
+  if (continuation === undefined || shape === undefined) {
+    throw new Error(`emitter bug: incomplete hosted continuation '${terminal.continuation}'`);
+  }
+  const struct = mangleRecordStruct(shape.id);
+  const release = `${mangleRecordRelease(shape.id)}_v`;
+  const resultCapture = terminal.captures.find(
+    (capture) => capture.localId === terminal.resultPromiseLocalId,
+  );
+  if (resultCapture === undefined) {
+    throw new Error(`emitter bug: hosted continuation '${terminal.continuation}' lost its result promise`);
+  }
+
+  const resume = hostedResumeSymbol(terminal.continuation);
+  const callbackLines: string[] = [
+    `static void ${resume}(void *sc_frame0, ScrPromise *sc_settled) {`,
+    `  ${struct} *sc_frame = (${struct} *)sc_frame0;`,
+    `  ScrPromise *sc_result = scr_promise_retain(sc_frame->${mangleField(resultCapture.field)});`,
+  ];
+  let awaitedValue = "";
+  if (terminal.mode === "promise") {
+    const read = hostedAwaitReadC(terminal.awaitedType, "sc_settled");
+    if (read.declaration !== null) callbackLines.push(read.declaration);
+    awaitedValue = read.value;
+  } else {
+    callbackLines.push(`  (void)sc_settled;`);
+  }
+  callbackLines.push(`  if (!scr_exc_pending()) {`);
+  const callArgs: string[] = [];
+  let environmentArg: string | null = null;
+  for (const capture of terminal.captures) {
+    const member = `sc_frame->${mangleField(capture.field)}`;
+    const local = `sc_a_${capture.field}`;
+    callbackLines.push(`    ${cDecl(capture.type, local)} = ${member};`);
+    if (hostedCaptureOwnsReference(capture)) callbackLines.push(`    ${member} = NULL;`);
+    if (capture.localId === null) environmentArg = local;
+    else callArgs.push(local);
+  }
+  const localCaptureCount = terminal.captures.filter((capture) => capture.localId !== null).length;
+  callbackLines.push(
+    `    ${mangleRecordRelease(shape.id)}(sc_frame);`,
+    `    ${mangleFunction(continuation.name)}(${[
+      ...(environmentArg === null ? [] : [environmentArg]),
+      ...callArgs,
+      ...(continuation.params.length > localCaptureCount ? [awaitedValue] : []),
+    ].join(", ")});`,
+    ...(environmentArg === null ? [] : [`    scr_closure_release(${environmentArg});`]),
+    `  } else {`,
+    `    ${mangleRecordRelease(shape.id)}(sc_frame);`,
+    `  }`,
+    `  if (scr_exc_pending()) scr_promise_reject_pending(sc_result);`,
+    `  scr_promise_release(sc_result);`,
+    `}`,
+  );
+  out.push("", ...callbackLines);
+
+  const params = [
+    ...(terminal.mode === "promise" ? ["ScrPromise *sc_awaited"] : []),
+    ...terminal.captures.map((capture) => cDecl(capture.type, `sc_a_${capture.field}`)),
+  ];
+  const helper: string[] = [
+    `static bool ${hostedSuspendSymbol(fn.name)}(${params.join(", ") || "void"}) {`,
+    `  ${struct} *sc_frame = ${mangleRecordNew(shape.id)}();`,
+    ...terminal.captures.map(
+      (capture) => `  sc_frame->${mangleField(capture.field)} = sc_a_${capture.field};`,
+    ),
+    ...(terminal.awaitedField === null
+      ? []
+      : [`  sc_frame->${mangleField(terminal.awaitedField)} = sc_awaited;`]),
+    terminal.mode === "promise"
+      ? `  return scr_promise_await_hosted(scr_hosted_scheduler_current(), sc_awaited, &${resume}, sc_frame, &${release});`
+      : `  return scr_hosted_scheduler_post(scr_hosted_scheduler_current(), &${resume}, sc_frame, &${release});`,
+    `}`,
+  ];
+  out.push(...helper);
+}
+
+function emitHostedStacklessAsync(
+  E: CEmitter,
+  out: string[],
+  fn: IrFunction,
+  entryStep: string,
+): void {
+  const step = E.fnByName.get(entryStep);
+  if (step === undefined) throw new Error(`emitter bug: missing hosted entry step '${entryStep}'`);
+  const lifted = fn.captures !== undefined;
+  const boxedIds = new Set(fn.locals.filter((local) => local.boxed).map((local) => local.id));
+  const pname = (param: { localId: string }) =>
+    boxedIds.has(param.localId) ? mangleRawParam(param.localId) : mangleLocal(param.localId);
+  const spawnParams = [
+    ...(lifted ? ["ScrClosure *sc_env"] : []),
+    ...fn.params.map((param) => cDecl(param.type, pname(param))),
+  ];
+  const cache = fn.asyncCacheGlobal !== undefined ? mangleGlobal(fn.asyncCacheGlobal) : null;
+  const cycleCache = fn.asyncCycleCacheGlobal !== undefined ? mangleGlobal(fn.asyncCycleCacheGlobal) : null;
+  const lines = [
+    `static ScrPromise *${mangleAsyncSpawn(fn.name)}(${spawnParams.join(", ") || "void"}) {`,
+    ...(cache === null ? [] : [`  if (${cache}) return scr_promise_retain(${cache});`]),
+    `  ScrPromise *sc_p = scr_promise_new();`,
+    `  ${mangleFunction(step.name)}(${[
+      ...(lifted ? ["sc_env"] : []),
+      ...fn.params.map((param) => pname(param)),
+      "scr_promise_retain(sc_p)",
+    ].join(", ")});`,
+    `  if (scr_exc_pending()) scr_promise_reject_pending(sc_p);`,
+  ];
+  if (cache !== null) {
+    lines.push(
+      `  scr_promise_mark_handled(sc_p);`,
+      `  ScrPromise *sc_cache_owned = scr_promise_retain(sc_p);`,
+      `  scr_promise_release(${cache});`,
+      `  ${cache} = sc_cache_owned;`,
+    );
+  }
+  if (cycleCache !== null) {
+    lines.push(
+      `  ScrPromise *sc_cycle_cache_owned = scr_promise_retain(sc_p);`,
+      `  scr_promise_release(${cycleCache});`,
+      `  ${cycleCache} = sc_cycle_cache_owned;`,
+    );
+  }
+  lines.push(`  return sc_p;`, `}`);
+  out.push("", ...lines);
+}
 
 /** Per-async-function machinery: an argument pack, a fiber trampoline
    * (unpacks, runs the ordinary compiled body, settles the promise), and a
    * spawn wrapper call sites use. Lifted async lambdas additionally thread
    * their closure env through the pack (+1, released after the body). */
   export function emitAsyncScaffolding(E: CEmitter, out: string[]): void {
+    const hosted = E.mod.lib?.hostedSchedulerConfigureSymbol !== undefined;
+    if (hosted) {
+      for (const stepFn of E.mod.functions) {
+        const step = hostedAsyncStepOf(stepFn);
+        if (step?.terminal.kind === "suspend") {
+          emitHostedSuspendScaffolding(E, out, stepFn, step.terminal);
+        }
+      }
+    }
     for (const fn of E.mod.functions) {
       if (!fn.async) continue;
+      if (hosted) {
+        const entry = hostedAsyncEntryOf(fn);
+        if (entry !== undefined) {
+          emitHostedStacklessAsync(E, out, fn, entry.entryStep);
+          continue;
+        }
+        if (functionHasHostedSuspension(fn)) {
+          throw new Error(
+            `emitter bug: hosted async function '${fn.name}' reached C emission before stackless lowering`,
+          );
+        }
+        emitHostedSynchronousAsync(E, out, fn);
+        continue;
+      }
       const pack = mangleArgPack(fn.name);
       const lifted = fn.captures !== undefined;
       const fields: string[] = [];

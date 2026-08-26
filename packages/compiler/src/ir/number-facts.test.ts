@@ -937,9 +937,6 @@ describe("straight-line declared-field refinement", () => {
 
 /* ── the native checked-number boundary ─────────────────────────────────── */
 
-const I32 = { kind: "nativeScalar", scalar: "i32" } as const;
-const U8 = { kind: "nativeScalar", scalar: "u8" } as const;
-
 /** One binding taking a plain number into an exact slot and widening the
  * same slot back out — the identity shape every case below crosses. */
 function numberBinding(id: string, scalar: "i32" | "u8"): IrNativeBinding {

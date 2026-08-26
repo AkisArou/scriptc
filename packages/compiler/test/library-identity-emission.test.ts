@@ -17,6 +17,7 @@ const libraryModule = (): IrModule => ({
     resultResetSymbol: null,
     threadInstances: false,
     exports: [],
+    nativeExports: [],
     trapOverlays: [],
     identity: {
       buildIdSymbol: "ie_build_id",
@@ -28,6 +29,28 @@ const libraryModule = (): IrModule => ({
 });
 
 describe("library identity emission", () => {
+  test("hosted scheduler control ABI is emitted equivalently by C and LLVM", () => {
+    const mod = libraryModule();
+    mod.lib!.hostedSchedulerConfigureSymbol = "ie_hosted_scheduler_configure";
+    mod.lib!.hostedSchedulerStopSymbol = "ie_hosted_scheduler_stop";
+
+    const c = emitModule(mod);
+    expect(c).toContain(
+      "int32_t ie_hosted_scheduler_configure(ScrHostedEnqueueFn enqueue, void *ctx)",
+    );
+    expect(c).toContain("scr_hosted_scheduler_install(enqueue, ctx) ? 0 : -1");
+    expect(c).toContain("void ie_hosted_scheduler_stop(void)");
+    expect(c).toContain("scr_hosted_scheduler_uninstall();");
+
+    const llvm = emitLlvmModule(mod);
+    expect(llvm).toContain("declare zeroext i1 @scr_hosted_scheduler_install(ptr, ptr)");
+    expect(llvm).toContain("declare void @scr_hosted_scheduler_uninstall()");
+    expect(llvm).toContain("define i32 @ie_hosted_scheduler_configure(ptr %enqueue, ptr %ctx)");
+    expect(llvm).toContain("call zeroext i1 @scr_hosted_scheduler_install(ptr %enqueue, ptr %ctx)");
+    expect(llvm).toContain("define void @ie_hosted_scheduler_stop()");
+    expect(llvm).toContain("call void @scr_hosted_scheduler_uninstall()");
+  });
+
   test("direct C emission retains the IR-declared identity getters", () => {
     const emitted = emitModule(libraryModule());
     expect(emitted).toContain("uint64_t ie_build_id(void)");

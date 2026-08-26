@@ -1,0 +1,44 @@
+{
+  "profile_format": 1,
+  "name": "hosted-async",
+  "entry": "app.ts",
+  "emission": "c",
+  "optimization": "release",
+  "abi": {
+    "prefix": "ha_",
+    "init_symbol": "ha_init",
+    "sink_register_symbol": "ha_set_sink",
+    "collect_symbol": null,
+    "result_reset_symbol": null,
+    "localize_runtime": false,
+    "instance_per_thread": false,
+    "hosted_scheduler_configure_symbol": "ha_hosted_configure",
+    "hosted_scheduler_stop_symbol": "ha_hosted_stop"
+  },
+  "exports": [
+    {
+      "export": "start",
+      "symbol": "ha_start",
+      "params": [],
+      "returns": "f64"
+    },
+    {
+      "export": "read",
+      "symbol": "ha_read",
+      "params": [],
+      "returns": "f64"
+    },
+    {
+      "export": "startHop",
+      "symbol": "ha_start_hop",
+      "params": [],
+      "returns": "f64"
+    },
+    {
+      "export": "startBranch",
+      "symbol": "ha_start_branch",
+      "params": [],
+      "returns": "f64"
+    }
+  ]
+}

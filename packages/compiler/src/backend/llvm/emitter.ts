@@ -65,7 +65,6 @@ import { emitLibraryIdentityLines } from "../library-identity.js";
 import type {
   IrBytesElem,
   IrExpr,
-  IrFfiCallbackParam,
   IrFfiCallbackParamClass,
   IrFfiImport,
   IrFfiReturnClass,
@@ -88,14 +87,23 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "../../ir/nodes.js";
-import { nullableNativeHandleUnion, canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, islandPromisePayloadTag, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, moduleHasProcessScopedRegistration, nativeCallbackSourceScriptType, nativeDestructorBindingIds, nativeIntegerInfo, nativeIntegerOpTraps, nativeScalarWidensToNumber, NPM_COMPRESS_MIN, provenNumberLiteral, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID, isFfiReleaseParam } from "../../ir/nodes.js";
+import { nullableNativeHandleUnion, canMarshalFuncIntoIsland, CAUGHT, DYN, F64, islandCallbackRet, islandPromisePayloadTag, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesDynInvoke, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, moduleHasProcessScopedRegistration, nativeCallbackSourceScriptType, nativeDestructorBindingIds, nativeIntegerInfo, nativeIntegerOpTraps, NPM_COMPRESS_MIN, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, STRING, typeEquals, typeKey, VOID } from "../../ir/nodes.js";
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
+import {
+  functionHasHostedSuspension,
+  hostedAsyncEntryOf,
+  hostedAsyncStepOf,
+  hostedCaptureOwnsReference,
+  lowerHostedAsyncModule,
+  type HostedAsyncStep,
+  type HostedAsyncSuspendTerminal,
+} from "../../ir/hosted-async.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
-import { NATIVE_CALLBACK_INVOCATION_BASE_FIELDS, allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackCancellationArgument, nativeCallLifecycle, nativeCallbackPayloads, nativeQueuedPayloadCleanup, nativeTrampolineForm, type NativeCallbackAbsentPayload, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
+import { NATIVE_CALLBACK_INVOCATION_BASE_FIELDS, allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallLifecycle, nativeCallbackPayloads, nativeQueuedPayloadCleanup, nativeTrampolineForm, type NativeCallbackAbsentPayload, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
 import { nativeArgumentBorrow, nativeArgumentHandle, nativeArgumentForm, nativeCallDisposal, nativeCallHandleBorrowSource, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultAcquisition, nativeResultCopy, nativeResultForm, nativeResultHandle, type NativeArgumentFormExhausted } from "../native-call-plan.js";
 import { expressionResultIsImmortal } from "../immortal-values.js";
 import { computeMayThrow } from "../emission/may-throw.js";
-import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleNativeHandleTag, mangleNativeStruct, mangleRecordClone, mangleRecordNew, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
+import { mangleArgPack, mangleAsyncSpawn, mangleClassNew, mangleClassObj, mangleClassRetain, mangleFnClosure, mangleFunction, mangleGenDrop, mangleGenResThunk, mangleGenSpawn, mangleGlobal, mangleLocal, mangleNativeHandleTag, mangleNativeStruct, mangleRecordClone, mangleRecordNew, mangleRecordRelease, mangleRecordStruct, mangleResolveThunk, mangleTrampoline, mangleVtStruct, mangleWrapper } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
 import {
   buildClassGraph,
@@ -208,6 +216,7 @@ export interface LlvmTargetOptions {
 }
 
 export function emitLlvmModule(mod: IrModule, options: LlvmTargetOptions = {}): string {
+  mod = lowerHostedAsyncModule(mod);
   const pointerBits = options.pointerBits ?? 64;
   if (
     mod.nativeTarget !== undefined &&
@@ -226,6 +235,14 @@ export function emitLlvmModule(mod: IrModule, options: LlvmTargetOptions = {}): 
     );
   }
   return new LlEmitter(mod, { ...options, pointerBits }).emit();
+}
+
+function hostedResumeSymbol(continuation: string): string {
+  return `${mangleFunction(continuation)}_hosted_resume`;
+}
+
+function hostedSuspendSymbol(stepName: string): string {
+  return `${mangleFunction(stepName)}_hosted_suspend`;
 }
 
 /** Exact double literal: LLVM's 16-digit hex form round-trips every f64
@@ -1957,10 +1974,10 @@ class LlEmitter {
         this.declare(`declare void @scr_closure_release(ptr)`);
         const ownerContext = form.closure.kind === "ownerContext";
         const tok = form.closure.kind === "tokenGlobal" ? "%tok" : "%ctx";
-        let acquireClosure: string[];
+        let stableAcquire: string[];
         if (ownerContext) {
           this.declare(`declare ptr @scr_direct_callback_acquire(ptr)`);
-          acquireClosure = [
+          stableAcquire = [
             `  %absent = icmp eq ptr %ctx, null`,
             `  br i1 %absent, label %skip, label %present`,
             `present:`,
@@ -1979,7 +1996,7 @@ class LlEmitter {
           this.declare(`declare ptr @scr_callback_token_owner_context(ptr)`);
           this.declare(`declare ${this.sizeType} @scr_callback_token_slot(ptr)`);
           this.declare(`declare i64 @scr_callback_token_generation(ptr)`);
-          acquireClosure = [
+          stableAcquire = [
             ...(form.closure.kind === "tokenGlobal"
               ? [`  ${tok} = load ptr, ptr @${form.closure.slot}`]
               : []),
@@ -2008,13 +2025,6 @@ class LlEmitter {
           ...(form.closure.kind === "tokenGlobal"
             ? [`@${form.closure.slot} = internal global ptr null`]
             : []),
-          `define internal ${externalRet} @${adapter.symbol}(${params.join(", ")}) ${FN_ATTRS} {`,
-          `entry:`,
-          ...acquireClosure,
-          `invoke:`,
-          `  %fnp = getelementptr inbounds %ScrClosure, ptr %cb, i64 0, i32 1`,
-          `  %fn = load ptr, ptr %fnp`,
-          ...promotionLines,
         );
         const widenLines: string[] = [];
         const callArgs = [
@@ -2026,37 +2036,69 @@ class LlEmitter {
          * which value each one is. */
         const answer = sourceType.ret;
         const answerType = answer.kind === "bool" ? "i1" : this.llType(answer);
-        defs.push(
-          ...widenLines,
-          ...(voids
-            ? [
-                `  call void %fn(${callArgs})`,
-                `  call void @scr_closure_release(ptr %cb)`,
-                `  ret void`,
-                `}`,
-                ``,
-              ]
+        if (ownerContext && adapter.frameSymbol !== null) {
+          this.declare(`declare ptr @scr_closure_retain_v(ptr)`);
+        }
+        const variants = [
+          { symbol: adapter.symbol, acquire: stableAcquire },
+          ...(ownerContext && adapter.frameSymbol !== null
+            ? [{
+                symbol: adapter.frameSymbol,
+                acquire: [
+                  `  %absent = icmp eq ptr %ctx, null`,
+                  `  br i1 %absent, label %skip, label %present`,
+                  `present:`,
+                  `  %pending = call zeroext i1 @scr_exc_pending()`,
+                  `  br i1 %pending, label %skip, label %acquire`,
+                  `skip:`,
+                  `  ${bail}`,
+                  `acquire:`,
+                  `  %cb = call ptr @scr_closure_retain_v(ptr %ctx)`,
+                  `  br label %invoke`,
+                ],
+              }]
             : []),
-        );
-        if (voids) continue;
-        defs.push(
-          `  %answer = call ${answerType} %fn(${callArgs})`,
-          `  call void @scr_closure_release(ptr %cb)`,
-          /* An exception stays pending and the toolkit gets the ABI zero: it
-           * has no frame to unwind through, and the next runtime turn reports
-           * an uncaught error either way. */
-          `  %threw = call zeroext i1 @scr_exc_pending()`,
-          `  br i1 %threw, label %skip, label %answered`,
-          `answered:`,
-          ...(answer.kind === "bool"
-            ? [
-                `  %answer.value = select i1 %answer, ${rawRet} ${answer.trueValue}, ${rawRet} ${answer.falseValue}`,
-                `  ret ${rawRet} %answer.value`,
-              ]
-            : [`  ret ${rawRet} %answer`]),
-          `}`,
-          ``,
-        );
+        ];
+        for (const variant of variants) {
+          defs.push(
+            `define internal ${externalRet} @${variant.symbol}(${params.join(", ")}) ${FN_ATTRS} {`,
+            `entry:`,
+            ...variant.acquire,
+            `invoke:`,
+            `  %fnp = getelementptr inbounds %ScrClosure, ptr %cb, i64 0, i32 1`,
+            `  %fn = load ptr, ptr %fnp`,
+            ...promotionLines,
+            ...widenLines,
+          );
+          if (voids) {
+            defs.push(
+              `  call void %fn(${callArgs})`,
+              `  call void @scr_closure_release(ptr %cb)`,
+              `  ret void`,
+              `}`,
+              ``,
+            );
+            continue;
+          }
+          defs.push(
+            `  %answer = call ${answerType} %fn(${callArgs})`,
+            `  call void @scr_closure_release(ptr %cb)`,
+            /* An exception stays pending and the toolkit gets the ABI zero:
+             * it has no frame to unwind through, and the next runtime turn
+             * reports an uncaught error either way. */
+            `  %threw = call zeroext i1 @scr_exc_pending()`,
+            `  br i1 %threw, label %skip, label %answered`,
+            `answered:`,
+            ...(answer.kind === "bool"
+              ? [
+                  `  %answer.value = select i1 %answer, ${rawRet} ${answer.trueValue}, ${rawRet} ${answer.falseValue}`,
+                  `  ret ${rawRet} %answer.value`,
+                ]
+              : [`  ret ${rawRet} %answer`]),
+            `}`,
+            ``,
+          );
+        }
         continue;
       }
       if (form.shape === "queued") {
@@ -2515,7 +2557,9 @@ class LlEmitter {
     // Function bodies first (the literal/unit/fn-value tables fill as they
     // emit), then the file assembles around them — the C emitter's order.
     const fnDefs: string[] = [];
-    for (const fn of this.mod.functions) fnDefs.push(this.emitFunction(fn));
+    for (const fn of this.mod.functions) {
+      if (hostedAsyncEntryOf(fn) === undefined) fnDefs.push(this.emitFunction(fn));
+    }
     const shapes = emitRecordShapes(this, this.mod);
     const classShapes = emitClassShapes(this, this.mod, this.classMeta);
     const classObjDefs = emitClassObjDefs(this, this.classMeta, this.classObjs, this.fnByName, (t) => this.llType(t));
@@ -2763,6 +2807,10 @@ class LlEmitter {
         // symbol.
         this.declare(`declare void @scr_library_cb_set(${this.sizeType}, ptr, ptr)`);
         this.declare(`declare i32 @strcmp(ptr, ptr)`);
+      }
+      if (this.mod.lib.hostedSchedulerConfigureSymbol !== undefined) {
+        this.declare(`declare zeroext i1 @scr_hosted_scheduler_install(ptr, ptr)`);
+        this.declare(`declare void @scr_hosted_scheduler_uninstall()`);
       }
       if (this.mod.lib.exports.some((e) => e.params.includes("string"))) {
         this.declare(`declare ptr @scr_library_str_in(ptr, ${this.sizeType})`);
@@ -3325,6 +3373,22 @@ class LlEmitter {
       });
       out.push(`miss:`, `  ret i32 -1`, `}`, ``);
     }
+    if (lib.hostedSchedulerConfigureSymbol !== undefined) {
+      out.push(
+        `define i32 @${lib.hostedSchedulerConfigureSymbol}(ptr %enqueue, ptr %ctx) ${FN_ATTRS} {`,
+        `entry:`,
+        `  %ok = call zeroext i1 @scr_hosted_scheduler_install(ptr %enqueue, ptr %ctx)`,
+        `  %result = select i1 %ok, i32 0, i32 -1`,
+        `  ret i32 %result`,
+        `}`,
+        `define void @${lib.hostedSchedulerStopSymbol}() ${FN_ATTRS} {`,
+        `entry:`,
+        `  call void @scr_hosted_scheduler_uninstall()`,
+        `  ret void`,
+        `}`,
+        ``,
+      );
+    }
     if (lib.identity !== undefined && this.emitLibraryIdentity) {
       // Profile-declared identity getters (the ask-2 sidecar's boot-time
       // pairing fence): pure data returns with NO entry prologue — exempt
@@ -3627,6 +3691,321 @@ class LlEmitter {
    * for the runtime to reject with), and a spawn wrapper call sites and
    * closures enter through (packs the args +1, scr_async_spawn runs the
    * fiber eagerly to its first suspension and returns the promise). */
+  /** Hosted async without a suspension point: eager native body plus a
+   * PromiseCore settlement.  This is the zero-frame base case shared with
+   * the C backend; it is intentionally separate from LLVM coroutines. */
+  private emitHostedSynchronousAsync(fn: IrFunction): string[] {
+    const lifted = fn.captures !== undefined;
+    const paramTys = [...(lifted ? ["ptr"] : []), ...fn.params.map((p) => this.llType(p.type))];
+    const params = paramTys.map((ty, i) => `${ty} %a${i}`);
+    const args = paramTys.map((ty, i) => `${ty} %a${i}`).join(", ");
+    const cache = fn.asyncCacheGlobal !== undefined ? mangleGlobal(fn.asyncCacheGlobal) : null;
+    const cycleCache =
+      fn.asyncCycleCacheGlobal !== undefined ? mangleGlobal(fn.asyncCycleCacheGlobal) : null;
+    const ret = fn.returnType;
+    const retTy = this.llType(ret);
+
+    this.declare(`declare ptr @scr_promise_new()`);
+    this.declare(`declare zeroext i1 @scr_exc_pending()`);
+    this.declare(`declare void @scr_promise_reject_pending(ptr)`);
+    if (cache !== null || cycleCache !== null) {
+      this.declare(`declare ptr @scr_promise_retain_v(ptr)`);
+      this.declare(`declare void @scr_promise_release(ptr)`);
+    }
+    if (cache !== null) this.declare(`declare void @scr_promise_mark_handled(ptr)`);
+
+    const out: string[] = [
+      `define internal ptr @${mangleAsyncSpawn(fn.name)}(${params.join(", ")}) ${FN_ATTRS} { ; hosted eager async ${fn.name}`,
+      `entry:`,
+    ];
+    if (cache !== null) {
+      out.push(
+        `  %cached = load ptr, ptr @${cache}`,
+        `  %cache_hit = icmp ne ptr %cached, null`,
+        `  br i1 %cache_hit, label %cached_return, label %cache_miss`,
+        `cached_return:`,
+        `  %cached_owned = call ptr @scr_promise_retain_v(ptr %cached)`,
+        `  ret ptr %cached_owned`,
+        `cache_miss:`,
+      );
+    }
+    out.push(`  %p = call ptr @scr_promise_new()`);
+    const bodyCall = `call ${retTy} @${mangleFunction(fn.name)}(${args})`;
+    out.push(retTy === "void" ? `  ${bodyCall}` : `  %r = ${bodyCall}`);
+    out.push(
+      `  %pending = call zeroext i1 @scr_exc_pending()`,
+      `  br i1 %pending, label %thrown, label %fulfilled`,
+      `thrown:`,
+    );
+    if (ret.kind !== "void" && isRefCounted(ret)) {
+      out.push(`  call void ${releaseSym(this, ret)}(ptr %r)`);
+    }
+    out.push(`  call void @scr_promise_reject_pending(ptr %p)`, `  br label %settled`, `fulfilled:`);
+    switch (ret.kind) {
+      case "void":
+        this.declare(`declare void @scr_promise_fulfill_void(ptr)`);
+        out.push(`  call void @scr_promise_fulfill_void(ptr %p)`);
+        break;
+      case "f64":
+      case "date":
+        this.declare(`declare void @scr_promise_fulfill_f64(ptr, double)`);
+        out.push(`  call void @scr_promise_fulfill_f64(ptr %p, double %r)`);
+        break;
+      case "bool":
+        this.declare(`declare void @scr_promise_fulfill_bool(ptr, i1 zeroext)`);
+        out.push(`  call void @scr_promise_fulfill_bool(ptr %p, i1 %r)`);
+        break;
+      case "string":
+        this.declare(`declare void @scr_promise_fulfill_str(ptr, ptr)`);
+        out.push(`  call void @scr_promise_fulfill_str(ptr %p, ptr %r) ; moves in`);
+        break;
+      default: {
+        const value = vAdapters(this, ret);
+        this.declare(`declare void @scr_promise_fulfill_ref(ptr, ptr, ptr, ptr, ptr)`);
+        out.push(
+          `  call void @scr_promise_fulfill_ref(ptr %p, ptr %r, ptr ${value.retain}, ptr ${value.release}, ptr ${traceArg(this, ret)})`,
+        );
+      }
+    }
+    out.push(`  br label %settled`, `settled:`);
+    if (cache !== null) {
+      out.push(
+        `  call void @scr_promise_mark_handled(ptr %p)`,
+        `  %cache_owned = call ptr @scr_promise_retain_v(ptr %p)`,
+        `  %cache_old = load ptr, ptr @${cache}`,
+        `  store ptr %cache_owned, ptr @${cache}`,
+        `  call void @scr_promise_release(ptr %cache_old)`,
+      );
+    }
+    if (cycleCache !== null) {
+      out.push(
+        `  %cycle_cache_owned = call ptr @scr_promise_retain_v(ptr %p)`,
+        `  %cycle_cache_old = load ptr, ptr @${cycleCache}`,
+        `  store ptr %cycle_cache_owned, ptr @${cycleCache}`,
+        `  call void @scr_promise_release(ptr %cycle_cache_old)`,
+      );
+    }
+    out.push(`  ret ptr %p`, `}`, ``);
+    return out;
+  }
+
+  private emitHostedSuspendScaffolding(
+    fn: IrFunction,
+    terminal: HostedAsyncSuspendTerminal,
+  ): string[] {
+    const continuation = this.fnByName.get(terminal.continuation);
+    const shape = this.recordsById.get(terminal.frameShapeId);
+    if (continuation === undefined || shape === undefined) {
+      throw new Error(`llvm emitter bug: incomplete hosted continuation '${terminal.continuation}'`);
+    }
+    const fieldIndex = new Map(shape.fields.map((field, index) => [field.name, index + 1]));
+    const resultCapture = terminal.captures.find(
+      (capture) => capture.localId === terminal.resultPromiseLocalId,
+    );
+    if (resultCapture === undefined) {
+      throw new Error(`llvm emitter bug: hosted continuation '${terminal.continuation}' lost its result promise`);
+    }
+    const struct = mangleRecordStruct(shape.id);
+    const resume = hostedResumeSymbol(terminal.continuation);
+    const release = mangleRecordRelease(shape.id);
+
+    this.declare(`declare ptr @scr_promise_retain_v(ptr)`);
+    this.declare(`declare void @scr_promise_release(ptr)`);
+    this.declare(`declare zeroext i1 @scr_exc_pending()`);
+    this.declare(`declare void @scr_promise_reject_pending(ptr)`);
+    const callback: string[] = [
+      `define internal void @${resume}(ptr %frame, ptr %settled) ${FN_ATTRS} { ; hosted resume ${continuation.name}`,
+      `entry:`,
+      `  %resultp = getelementptr inbounds %${struct}, ptr %frame, i64 0, i32 ${fieldIndex.get(resultCapture.field)!}`,
+      `  %result0 = load ptr, ptr %resultp`,
+      `  %result = call ptr @scr_promise_retain_v(ptr %result0)`,
+    ];
+    let awaitedName = "";
+    if (terminal.mode === "promise") {
+      switch (terminal.awaitedType.kind) {
+        case "void":
+          this.declare(`declare void @scr_hosted_await_void(ptr)`);
+          callback.push(`  call void @scr_hosted_await_void(ptr %settled)`);
+          break;
+        case "f64":
+        case "date":
+          this.declare(`declare double @scr_hosted_await_f64(ptr)`);
+          callback.push(`  %awaited = call double @scr_hosted_await_f64(ptr %settled)`);
+          awaitedName = "%awaited";
+          break;
+        case "bool":
+          this.declare(`declare zeroext i1 @scr_hosted_await_bool(ptr)`);
+          callback.push(`  %awaited = call zeroext i1 @scr_hosted_await_bool(ptr %settled)`);
+          awaitedName = "%awaited";
+          break;
+        case "string":
+          this.declare(`declare ptr @scr_hosted_await_str(ptr)`);
+          callback.push(`  %awaited = call ptr @scr_hosted_await_str(ptr %settled)`);
+          awaitedName = "%awaited";
+          break;
+        default:
+          this.declare(`declare ptr @scr_hosted_await_ref(ptr)`);
+          callback.push(`  %awaited = call ptr @scr_hosted_await_ref(ptr %settled)`);
+          awaitedName = "%awaited";
+      }
+      callback.push(
+        `  %extract_pending = call zeroext i1 @scr_exc_pending()`,
+        `  br i1 %extract_pending, label %extract_failed, label %ready`,
+        `extract_failed:`,
+        `  call void @${release}(ptr %frame)`,
+        `  br label %check`,
+        `ready:`,
+      );
+    } else {
+      callback.push(`  br label %ready`, `ready:`);
+    }
+
+    const callArgs: string[] = [];
+    let environmentArg: string | null = null;
+    terminal.captures.forEach((capture, index) => {
+      const type = this.llType(capture.type);
+      const field = fieldIndex.get(capture.field);
+      if (field === undefined) throw new Error(`llvm emitter bug: missing hosted frame field ${capture.field}`);
+      callback.push(
+        `  %cp${index} = getelementptr inbounds %${struct}, ptr %frame, i64 0, i32 ${field}`,
+        `  %ca${index} = load ${type}, ptr %cp${index}`,
+      );
+      if (hostedCaptureOwnsReference(capture)) callback.push(`  store ptr null, ptr %cp${index}`);
+      if (capture.localId === null) environmentArg = `%ca${index}`;
+      else callArgs.push(`${type} %ca${index}`);
+    });
+    callback.push(`  call void @${release}(ptr %frame)`);
+    const localCaptureCount = terminal.captures.filter((capture) => capture.localId !== null).length;
+    if (continuation.params.length > localCaptureCount) {
+      callArgs.push(`${this.llType(terminal.awaitedType)} ${awaitedName}`);
+    }
+    if (environmentArg !== null) {
+      callArgs.unshift(`ptr ${environmentArg}`);
+      this.declare(`declare void @scr_closure_release(ptr)`);
+    }
+    callback.push(
+      `  call void @${mangleFunction(continuation.name)}(${callArgs.join(", ")})`,
+      ...(environmentArg === null ? [] : [`  call void @scr_closure_release(ptr ${environmentArg})`]),
+      `  br label %check`,
+      `check:`,
+      `  %pending = call zeroext i1 @scr_exc_pending()`,
+      `  br i1 %pending, label %reject, label %done`,
+      `reject:`,
+      `  call void @scr_promise_reject_pending(ptr %result)`,
+      `  br label %done`,
+      `done:`,
+      `  call void @scr_promise_release(ptr %result)`,
+      `  ret void`,
+      `}`,
+      ``,
+    );
+
+    this.declare(`declare ptr @scr_hosted_scheduler_current()`);
+    this.declare(`declare zeroext i1 @scr_promise_await_hosted(ptr, ptr, ptr, ptr, ptr)`);
+    this.declare(`declare zeroext i1 @scr_hosted_scheduler_post(ptr, ptr, ptr, ptr)`);
+    const params = [
+      ...(terminal.mode === "promise" ? ["ptr %awaited"] : []),
+      ...terminal.captures.map(
+        (capture, index) => `${this.llType(capture.type)} %a${index}`,
+      ),
+    ];
+    const helper: string[] = [
+      `define internal zeroext i1 @${hostedSuspendSymbol(fn.name)}(${params.join(", ")}) ${FN_ATTRS} { ; hosted suspend`,
+      `entry:`,
+      `  %frame = call ptr @${mangleRecordNew(shape.id)}()`,
+    ];
+    terminal.captures.forEach((capture, index) => {
+      helper.push(
+        `  %fp${index} = getelementptr inbounds %${struct}, ptr %frame, i64 0, i32 ${fieldIndex.get(capture.field)!}`,
+        `  store ${this.llType(capture.type)} %a${index}, ptr %fp${index}`,
+      );
+    });
+    if (terminal.awaitedField !== null) {
+      helper.push(
+        `  %awaitedp = getelementptr inbounds %${struct}, ptr %frame, i64 0, i32 ${fieldIndex.get(terminal.awaitedField)!}`,
+        `  store ptr %awaited, ptr %awaitedp`,
+      );
+    }
+    helper.push(`  %scheduler = call ptr @scr_hosted_scheduler_current()`);
+    if (terminal.mode === "promise") {
+      helper.push(
+        `  %ok = call zeroext i1 @scr_promise_await_hosted(ptr %scheduler, ptr %awaited, ptr @${resume}, ptr %frame, ptr @${release})`,
+      );
+    } else {
+      helper.push(
+        `  %ok = call zeroext i1 @scr_hosted_scheduler_post(ptr %scheduler, ptr @${resume}, ptr %frame, ptr @${release})`,
+      );
+    }
+    helper.push(`  ret i1 %ok`, `}`, ``);
+    return [...callback, ...helper];
+  }
+
+  private emitHostedStacklessAsync(fn: IrFunction, entryStep: string): string[] {
+    const step = this.fnByName.get(entryStep);
+    if (step === undefined) throw new Error(`llvm emitter bug: missing hosted entry step '${entryStep}'`);
+    const lifted = fn.captures !== undefined;
+    const inputTypes = [
+      ...(lifted ? ["ptr"] : []),
+      ...fn.params.map((param) => this.llType(param.type)),
+    ];
+    const params = inputTypes.map((type, index) => `${type} %a${index}`);
+    const args = inputTypes.map((type, index) => `${type} %a${index}`);
+    const cache = fn.asyncCacheGlobal !== undefined ? mangleGlobal(fn.asyncCacheGlobal) : null;
+    const cycleCache = fn.asyncCycleCacheGlobal !== undefined ? mangleGlobal(fn.asyncCycleCacheGlobal) : null;
+    this.declare(`declare ptr @scr_promise_new()`);
+    this.declare(`declare ptr @scr_promise_retain_v(ptr)`);
+    this.declare(`declare void @scr_promise_release(ptr)`);
+    this.declare(`declare zeroext i1 @scr_exc_pending()`);
+    this.declare(`declare void @scr_promise_reject_pending(ptr)`);
+    if (cache !== null) this.declare(`declare void @scr_promise_mark_handled(ptr)`);
+
+    const out: string[] = [
+      `define internal ptr @${mangleAsyncSpawn(fn.name)}(${params.join(", ")}) ${FN_ATTRS} { ; hosted stackless async ${fn.name}`,
+      `entry:`,
+    ];
+    if (cache !== null) {
+      out.push(
+        `  %cached = load ptr, ptr @${cache}`,
+        `  %cache_hit = icmp ne ptr %cached, null`,
+        `  br i1 %cache_hit, label %cached_return, label %cache_miss`,
+        `cached_return:`,
+        `  %cached_owned = call ptr @scr_promise_retain_v(ptr %cached)`,
+        `  ret ptr %cached_owned`,
+        `cache_miss:`,
+      );
+    }
+    out.push(
+      `  %p = call ptr @scr_promise_new()`,
+      `  %step_p = call ptr @scr_promise_retain_v(ptr %p)`,
+      `  call void @${mangleFunction(step.name)}(${[...args, "ptr %step_p"].join(", ")})`,
+      `  %pending = call zeroext i1 @scr_exc_pending()`,
+      `  br i1 %pending, label %reject, label %settled`,
+      `reject:`,
+      `  call void @scr_promise_reject_pending(ptr %p)`,
+      `  br label %settled`,
+      `settled:`,
+    );
+    if (cache !== null) {
+      out.push(
+        `  call void @scr_promise_mark_handled(ptr %p)`,
+        `  %cache_owned = call ptr @scr_promise_retain_v(ptr %p)`,
+        `  %cache_old = load ptr, ptr @${cache}`,
+        `  store ptr %cache_owned, ptr @${cache}`,
+        `  call void @scr_promise_release(ptr %cache_old)`,
+      );
+    }
+    if (cycleCache !== null) {
+      out.push(
+        `  %cycle_cache_owned = call ptr @scr_promise_retain_v(ptr %p)`,
+        `  %cycle_cache_old = load ptr, ptr @${cycleCache}`,
+        `  store ptr %cycle_cache_owned, ptr @${cycleCache}`,
+        `  call void @scr_promise_release(ptr %cycle_cache_old)`,
+      );
+    }
+    out.push(`  ret ptr %p`, `}`, ``);
+    return out;
+  }
+
   private emitAsyncScaffolding(): string[] {
     const out: string[] = [];
     if (this.wasi) {
@@ -3646,8 +4025,31 @@ class LlEmitter {
         ``,
       );
     }
+    const hosted = this.mod.lib?.hostedSchedulerConfigureSymbol !== undefined;
+    if (hosted) {
+      for (const stepFn of this.mod.functions) {
+        const step = hostedAsyncStepOf(stepFn);
+        if (step?.terminal.kind === "suspend") {
+          out.push(...this.emitHostedSuspendScaffolding(stepFn, step.terminal));
+        }
+      }
+    }
     for (const fn of this.mod.functions) {
       if (fn.async !== true) continue;
+      if (hosted) {
+        const entry = hostedAsyncEntryOf(fn);
+        if (entry !== undefined) {
+          out.push(...this.emitHostedStacklessAsync(fn, entry.entryStep));
+          continue;
+        }
+        if (functionHasHostedSuspension(fn)) {
+          throw new Error(
+            `llvm emitter bug: hosted async function '${fn.name}' reached emission before stackless lowering`,
+          );
+        }
+        out.push(...this.emitHostedSynchronousAsync(fn));
+        continue;
+      }
       const pack = mangleArgPack(fn.name);
       const lifted = fn.captures !== undefined;
       const fieldTys = [...(lifted ? ["ptr"] : []), ...fn.params.map((p) => this.llType(p.type))];
@@ -4856,6 +5258,128 @@ class LlEmitter {
     }
   }
 
+  private emitHostedAsyncTerminal(fn: IrFunction, step: HostedAsyncStep): void {
+    const B = this.B;
+    const terminal = step.terminal;
+    this.frames.push([]);
+    if (terminal.kind === "propagate") {
+      this.releaseForJump(0, 0);
+      B.terminate("ret void");
+      return;
+    }
+    if (terminal.kind === "complete") {
+      const promise = this.emitExpr({
+        kind: "varRef",
+        localId: terminal.resultPromiseLocalId,
+        type: { kind: "promise", inner: terminal.resultType },
+        loc: terminal.loc,
+      });
+      const value = terminal.value === null ? null : this.emitExpr(terminal.value);
+      if (value !== null && isRefCounted(value.type)) this.moveTemp(value);
+      switch (terminal.resultType.kind) {
+        case "void":
+          this.declare(`declare void @scr_promise_fulfill_void(ptr)`);
+          B.line(`call void @scr_promise_fulfill_void(ptr ${promise.name})`);
+          break;
+        case "f64":
+        case "date":
+          this.declare(`declare void @scr_promise_fulfill_f64(ptr, double)`);
+          B.line(`call void @scr_promise_fulfill_f64(ptr ${promise.name}, double ${value!.name})`);
+          break;
+        case "bool":
+          this.declare(`declare void @scr_promise_fulfill_bool(ptr, i1 zeroext)`);
+          B.line(`call void @scr_promise_fulfill_bool(ptr ${promise.name}, i1 ${value!.name})`);
+          break;
+        case "string":
+          this.declare(`declare void @scr_promise_fulfill_str(ptr, ptr)`);
+          B.line(`call void @scr_promise_fulfill_str(ptr ${promise.name}, ptr ${value!.name}) ; moves in`);
+          break;
+        default: {
+          const adapters = vAdapters(this, terminal.resultType);
+          this.declare(`declare void @scr_promise_fulfill_ref(ptr, ptr, ptr, ptr, ptr)`);
+          B.line(
+            `call void @scr_promise_fulfill_ref(ptr ${promise.name}, ptr ${value!.name}, ` +
+              `ptr ${adapters.retain}, ptr ${adapters.release}, ptr ${traceArg(this, terminal.resultType)})`,
+          );
+        }
+      }
+      this.releaseForJump(0, 0);
+      B.terminate("ret void");
+      return;
+    }
+    if (terminal.kind === "jump" || terminal.kind === "branch") {
+      const condition = terminal.kind === "branch" ? this.emitExpr(terminal.condition) : null;
+      const arguments_ = terminal.captures.map((capture) => {
+        const value = this.emitExpr({
+          kind: "varRef",
+          localId: capture.localId,
+          type: capture.type,
+          loc: terminal.loc,
+        });
+        this.moveTemp(value); // the selected continuation owns this +1
+        return `${this.llType(capture.type)} ${value.name}`;
+      });
+      if (fn.captures !== undefined) arguments_.unshift(`ptr %sc_env`);
+      const emitCallAndReturn = (continuation: string): void => {
+        B.line(`call void @${mangleFunction(continuation)}(${arguments_.join(", ")})`);
+        this.releaseForJump(0, 0);
+        B.terminate("ret void");
+      };
+      if (terminal.kind === "jump") {
+        emitCallAndReturn(terminal.continuation);
+      } else {
+        const whenTrue = B.newLabel("hosted.if.true");
+        const whenFalse = B.newLabel("hosted.if.false");
+        B.condBr(condition!.name, whenTrue, whenFalse);
+        B.startBlock(whenTrue);
+        emitCallAndReturn(terminal.whenTrue);
+        B.startBlock(whenFalse);
+        emitCallAndReturn(terminal.whenFalse);
+      }
+      return;
+    }
+
+    const values: LlValue[] = [];
+    if (terminal.promise !== null) {
+      const promise = this.emitExpr(terminal.promise);
+      this.moveTemp(promise); // helper moves this +1 into the frame
+      values.push(promise);
+    }
+    for (const capture of terminal.captures) {
+      let value: LlValue;
+      if (capture.localId === null) {
+        this.declare(`declare ptr @scr_closure_retain_v(ptr)`);
+        const retained = B.tmp();
+        B.line(`${retained} = call ptr @scr_closure_retain_v(ptr %sc_env)`);
+        value = this.own({ name: retained, type: capture.type });
+      } else {
+        value = this.emitExpr({
+          kind: "varRef",
+          localId: capture.localId,
+          type: capture.type,
+          loc: terminal.loc,
+        });
+      }
+      this.moveTemp(value); // helper moves this +1 into the frame
+      values.push(value);
+    }
+    const ok = B.tmp();
+    B.line(
+      `${ok} = call zeroext i1 @${hostedSuspendSymbol(fn.name)}(` +
+        `${values.map((value) => `${this.llType(value.type)} ${value.name}`).join(", ")})`,
+    );
+    const failed = B.newLabel("hosted.fail");
+    const joined = B.newLabel("hosted.done");
+    B.condBr(ok, joined, failed);
+    B.startBlock(failed);
+    this.declare(`declare void @scr_hosted_schedule_error()`);
+    B.line(`call void @scr_hosted_schedule_error()`);
+    B.br(joined);
+    B.startBlock(joined);
+    this.releaseForJump(0, 0);
+    B.terminate("ret void");
+  }
+
   private emitFunction(fn: IrFunction): string {
     const B = new BlockBuilder();
     this.B = B;
@@ -4918,6 +5442,11 @@ class LlEmitter {
           ? "ptr"
           : this.llType(local.type);
       B.entryAllocas.push(`%${mangleLocal(local.id)} = alloca ${slotTy} ; ${local.name}`);
+      if (local.nativeFrameCapture === true) {
+        B.entryAllocas.push(
+          `%${mangleLocal(local.id)}_frame_box = alloca %ScrBox ; ${local.name} frame capture storage`,
+        );
+      }
       // Refcounted/boxed locals start NULL (the C prologue's `= NULL`):
       // scope-exit releases run whether or not an assign ever did.
       if (paramIds.has(local.id) || this.captureIds.has(local.id)) continue;
@@ -4960,10 +5489,14 @@ class LlEmitter {
     }
     this.scopes.push(fnScope);
     this.emitStmts(fn.body);
+    const hostedStep = hostedAsyncStepOf(fn);
+    if (hostedStep !== undefined && !B.isTerminated()) {
+      this.emitHostedAsyncTerminal(fn, hostedStep);
+    }
     // Implicit exit of a void function: release the function scope unless
     // the body already terminated its final block (return, or a throw
     // whose unwind released everything down to depth 0).
-    if (fn.returnType.kind === "void" && !B.isTerminated()) {
+    if (hostedStep === undefined && fn.returnType.kind === "void" && !B.isTerminated()) {
       this.releaseScope(this.scopes[0]!);
       if (this.currentWasiCoro !== null) {
         this.emitWasiFulfill(null);
@@ -5059,8 +5592,14 @@ class LlEmitter {
           // one-element array cell, so the empty (NULL) slot stays the
           // not-yet-initialized sentinel — a raw scalar slot has no spare
           // bit pattern to spend on it (emit-stmts.ts's varDecl).
-          const boxNew =
-            b.local!.tdz === true && boxAccess(b.type) !== "ref"
+          const boxNew = b.local!.nativeFrameCapture === true
+            ? (
+                this.declare(`declare ptr @scr_box_init_frame(ptr, i32)`),
+                `call ptr @scr_box_init_frame(` +
+                  `ptr %${mangleLocal(b.local!.id)}_frame_box, ` +
+                  `i32 ${boxAccess(b.type) === "f64" ? 0 : 1})`
+              )
+            : b.local!.tdz === true && boxAccess(b.type) !== "ref"
               ? (this.declare(`declare ptr @scr_box_new(i32)`), `call ptr @scr_box_new(i32 3)`)
               : boxNewCall(this, b.type);
           const box = B.tmp();
@@ -7356,6 +7895,38 @@ class LlEmitter {
             type: e.type,
           });
         }
+        if (e.nativeFrameContext === true) {
+          for (const localId of e.captures) {
+            if (this.currentLocals.get(localId)?.nativeFrameCapture !== true) {
+              throw new Error(
+                `llvm emitter bug: frame callback closure ${e.fnName} captures non-frame local ${localId}`,
+              );
+            }
+          }
+          const storage = B.slot();
+          B.entryAllocas.push(
+            `${storage} = alloca [${4 + e.captures.length} x ptr] ; frame callback closure`,
+          );
+          this.declare(`declare ptr @scr_closure_init_frame(ptr, ptr, ${this.sizeType})`);
+          const c = B.tmp();
+          B.line(
+            `${c} = call ptr @scr_closure_init_frame(` +
+              `ptr ${storage}, ptr @${this.callTarget(e.fnName)}, ` +
+              `${this.sizeType} ${e.captures.length})`,
+          );
+          e.captures.forEach((localId, i) => {
+            const box = this.loadBox(`%${mangleLocal(localId)}`);
+            const caps = B.tmp();
+            const capp = B.tmp();
+            B.line(`${caps} = getelementptr inbounds %ScrClosure, ptr ${c}, i64 1 ; caps`);
+            B.line(
+              `${capp} = getelementptr inbounds ptr, ptr ${caps}, ` +
+                `${this.sizeType} ${i} ; caps[${i}]`,
+            );
+            B.line(`store ptr ${box}, ptr ${capp}`);
+          });
+          return { name: c, type: e.type, immortal: true };
+        }
         // Lifted async lambdas enter through their spawn wrapper (which
         // takes sc_env first, like every lifted function).
         this.declare(`declare ptr @scr_closure_new(ptr, ${this.sizeType})`);
@@ -7681,9 +8252,31 @@ class LlEmitter {
           this.nativeDestructorBindings.has(binding.id),
         );
         if (disposal !== null) {
+          const argument = args[disposal.argument]!;
+          if (argument.nativeFrame !== undefined) {
+            const source = e.args[disposal.argument];
+            if (source?.kind !== "varRef" || argument.nativeFrame.nullable !== undefined) {
+              throw new Error(
+                `llvm emitter bug: frame-bounded disposal is not an exact local in ${binding.id}`,
+              );
+            }
+            const owner = this.binding(source.localId);
+            if (owner.kind !== "local") {
+              throw new Error(
+                `llvm emitter bug: frame-bounded disposal has no lexical slot in ${binding.id}`,
+              );
+            }
+            this.declare(`declare void @${argument.nativeFrame.release}(ptr)`);
+            B.line(
+              `call void @${argument.nativeFrame.release}(ptr ${argument.name})`,
+            );
+            B.line(`store ptr null, ptr ${owner.slot}`);
+            releaseArguments();
+            return { name: "", type: e.type };
+          }
           this.declare(`declare void @scr_native_handle_dispose(ptr, ptr, ptr)`);
           B.line(
-            `call void @scr_native_handle_dispose(ptr ${args[disposal.argument]!.name}, ` +
+            `call void @scr_native_handle_dispose(ptr ${argument.name}, ` +
               `ptr @${mangleNativeHandleTag(disposal.typeId)}, ptr ${operation})`,
           );
           this.emitPendingCheck();
@@ -7784,6 +8377,8 @@ class LlEmitter {
             const source = e.args[argument];
             return source?.kind === "numLit" ? source.value : undefined;
           },
+          sourceStringLiteral: (argument: number) =>
+            e.args[argument]?.kind === "strLit",
           provenCrossings,
           pointerBits: this.mod.nativeTarget?.pointerBits,
           tables: {
@@ -7975,6 +8570,18 @@ class LlEmitter {
               callArgs.push(`${parameterType} ${len}`);
               return;
             }
+            case "utf8StaticIdentity": {
+              if (!form.available) {
+                callArgs.push(`${parameterType} 0`);
+                return;
+              }
+              const identity = B.tmp();
+              B.line(
+                `${identity} = ptrtoint ptr ${valueOf(form.argument)} to ${this.sizeType}`,
+              );
+              callArgs.push(`${parameterType} ${identity}`);
+              return;
+            }
             case "bytesData": {
               const dataPtr = B.tmp();
               const data = B.tmp();
@@ -8004,7 +8611,16 @@ class LlEmitter {
             }
             case "callbackFunction": {
               const adapter = this.nativeCallbackAdapter(binding.id, form.argument);
-              callArgs.push(`${parameterType} @${adapter.symbol}`);
+              const symbol = acquisition.kind === "frameBounded" &&
+                  directOwnedCallbacks.has(form.argument)
+                ? adapter.frameSymbol
+                : adapter.symbol;
+              if (symbol === null) {
+                throw new Error(
+                  `llvm emitter bug: frame-bounded callback ${binding.id}:${form.argument} has no direct trampoline`,
+                );
+              }
+              callArgs.push(`${parameterType} @${symbol}`);
               return;
             }
             case "callbackRelease": {
@@ -8019,6 +8635,14 @@ class LlEmitter {
               callArgs.push(
                 `${parameterType} ${retainedTokens.get(form.argument) ?? valueOf(form.argument)}`,
               );
+              return;
+            case "callbackContextRelease":
+              if (acquisition.kind === "frameBounded") {
+                this.declare("declare void @scr_closure_release_v(ptr)");
+                callArgs.push(`${parameterType} @scr_closure_release_v`);
+              } else {
+                callArgs.push(`${parameterType} null`);
+              }
               return;
             /* The four handle arms, from the same description the C backend
              * reads: three nullabilities and whether the callee takes the
@@ -8195,6 +8819,20 @@ class LlEmitter {
            * `NativeArgumentForm` and forgotten here stops this compiling. */
           form satisfies NativeArgumentFormExhausted;
         });
+        /* Match the C backend's ownership point: checked argument conversion
+         * happens first; only then is one closure retain transferred to the
+         * frame entry. The alternate trampoline reads that closure directly,
+         * so this path allocates no standalone callback wrapper. */
+        if (acquisition.kind === "frameBounded") {
+          for (const argument of directOwnedCallbacks) {
+            this.declare("declare ptr @scr_closure_retain_v(ptr)");
+            const token = retainedTokens.get(argument)!;
+            B.line(
+              `${token} = call ptr @scr_closure_retain_v(` +
+                `ptr ${args[argument]!.name})`,
+            );
+          }
+        }
         const cancellation = lifecycle.cancellation;
         let cancellationStarted: string | undefined;
         if (cancellation !== null) {
@@ -8777,15 +9415,35 @@ class LlEmitter {
           }
           const { definition, destructor } = plan;
           this.declare(`declare void @${destructor}(ptr)`);
-          this.declare(`declare ptr @scr_native_handle_prepare(ptr, ptr, ptr)`);
           this.declare(`declare void @scr_native_handle_commit(ptr, ptr)`);
           this.declare(`declare void @scr_native_handle_abandon(ptr)`);
-          const prepared = B.tmp();
-          B.line(
-            `${prepared} = call ptr @scr_native_handle_prepare(` +
-              `ptr @${destructor}, ptr @${mangleNativeHandleTag(definition.id)}, ` +
-              `ptr ${this.cstr(definition.nativeName)})`,
+          const directArguments = [...retainedTokens.keys()].filter((argument) =>
+            directOwnedCallbacks.has(argument)
           );
+          const fusedDirectArgument = directArguments[0];
+          const prepared = B.tmp();
+          if (fusedDirectArgument === undefined) {
+            this.declare(`declare ptr @scr_native_handle_prepare(ptr, ptr, ptr)`);
+            B.line(
+              `${prepared} = call ptr @scr_native_handle_prepare(` +
+                `ptr @${destructor}, ptr @${mangleNativeHandleTag(definition.id)}, ` +
+                `ptr ${this.cstr(definition.nativeName)})`,
+            );
+          } else {
+            this.declare(
+              `declare ptr @scr_native_handle_prepare_direct_callback_fused(ptr, ptr, ptr, ptr, ptr)`,
+            );
+            const callbackSlot = B.slot();
+            B.entryAllocas.push(`${callbackSlot} = alloca ptr ; fused direct callback`);
+            B.line(
+              `${prepared} = call ptr @scr_native_handle_prepare_direct_callback_fused(` +
+                `ptr @${destructor}, ptr @${mangleNativeHandleTag(definition.id)}, ` +
+                `ptr ${this.cstr(definition.nativeName)}, ` +
+                `ptr ${args[fusedDirectArgument]!.name}, ptr ${callbackSlot})`,
+            );
+            const callback = retainedTokens.get(fusedDirectArgument)!;
+            B.line(`${callback} = load ptr, ptr ${callbackSlot}`);
+          }
           const retainedOwnerArgument = plan.prepareBeforeCall!.ownerArgument;
           if (retainedOwnerArgument !== null) {
             this.declare(`declare void @scr_native_handle_prepare_owner(ptr, ptr)`);
@@ -8797,6 +9455,7 @@ class LlEmitter {
           if (retainedTokens.size > 0) {
             for (const [argument, token] of retainedTokens) {
               if (directOwnedCallbacks.has(argument)) {
+                if (argument === fusedDirectArgument) continue;
                 this.declare(
                   `declare ptr @scr_native_handle_prepare_direct_callback(ptr, ptr)`,
                 );

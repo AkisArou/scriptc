@@ -390,6 +390,11 @@ export interface LibraryProfile {
   /** The host-callback registration symbol (see the header contract):
    * non-null exactly when `callbacks` declares channels. */
   callbackRegisterSymbol: string | null;
+  /** Optional hosted-renderer scheduler entries. They are declared as a
+   * pair: configure installs the embedder microtask adapter for this
+   * thread-instance; stop closes admission and cancels pending frames. */
+  hostedSchedulerConfigureSymbol: string | null;
+  hostedSchedulerStopSymbol: string | null;
   /** The declared host-callback channels, in declaration order (the order
    * IS the runtime slot assignment). Empty when the profile declares
    * none — the callback-free artifact is unchanged. */
@@ -516,7 +521,7 @@ export function loadLibraryProfile(
     if (abi === null || typeof abi !== "object" || Array.isArray(abi)) {
       throw new ProfileError("'abi' must be an object");
     }
-    rejectUnknownKeys(abi, "abi", ["prefix", "init_symbol", "sink_register_symbol", "collect_symbol", "result_reset_symbol", "localize_runtime", "instance_per_thread", "callback_register_symbol"]);
+    rejectUnknownKeys(abi, "abi", ["prefix", "init_symbol", "sink_register_symbol", "collect_symbol", "result_reset_symbol", "localize_runtime", "instance_per_thread", "callback_register_symbol", "hosted_scheduler_configure_symbol", "hosted_scheduler_stop_symbol"]);
     const a = abi as Record<string, unknown>;
     const prefix = req<string>(a["prefix"], "abi.prefix", "string");
     if (!C_IDENT.test(prefix)) {
@@ -540,6 +545,23 @@ export function loadLibraryProfile(
         ? false
         : req<boolean>(a["instance_per_thread"], "abi.instance_per_thread", "boolean");
     const callbackRegisterSymbol = symbolField(a["callback_register_symbol"], "abi.callback_register_symbol", prefix, true);
+    const hostedSchedulerConfigureSymbol = symbolField(
+      a["hosted_scheduler_configure_symbol"],
+      "abi.hosted_scheduler_configure_symbol",
+      prefix,
+      true,
+    );
+    const hostedSchedulerStopSymbol = symbolField(
+      a["hosted_scheduler_stop_symbol"],
+      "abi.hosted_scheduler_stop_symbol",
+      prefix,
+      true,
+    );
+    if ((hostedSchedulerConfigureSymbol === null) !== (hostedSchedulerStopSymbol === null)) {
+      throw new ProfileError(
+        "'abi.hosted_scheduler_configure_symbol' and 'abi.hosted_scheduler_stop_symbol' must be declared together",
+      );
+    }
 
     const exportsRaw = p["exports"];
     if (!Array.isArray(exportsRaw)) throw new ProfileError("'exports' must be an array");
@@ -766,6 +788,8 @@ export function loadLibraryProfile(
     claim(collectSymbol, "abi.collect_symbol");
     claim(resultResetSymbol, "abi.result_reset_symbol");
     claim(callbackRegisterSymbol, "abi.callback_register_symbol");
+    claim(hostedSchedulerConfigureSymbol, "abi.hosted_scheduler_configure_symbol");
+    claim(hostedSchedulerStopSymbol, "abi.hosted_scheduler_stop_symbol");
     if (sidecar !== null) {
       claim(sidecar.buildIdSymbol, "sidecar.build_id_symbol");
       claim(sidecar.abiVersionSymbol, "sidecar.abi_version_symbol");
@@ -885,6 +909,8 @@ export function loadLibraryProfile(
         localizeRuntime,
         instancePerThread,
         callbackRegisterSymbol,
+        hostedSchedulerConfigureSymbol,
+        hostedSchedulerStopSymbol,
         callbacks,
         exports: entries,
         sidecar,

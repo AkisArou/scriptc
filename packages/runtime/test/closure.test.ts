@@ -8,7 +8,7 @@ const execFileAsync = promisify(execFile);
 const testDir = import.meta.dirname;
 const srcDir = join(testDir, "../src");
 
-test("closure/box runtime: RC cascades clean under ASan + audit", async () => {
+test("closure/box runtime: heap and frame storage are clean under ASan + audit", async () => {
   const buildDir = join(testDir, "build");
   await mkdir(buildDir, { recursive: true });
   const bin = join(buildDir, "test_closure");

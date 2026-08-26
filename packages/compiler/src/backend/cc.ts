@@ -1623,9 +1623,9 @@ async function ensureTlsArchive(
  * conditions about the embedder belong — the requires channel — and an
  * embedder that owns the loop asks for `attached-loop`.
  *
- * Nothing else comes with it. `scr_async.c` reaches no other dropped unit,
- * and its I/O hook is a file-scope pointer that stays null when no poller is
- * gated in. */
+ * A renderer-hosted continuation scheduler is narrower still: it asks only
+ * for PromiseCore in `scr_async.c`. It never brings back `scr_child.c`, a
+ * ScriptC poller, or an independently blocking loop. */
 const LIB_RUNTIME_SOURCES = [
   ...RUNTIME_SOURCES.filter(
     (f) => f !== "scr_async.c" && f !== "scr_child.c",
@@ -1697,9 +1697,11 @@ export interface LibArchiveOptions {
   textDecoderLegacy?: boolean;
   nativeHandle?: boolean;
   retainedCallbacks?: boolean;
-  /** The embedder owns the loop and calls the attached-source API, so the
-   * unit the library base drops has to come back. */
+  /** The embedder owns ScriptC's ordinary attached event loop. */
   attachedLoop?: boolean;
+  /** The embedder supplies individual microtasks for stackless continuation
+   * frames. This restores PromiseCore only: no child-process or poller unit. */
+  hostedAsync?: boolean;
   /**
    * Receives every driver and archiver invocation instead of running it.
    *
@@ -1858,7 +1860,11 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     ...(opts.zlib ? ["scr_zlib.c"] : []),
     ...(opts.copying ? ["scr_copying.c"] : []),
     ...(opts.nativeHandle || opts.retainedCallbacks ? ["scr_native_handle.c"] : []),
-    ...(opts.attachedLoop ? ["scr_async.c", "scr_child.c"] : []),
+    ...(opts.attachedLoop
+      ? ["scr_async.c", "scr_child.c"]
+      : opts.hostedAsync
+        ? ["scr_async.c"]
+        : []),
     ...(opts.retainedCallbacks
       ? [
           "scr_owner_gateway.c",
@@ -1900,6 +1906,12 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     "-fPIC",
     "-DSCR_LIB",
     ...(opts.threadInstances ? ["-DSCR_THREAD_INSTANCES"] : []),
+    /* The hosted PromiseCore is linked without scr_child.c. scr_async.c still
+     * contains the standalone loop implementation, so this define supplies
+     * its unreachable child hooks while keeping child/process code out of a
+     * Chromium renderer. It applies to every TU for a deterministic archive
+     * identity even though only scr_async.c observes it today. */
+    ...(opts.hostedAsync ? ["-DSCR_HOSTED_ASYNC"] : []),
     ...(opts.textDecoderLegacy ? ["-DSCR_TEXT_DECODER_LEGACY"] : []),
     "-I", rtDir,
     ...(regex ? ["-I", vendorEngineDir()] : []),

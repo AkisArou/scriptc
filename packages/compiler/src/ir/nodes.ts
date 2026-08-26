@@ -1158,7 +1158,7 @@ export type {
 };
 
 /** Current wire-format version for every producer and consumer of Native IR. */
-export const IR_VERSION = 46 as const;
+export const IR_VERSION = 47 as const;
 
 export interface IrModule {
   /** Bumped on any breaking IR change; serialize.ts refuses mismatches. */
@@ -1475,6 +1475,10 @@ export interface IrLibSection {
    * fields stay ABSENT on callback-free profiles so their serialized IR
    * and emitted TU are unchanged byte-for-byte. */
   callbackRegisterSymbol?: string;
+  /** Hosted renderer scheduler entry pair. Absent together on ordinary
+   * libraries, preserving their serialized IR and emitted surface. */
+  hostedSchedulerConfigureSymbol?: string;
+  hostedSchedulerStopSymbol?: string;
   /** The resolved host-callback channels, slot-ordered. */
   callbacks?: IrLibCallback[];
   exports: IrLibExport[];
@@ -1777,6 +1781,13 @@ export interface IrLocal {
    * (a shared binding — mutations are visible through every capture). All
    * access, including in the declaring function, goes through the box. */
   boxed?: true;
+  /** A boxed scalar captured exclusively by compiler-proven synchronous,
+   * frame-bounded native callback contexts. The box lives in the declaring
+   * function's native stack frame and is marked immortal, so retaining it
+   * through the ordinary closure ABI is a no-op. The frame-resource validator
+   * proves that every closure using it is likewise frame-bounded and that no
+   * reference can survive the declaring frame. */
+  nativeFrameCapture?: true;
   /** A forward-captured const (a function declared BEFORE the const it
    * captures): the box is allocated TDZ-empty at scope entry (a `varDecl`
    * with `init: null`) so earlier closures can capture it, and the source
@@ -5191,7 +5202,18 @@ export type IrExpr =
    * itself retains each captured box. A reference to a top-level declared
    * function lowers to a zero-capture closure — backends must intern that
    * case so `f === f` is true (JS function identity). */
-  | { kind: "closure"; fnName: string; captures: string[]; type: IrType; loc: SrcLoc }
+  | {
+      kind: "closure";
+      fnName: string;
+      captures: string[];
+      type: IrType;
+      /** Compiler-proven stack closure for a synchronous result-owned native
+       * registration. Its ordinary ScrClosure ABI is preserved, but both the
+       * closure header and its scalar capture boxes live in the enclosing
+       * frame and carry immortal refcounts. */
+      nativeFrameContext?: true;
+      loc: SrcLoc;
+    }
   /** Indirect call of a func-typed value. Args follow `call`'s convention
    * (callee owns its params, callers pass +1). The callee expression is an
    * ordinary owned temp, released at statement end. */
@@ -7436,9 +7458,24 @@ const LIB_MODE_REFUSED_KINDS: ReadonlyMap<string, string> = new Map([
  * coarse moduleUses* predicates are the safety net behind the fine-grained
  * table (a surface reached only through a spelling the table misses still
  * refuses, anchored at the entry). */
-export function moduleLibAsyncSurface(mod: IrModule): { surface: string; loc: SrcLoc } | null {
+export interface LibraryAsyncSurfacePolicy {
+  /** PromiseCore values and constructors are linked, but no event loop is
+   * implied merely by carrying or synchronously settling one. */
+  allowPromiseCore?: true;
+  /** Async declarations may use the hosted eager/continuation lowering. */
+  allowAsyncFunctions?: true;
+  /** Await nodes have already been lowered to host-scheduled states. */
+  allowAwait?: true;
+}
+
+export function moduleLibAsyncSurface(
+  mod: IrModule,
+  policy: LibraryAsyncSurfacePolicy = {},
+): { surface: string; loc: SrcLoc } | null {
   for (const fn of mod.functions) {
-    if (fn.async === true) return { surface: `an async function ('${fn.name.replace(/^%/, "")}')`, loc: fn.loc };
+    if (fn.async === true && policy.allowAsyncFunctions !== true) {
+      return { surface: `an async function ('${fn.name.replace(/^%/, "")}')`, loc: fn.loc };
+    }
     if (fn.generator !== undefined) {
       return { surface: `a generator function ('${fn.name.replace(/^%/, "")}')`, loc: fn.loc };
     }
@@ -7455,7 +7492,11 @@ export function moduleLibAsyncSurface(mod: IrModule): { surface: string; loc: Sr
     const here = node.loc ?? loc;
     if (typeof node.kind === "string") {
       const bad = LIB_MODE_REFUSED_KINDS.get(node.kind);
-      if (bad !== undefined) {
+      const admittedPromise = node.kind === "promise" && policy.allowPromiseCore === true;
+      const admittedAwait =
+        (node.kind === "awaitExpr" || node.kind === "awaitUnionExpr") &&
+        policy.allowAwait === true;
+      if (bad !== undefined && !admittedPromise && !admittedAwait) {
         found = { surface: bad, loc: here };
         return;
       }

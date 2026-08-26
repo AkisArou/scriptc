@@ -145,6 +145,70 @@ describe("library compilation plan", () => {
     expect(objects.some((name) => name.includes("callback"))).toBe(true);
   }, 120_000);
 
+  it("keeps renderer-hosted continuations separate from the attached loop", async () => {
+    const staged = stageProfile("scalars", "c");
+    const profilePath = join(dirname(staged.profilePath), "hosted-profile.json");
+    const profile = JSON.parse(readFileSync(staged.profilePath, "utf8")) as {
+      abi: Record<string, unknown>;
+    };
+    profile.abi["hosted_scheduler_configure_symbol"] =
+      `${String(profile.abi["prefix"])}hosted_scheduler_configure`;
+    profile.abi["hosted_scheduler_stop_symbol"] =
+      `${String(profile.abi["prefix"])}hosted_scheduler_stop`;
+    writeFileSync(profilePath, JSON.stringify(profile, null, 2));
+
+    const planned = await planLibraryCompilation({ profilePath });
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) return;
+    expect(planned.plan.nativeBuild.hostedAsync).toBe(true);
+    expect(planned.plan.nativeBuild.attachedLoop).toBe(false);
+
+    const build = await planLibraryExternalCBuild(planned.plan, {
+      program: "program.c",
+      runtime: "scriptc-runtime",
+      output: "library.a",
+      objectIdPrefix: "obj/",
+    });
+    const names = build.objects.map(({ fileName }) => fileName);
+    expect(names).toContain("scr_async.o");
+    expect(names).not.toContain("scr_child.o");
+    const asyncObject = build.objects.find(({ fileName }) =>
+      fileName === "scr_async.o"
+    )!;
+    const asyncCompile = build.plans.find(({ output }) =>
+      output === asyncObject.id
+    )!;
+    expect(asyncCompile.arguments).toContainEqual({
+      kind: "literal",
+      value: "-DSCR_HOSTED_ASYNC",
+    });
+  }, 120_000);
+
+  for (const emission of ["c", "llvm"] as const) {
+    it(`runs a typed await through the host FIFO without fibers (${emission})`, async () => {
+      const { profilePath, outDir } = stageProfile("hosted-async", emission);
+      const built = await compileLibrary({ profilePath, outDir });
+      expect(built.ok).toBe(true);
+      if (!built.ok) return;
+
+      const executable = join(outDir, "hosted-async-host");
+      execFileSync("clang", [
+        join(fixtureRoot, "hosted-async/host.c"),
+        built.archivePath,
+        "-lm",
+        "-o",
+        executable,
+      ], { stdio: "pipe" });
+      expect(() => execFileSync(executable, [], { stdio: "pipe" })).not.toThrow();
+
+      const translationUnit = readFileSync(built.cPath, "utf8");
+      expect(translationUnit).toContain("scr_promise_await_hosted");
+      expect(translationUnit).toContain("scr_closure_retain");
+      expect(translationUnit).toContain("scr_closure_release");
+      expect(translationUnit).not.toContain("scr_async_spawn");
+    }, 180_000);
+  }
+
   it("plans regex matcher sources as declared runtime objects", async () => {
     const { profilePath } = stageProfile("buffers", "c");
     const planned = await planLibraryCompilation({ profilePath });

@@ -25,12 +25,7 @@ import type {
   IrGlobal,
   IrRecordShape,
   IrExpr,
-  IrFfiCallbackParamClass,
-  IrFfiCallbackParam,
   IrFfiImport,
-  IrFfiReleaseParam,
-  IrFfiReturnClass,
-  IrFfiValueParamClass,
   IrFunction,
   IrLocal,
   IrModule,
@@ -46,7 +41,7 @@ import type {
   SrcLoc,
 } from "../../ir/nodes.js";
 import { numberBoundaryFacts } from "../../ir/number-facts.js";
-import { nullableNativeHandleUnion, nativeIntegerInfo, nativeCallbackIsOwnerScoped, nativeCallbackSourceSignature, moduleHasProcessScopedRegistration, nativeDestructorBindingIds, funcOf, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, STRING, VOID } from "../../ir/nodes.js";
+import { nullableNativeHandleUnion, nativeIntegerInfo, nativeCallbackSourceSignature, moduleHasProcessScopedRegistration, nativeDestructorBindingIds, funcOf, isRefCounted, isUnitType, mapOf, moduleEmbedsCompressedNpm, moduleUsesDgram, moduleUsesDynInvoke, moduleEmbedsBuiltin, moduleUsesFetch, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesNet, moduleUsesNodeTest, moduleUsesProcessEvents, moduleUsesRetainedCallbacks, moduleUsesStream, moduleUsesTls, moduleUsesTlsCa, RUNTIME_EMITTER_CLASS, STRING, VOID } from "../../ir/nodes.js";
 import { allocateNativeCallbackAdapters, nativeCallbackAdapterKey, nativeCallbackPayloads, nativeQueuedPayloadCleanup, nativeTrampolineForm, type NativeCallbackAbsentPayload, type NativeCallbackAdapter, type NativeCallbackPayload } from "../native-callbacks.js";
 import {
   mangleAsyncSpawn,
@@ -73,6 +68,7 @@ import { emitNpmEmbedding, islandAdapter, islandTypedAdapter } from "./emit-isla
 import { emitFunction, emitBlock, emitStmts, emitStmt, emitTryCatch, emitSwitch, mergeBrace, emitBranchInto, emitCondition } from "./emit-stmts.js";
 import { emitExpr } from "./emit-exprs.js";
 import { emitLibraryIdentityLines } from "../library-identity.js";
+import { hostedAsyncEntryOf, lowerHostedAsyncModule } from "../../ir/hosted-async.js";
 
 /** Emission choices that are not properties of the IR. `checkedNumbers`
  * decides whether a checked-number ingress the number facts proved
@@ -91,7 +87,7 @@ export function emitModule(
   sourceText?: string,
   options: CEmitOptions = {},
 ): string {
-  return new CEmitter(mod, sourceText, options).emit();
+  return new CEmitter(lowerHostedAsyncModule(mod), sourceText, options).emit();
 }
 
 // Box construction moved onto CEmitter (boxNewC method): obj-kind boxes now
@@ -307,6 +303,14 @@ export class CEmitter {
    * unsigned integer shadow. Ordinary number reads widen the shadow back to
    * f64; direct byte indices consume it without a conversion round trip. */
   integerLoopBindings = new Map<string, string>();
+  /** Function-entry stack storage for compiler-proven frame callback
+   * closures. Keying by the IR node makes each syntactic closure site own
+   * exactly one slot per native invocation, even when the site is evaluated
+   * repeatedly by a loop. emitFunction rebuilds this map for every body. */
+  readonly frameClosureStorage = new Map<
+    Extract<IrExpr, { kind: "closure" }>,
+    string
+  >();
   /** Declared functions referenced as values: each needs an env-signature
    * wrapper + an interned immortal closure (so `f === f` holds). */
   readonly fnValues = new Set<string>();
@@ -792,6 +796,7 @@ export class CEmitter {
     // Function bodies are emitted first (into this.lines) so the literal
     // table is complete; the file is then assembled around them.
     for (const fn of this.mod.functions) {
+      if (hostedAsyncEntryOf(fn) !== undefined) continue;
       this.emitFunction(fn);
       body.push(...this.lines);
       this.lines.length = 0;
@@ -970,7 +975,9 @@ export class CEmitter {
       }
     }
     if ((this.mod.nativeBindings?.length ?? 0) > 0) out.push("");
-    for (const fn of this.mod.functions) out.push(this.signature(fn) + ";");
+    for (const fn of this.mod.functions) {
+      if (hostedAsyncEntryOf(fn) === undefined) out.push(this.signature(fn) + ";");
+    }
     out.push(...nativeCallbackDefs);
     // Class objects (classes as values): construct-thunk prototypes plus
     // the immortal statics that take their addresses — after the function
@@ -1350,6 +1357,17 @@ export class CEmitter {
         );
       }
       out.push(`  return -1;`, `}`, ``);
+    }
+    if (lib.hostedSchedulerConfigureSymbol !== undefined) {
+      out.push(
+        `int32_t ${lib.hostedSchedulerConfigureSymbol}(ScrHostedEnqueueFn enqueue, void *ctx) {`,
+        `  return scr_hosted_scheduler_install(enqueue, ctx) ? 0 : -1;`,
+        `}`,
+        `void ${lib.hostedSchedulerStopSymbol}(void) {`,
+        `  scr_hosted_scheduler_uninstall();`,
+        `}`,
+        ``,
+      );
     }
     if (lib.identity !== undefined && this.options.emitLibraryIdentity !== false) {
       // Profile-declared identity getters (the ask-2 sidecar's boot-time
@@ -2314,7 +2332,7 @@ export class CEmitter {
           ? bailReturn
           : `{ ${bailReleases}${bailReturn} }`;
         const ownerContext = form.closure.kind === "ownerContext";
-        const acquireClosure = ownerContext
+        const stableAcquire = ownerContext
           ? [
               `  ScrDirectCallback *sc_direct = (ScrDirectCallback *)sc_ctx;`,
               `  if (sc_direct == NULL) ${bail}`,
@@ -2342,27 +2360,46 @@ export class CEmitter {
           ...(form.closure.kind === "tokenGlobal"
             ? [`static ScrCallbackToken *${form.closure.slot};`]
             : []),
-          `static ${ret} ${adapter.symbol}(${nativeParams.join(", ")}) {`,
-          /* A disposed registration answers with the ABI zero rather than
-           * reading a closure that is gone; so does an already-unwinding
-           * turn, which must not start another handler. */
-          ...acquireClosure,
-          ...promotionLines,
-          ...handleCells,
-          ...(voids
-            ? [`  ${call};`, `  scr_closure_release(sc_cb);`, `  return;`]
-            : [
-                `  ${answerType} sc_answer = ${call};`,
-                `  scr_closure_release(sc_cb);`,
-                /* An exception stays pending and the toolkit gets the ABI
-                 * zero: it has no frame to unwind through, and the next
-                 * runtime turn reports an uncaught error either way. */
-                `  if (scr_exc_pending()) return 0;`,
-                `  return ${answered};`,
-              ]),
-          `}`,
-          ``,
         );
+        const variants = [
+          { symbol: adapter.symbol, acquire: stableAcquire },
+          ...(ownerContext && adapter.frameSymbol !== null
+            ? [{
+                symbol: adapter.frameSymbol,
+                acquire: [
+                  `  ScrClosure *sc_cb = (ScrClosure *)sc_ctx;`,
+                  `  if (sc_cb == NULL) ${bail}`,
+                  `  if (scr_exc_pending()) ${bail}`,
+                  `  sc_cb = scr_closure_retain(sc_cb);`,
+                ],
+              }]
+            : []),
+        ];
+        for (const variant of variants) {
+          out.push(
+            `static ${ret} ${variant.symbol}(${nativeParams.join(", ")}) {`,
+            /* A disposed registration answers with the ABI zero rather than
+             * reading a closure that is gone; so does an already-unwinding
+             * turn, which must not start another handler. The frame variant
+             * receives the retained closure directly from the native result. */
+            ...variant.acquire,
+            ...promotionLines,
+            ...handleCells,
+            ...(voids
+              ? [`  ${call};`, `  scr_closure_release(sc_cb);`, `  return;`]
+              : [
+                  `  ${answerType} sc_answer = ${call};`,
+                  `  scr_closure_release(sc_cb);`,
+                  /* An exception stays pending and the toolkit gets the ABI
+                   * zero: it has no frame to unwind through, and the next
+                   * runtime turn reports an uncaught error either way. */
+                  `  if (scr_exc_pending()) return 0;`,
+                  `  return ${answered};`,
+                ]),
+            `}`,
+            ``,
+          );
+        }
         continue;
       }
       if (form.shape === "queued") {

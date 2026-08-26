@@ -465,6 +465,10 @@ export type IrNativeParameterProjection =
   | { kind: "utf8CStringArray"; argument: number }
   | { kind: "utf8Data"; argument: number }
   | { kind: "utf8ByteLength"; argument: number }
+  /** Opaque process-lifetime identity for a compiler-proven immutable string.
+   * The emitted usize is non-zero for a direct literal and zero otherwise;
+   * native code may retain/compare it as a cache key but never dereference it. */
+  | { kind: "utf8StaticIdentity"; argument: number }
   | { kind: "bytesData"; argument: number }
   /** The sibling position carrying a span argument's extent, and what it
    * counts.
@@ -485,6 +489,12 @@ export type IrNativeParameterProjection =
   | { kind: "bytesLengthOut" }
   | { kind: "callbackFunction"; argument: number }
   | { kind: "callbackContext"; argument: number }
+  /** Nullable release hook paired with a result-owned callback context.
+   * Stable result calls pass null; a compiler-proven frame-bounded result
+   * passes scr_closure_release_v and an alternate direct-closure trampoline,
+   * transferring one closure retain to the raw native registration without a
+   * standalone lifecycle allocation. */
+  | { kind: "callbackContextRelease"; argument: number }
   /** The trampoline of a registration this call is UNMAKING. It is the same
    * pointer the registering call passed, because that pair — function and
    * context — is how the library recognises which registration to drop, so

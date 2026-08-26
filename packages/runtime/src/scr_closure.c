@@ -88,6 +88,16 @@ ScrBox *scr_box_new_obj(void *(*retain)(void *), void (*release)(void *),
   return b;
 }
 
+ScrBox *scr_box_init_frame(ScrBox *storage, ScrBoxKind kind) {
+  if (!storage || (kind != SCR_BOX_F64 && kind != SCR_BOX_BOOL)) {
+    scr_trap("scriptc: internal error: invalid frame capture box\n");
+  }
+  memset(storage, 0, sizeof *storage);
+  storage->rc = SIZE_MAX;
+  storage->kind = kind;
+  return storage;
+}
+
 /* Release one payload pointer by the box's kind. Factored so set_ref can
  * release the value it REPLACED after the slot is already overwritten
  * (mutators must unlink before releasing — see scr_cycle.c). */
@@ -190,6 +200,18 @@ ScrClosure *scr_closure_new(void *fn, size_t ncaps) {
 #ifdef SCR_RC_AUDIT
   scr_live_closures++;
 #endif
+  return c;
+}
+
+ScrClosure *scr_closure_init_frame(void *storage, void *fn, size_t ncaps) {
+  if (!storage || !fn) {
+    scr_trap("scriptc: internal error: invalid frame callback closure\n");
+  }
+  ScrClosure *c = (ScrClosure *)storage;
+  memset(c, 0, SCR_CLOSURE_FRAME_BYTES(ncaps));
+  c->rc = SIZE_MAX;
+  c->fn = fn;
+  c->ncaps = ncaps;
   return c;
 }
 

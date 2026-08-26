@@ -10,6 +10,37 @@ import { boxAccess, cDecl, cStringLiteral, elemAccess, releaseCallC, vAdapters }
 import { OVERFLOW_MEMBER } from "./emit-shapes.js";
 import { emitBytesReceiver } from "./emit-exprs.js";
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
+import { hostedAsyncStepOf } from "../../ir/hosted-async.js";
+import { emitHostedAsyncTerminalC } from "./emit-async.js";
+
+type FrameClosureExpr = Extract<IrExpr, { kind: "closure" }>;
+
+/** Collect selected closure expressions by object identity. Walking the
+ * JSON-safe IR here (rather than allocating storage lazily during emission)
+ * lets C put every alloca in the function prologue. An alloca evaluated in a
+ * loop otherwise consumes a fresh stack region on every iteration. */
+function frameClosureExpressions(value: unknown): FrameClosureExpr[] {
+  const found: FrameClosureExpr[] = [];
+  const seen = new Set<object>();
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item);
+      return;
+    }
+    if (node === null || typeof node !== "object" || seen.has(node)) return;
+    seen.add(node);
+    const record = node as Record<string, unknown>;
+    if (record.kind === "closure" && record.nativeFrameContext === true) {
+      found.push(node as FrameClosureExpr);
+    }
+    for (const [key, child] of Object.entries(record)) {
+      if (key === "type" || key === "loc") continue;
+      walk(child);
+    }
+  };
+  walk(value);
+  return found;
+}
 
 
 
@@ -29,9 +60,23 @@ export function emitFunction(E: CEmitter, fn: IrFunction): void {
     E.currentLocals = new Map(fn.locals.map((l) => [l.id, l]));
     E.captureIds = new Set((fn.captures ?? []).map((c) => c.localId));
     E.integerLoopBindings.clear();
+    E.frameClosureStorage.clear();
+
+    const frameClosures = frameClosureExpressions(fn.body);
+    frameClosures.forEach((closure, index) => {
+      E.frameClosureStorage.set(closure, `sc_frame_closure_storage_${index}`);
+    });
 
     E.line(`${E.signature(fn)} {${E.srcComment(fn.loc)}`);
     E.indent++;
+
+    for (const closure of frameClosures) {
+      const storage = E.frameClosureStorage.get(closure)!;
+      E.line(
+        `void *${storage} = ` +
+          `SCR_STACK_ALLOC(SCR_CLOSURE_FRAME_BYTES(${closure.captures.length}));`,
+      );
+    }
 
     // The pending-return slot: a `return` crossing a finally computes its
     // value FIRST (before the finally runs — snapshotting it here is what
@@ -53,6 +98,9 @@ export function emitFunction(E: CEmitter, fn: IrFunction): void {
     for (const local of fn.locals) {
       if (paramIds.has(local.id) || E.captureIds.has(local.id)) continue;
       if (local.boxed) {
+        if (local.nativeFrameCapture === true) {
+          E.line(`ScrBox ${mangleLocal(local.id)}_frame_box; /* ${local.name} (frame capture storage) */`);
+        }
         E.line(`ScrBox *${mangleLocal(local.id)} = NULL; /* ${local.name} (boxed) */`);
       } else {
         const declaration = local.nativeFrame !== undefined
@@ -84,6 +132,15 @@ export function emitFunction(E: CEmitter, fn: IrFunction): void {
     }
     E.scopes.push(fnScope);
     E.emitStmts(fn.body);
+    const hostedStep = hostedAsyncStepOf(fn);
+    if (hostedStep !== undefined) {
+      emitHostedAsyncTerminalC(E, fn, hostedStep);
+      E.scopes.pop();
+      E.indent--;
+      E.line(`}`);
+      E.line(``);
+      return;
+    }
     // Implicit exit of a void function: release function-scope refcounted
     // locals (unless the body already ended in an explicit return or a
     // throw, whose unwind released everything down to depth 0).
@@ -191,8 +248,11 @@ export function emitStmt(E: CEmitter, s: IrStmt): void {
             // one-element array cell, so the empty (NULL) slot stays the
             // not-yet-initialized sentinel — a raw scalar slot has no spare
             // bit pattern to spend on it.
-            const boxNew =
-              local.tdz && boxAccess(local.type) !== "ref"
+            const boxNew = local.nativeFrameCapture === true
+              ? `scr_box_init_frame(&${target}_frame_box, ${
+                  boxAccess(local.type) === "f64" ? "SCR_BOX_F64" : "SCR_BOX_BOOL"
+                })`
+              : local.tdz && boxAccess(local.type) !== "ref"
                 ? "scr_box_new(SCR_BOX_ARR)"
                 : E.boxNewC(local.type);
             E.line(`${target} = ${boxNew};${E.srcComment(s.loc)} /* let ${local.name}; */`);
@@ -208,7 +268,12 @@ export function emitStmt(E: CEmitter, s: IrStmt): void {
         if (local.boxed) {
           // Box FIRST, then evaluate the initializer: a named function
           // expression's closure captures this box during init evaluation.
-          E.line(`${target} = ${E.boxNewC(local.type)};${E.srcComment(s.loc)}`);
+          const boxNew = local.nativeFrameCapture === true
+            ? `scr_box_init_frame(&${target}_frame_box, ${
+                boxAccess(local.type) === "f64" ? "SCR_BOX_F64" : "SCR_BOX_BOOL"
+              })`
+            : E.boxNewC(local.type);
+          E.line(`${target} = ${boxNew};${E.srcComment(s.loc)}`);
           E.scopes[E.scopes.length - 1]!.push({ name: target, type: local.type, boxed: true });
           const v = E.emitExpr(s.init);
           if (isRefCounted(v.type)) E.moveTemp(v); // the box takes ownership

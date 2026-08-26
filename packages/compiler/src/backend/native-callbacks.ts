@@ -11,6 +11,10 @@ import { nativeCallbackIsOwnerScoped, nativeCallbackSourceScriptType } from "../
 
 export interface NativeCallbackAdapter {
   readonly symbol: string;
+  /** Alternate trampoline used only by a compiler-proven frame-bounded
+   * registration. Its context is the retained ScrClosure itself, so the
+   * native result can own that retain without allocating a lifecycle wrapper. */
+  readonly frameSymbol: string | null;
   readonly bindingId: string;
   readonly argument: number;
   readonly callback: IrNativeCallbackType;
@@ -83,7 +87,8 @@ export function allocateNativeCallbackAdapters(
       ) {
         continue;
       }
-      const contractOf = binding.arguments[parameter.projection.argument]?.callback;
+      const callbackArgument = parameter.projection.argument;
+      const contractOf = binding.arguments[callbackArgument]?.callback;
       const processScoped = contractOf?.owner.kind === "process";
       const takesContext = parameter.type.signature.parameters.some(
         (slot) => slot.kind === "nativeContext",
@@ -100,8 +105,8 @@ export function allocateNativeCallbackAdapters(
       reserved.add(symbol);
       if (global !== null) reserved.add(global);
       const contract =
-        binding.arguments[parameter.projection.argument]?.callback;
-      const source = binding.arguments[parameter.projection.argument]?.type;
+        binding.arguments[callbackArgument]?.callback;
+      const source = binding.arguments[callbackArgument]?.type;
       if (contract === undefined) {
         throw new Error(
           `backend bug: native callback ${binding.id}:${parameter.projection.argument} has no contract`,
@@ -112,17 +117,31 @@ export function allocateNativeCallbackAdapters(
           `backend bug: native callback ${binding.id}:${parameter.projection.argument} has no logical function type`,
         );
       }
+      const hasFrameContextRelease = binding.parameters.some(
+        ({ projection }) =>
+          projection.kind === "callbackContextRelease" &&
+          projection.argument === callbackArgument,
+      );
+      let frameSymbol: string | null = null;
+      if (hasFrameContextRelease) {
+        frameSymbol = `${symbol}_frame`;
+        while (reserved.has(frameSymbol)) {
+          frameSymbol = `sc_native_cb_${suffix++}_frame`;
+        }
+        reserved.add(frameSymbol);
+      }
       /* A signature with no context slot cannot be handed the closure. A
        * call-scoped one borrows a thread-local for the call's dynamic extent
        * — distinct per adapter, so two raw callbacks in one call cannot read
        * each other's — and a process-scoped one has no call to borrow, so it
        * dispatches through the replaceable global above instead. */
       adapters.set(
-        nativeCallbackAdapterKey(binding.id, parameter.projection.argument),
+        nativeCallbackAdapterKey(binding.id, callbackArgument),
         {
           symbol,
+          frameSymbol,
           bindingId: binding.id,
-          argument: parameter.projection.argument,
+          argument: callbackArgument,
           callback: parameter.type,
           source,
           contract,

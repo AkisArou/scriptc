@@ -66,6 +66,39 @@ describe("library profile validation", () => {
     expect(r.profile.exports[1]!.params).toEqual(["u32", "bool"]);
   });
 
+  test("hosted scheduler entry points are an optional paired ABI", () => {
+    const hosted = loadLibraryProfile(
+      writeProfile({
+        ...good,
+        abi: {
+          ...good.abi,
+          hosted_scheduler_configure_symbol: "kx_hosted_scheduler_configure",
+          hosted_scheduler_stop_symbol: "kx_hosted_scheduler_stop",
+        },
+      }),
+    );
+    expect(hosted.ok).toBe(true);
+    if (hosted.ok) {
+      expect(hosted.profile.hostedSchedulerConfigureSymbol).toBe("kx_hosted_scheduler_configure");
+      expect(hosted.profile.hostedSchedulerStopSymbol).toBe("kx_hosted_scheduler_stop");
+    }
+
+    expectSc4001(
+      {
+        ...good,
+        abi: { ...good.abi, hosted_scheduler_configure_symbol: "kx_hosted_scheduler_configure" },
+      },
+      "must be declared together",
+    );
+    expectSc4001(
+      {
+        ...good,
+        abi: { ...good.abi, hosted_scheduler_stop_symbol: "kx_hosted_scheduler_stop" },
+      },
+      "must be declared together",
+    );
+  });
+
   test("teachings rider: per-code key wins, 'async' is the shared fallback", () => {
     const r = loadLibraryProfile(
       writeProfile({

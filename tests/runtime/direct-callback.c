@@ -74,10 +74,10 @@ static void destroy_foreign(void *opaque) {
 
 int main(void) {
   ScrClosure *closure = new_closure();
-  ScrNativeHandle *handle = scr_native_handle_prepare(
-      destroy_foreign, &handle_type, "DirectSubscription");
-  ScrDirectCallback *callback =
-      scr_native_handle_prepare_direct_callback(handle, closure);
+  ScrDirectCallback *callback = NULL;
+  ScrNativeHandle *handle = scr_native_handle_prepare_direct_callback_fused(
+      destroy_foreign, &handle_type, "DirectSubscription", closure,
+      &callback);
   assert(closure->rc == 2);
   scr_closure_release(closure);
 
@@ -103,9 +103,10 @@ int main(void) {
   /* A native factory that fails after receiving its context rolls back the
    * staged lifecycle and its closure retain exactly once. */
   closure = new_closure();
-  handle = scr_native_handle_prepare(
-      destroy_foreign, &handle_type, "DirectSubscription");
-  callback = scr_native_handle_prepare_direct_callback(handle, closure);
+  callback = NULL;
+  handle = scr_native_handle_prepare_direct_callback_fused(
+      destroy_foreign, &handle_type, "DirectSubscription", closure,
+      &callback);
   assert(scr_direct_callback_acquire(callback) != NULL);
   /* Give back the probe and the caller's original reference. */
   scr_closure_release(closure);

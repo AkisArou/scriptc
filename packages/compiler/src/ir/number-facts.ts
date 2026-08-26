@@ -3098,7 +3098,7 @@ function referencesOutsideCallbacks(
   /* Embedded npm sources are program text, not IR, and cannot name an IR
    * function; excluding them keeps this scan proportional to the code the
    * compiler actually lowered. */
-  const { embedded: _embedded, ...structure } = mod;
+  const structure = { ...mod, embedded: undefined };
   const serialized = JSON.stringify(structure);
   const excluded = new Set<string>();
   for (const name of candidates) {

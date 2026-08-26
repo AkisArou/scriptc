@@ -18,7 +18,6 @@
  * became a named projection rather than one side's habit winning.
  */
 import type {
-  IrFfiCallbackParam,
   IrFfiCallbackParamClass,
   IrFfiContextParam,
   IrFfiReturnClass,

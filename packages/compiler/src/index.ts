@@ -32,6 +32,7 @@ import { entryContractFacts, type ContractFacts } from "./frontend/lib-contract.
 import { moduleLibAsyncSurface, moduleLibNondeterministicSurface, moduleEmbedsBuiltin, moduleEmbedsCompressedNpm, moduleUsesAssert, moduleUsesCopying, moduleUsesDc, moduleUsesDgram, moduleUsesDynAsync, moduleUsesDynInvoke, moduleUsesEmitter, moduleUsesFetch, moduleUsesFileHandle, moduleUsesFsWatch, moduleUsesHttp2, moduleUsesHttpServer, moduleUsesInspect, moduleUsesLegacyTextDecoder, moduleUsesNet, moduleUsesNodeTest, moduleUsesParseArgs, moduleUsesProcessEvents, moduleUsesQs, moduleUsesRegex, moduleUsesRetainedCallbacks, moduleUsesSearchParams, moduleUsesStream, moduleUsesSymbol, moduleUsesTls, moduleUsesTlsCa, moduleUsesZlib, nativeIntegerInfo, typeEquals, type IrFfiImport, type IrLibSection, type IrModule, type IrNativeScalarType, type IrRecordShape, type IrType, type SrcLoc } from "./ir/nodes.js";
 import { deserializeModule, serializeModule } from "./ir/serialize.js";
 import { validateModule } from "./ir/validate.js";
+import { checkHostedAsyncLowering } from "./ir/hosted-async.js";
 import { canonicalBuiltinModule, checkPreflight, isNodeTypesPath, loadProgram, locOf, requiresOf, resolveNpmImport, type LoadResult } from "./frontend/program.js";
 import { npmStaticIneligibleReason, npmStaticOffenders, npmStaticPackageOfPath } from "./frontend/npm-static.js";
 import { provenanceSources } from "./frontend/provenance-registry.js";
@@ -51,8 +52,8 @@ import {
   type LibraryCompilationPlan,
   type LibraryNativeBuildPlan,
 } from "./library-plan.js";
-import { FrontendInputTracker, trackedReadFile } from "./frontend/input-tracker.js";
-import { libraryFrontendImplementationFingerprint, publishEarlyLibraryCache, readEarlyLibraryCache, readSemanticLibraryCache, type EarlyLibraryCacheOptions, type EarlyLibraryCachePublish, type EarlyLibraryNativeFeatures, type SemanticLibraryCacheHit } from "./library/early-cache.js";
+import { FrontendInputTracker } from "./frontend/input-tracker.js";
+import { libraryFrontendImplementationFingerprint, publishEarlyLibraryCache, readEarlyLibraryCache, readSemanticLibraryCache, type EarlyLibraryCacheOptions, type EarlyLibraryNativeFeatures, type SemanticLibraryCacheHit } from "./library/early-cache.js";
 import { createSourceLineRebaser } from "./library/semantic-source.js";
 import { publishEarlyExecutableCache, publishEarlyExecutableRoute, readEarlyExecutableCache, type EarlyExecutableCacheOptions, type EarlyExecutableNativeFeatures } from "./executable/early-cache.js";
 import { compilerImplementationIdentity } from "./library/implementation-identity.js";
@@ -2084,6 +2085,12 @@ function resolveLibrarySection(
       collectSymbol: profile.collectSymbol,
       resultResetSymbol: profile.resultResetSymbol,
       threadInstances: profile.instancePerThread,
+      ...(profile.hostedSchedulerConfigureSymbol !== null
+        ? {
+            hostedSchedulerConfigureSymbol: profile.hostedSchedulerConfigureSymbol,
+            hostedSchedulerStopSymbol: profile.hostedSchedulerStopSymbol!,
+          }
+        : {}),
       // Host-callback channels: declaration order is the runtime slot
       // assignment, and the unregistered-call trap text is assembled HERE,
       // once, so both backends emit identical constant bytes (a DETECTED
@@ -2143,6 +2150,9 @@ function resolveNativeLibraryExports(
     ...(mod.lib!.collectSymbol === null ? [] : [mod.lib!.collectSymbol]),
     ...(mod.lib!.resultResetSymbol === null ? [] : [mod.lib!.resultResetSymbol]),
     ...(mod.lib!.callbackRegisterSymbol === undefined ? [] : [mod.lib!.callbackRegisterSymbol]),
+    ...(mod.lib!.hostedSchedulerConfigureSymbol === undefined
+      ? []
+      : [mod.lib!.hostedSchedulerConfigureSymbol, mod.lib!.hostedSchedulerStopSymbol!]),
     ...mod.lib!.exports.map((entry) => entry.symbol),
   ]);
   const ids = new Set<string>();
@@ -2757,7 +2767,22 @@ async function prepareAdmittedLibrary(
     entryPath,
   );
   if (nativeExportDiagnostics.length > 0) return fail(nativeExportDiagnostics);
-  const asyncSurface = moduleLibAsyncSurface(mod);
+  const hostedAsync = profile.hostedSchedulerConfigureSymbol !== null;
+  const hostedLoweringError = hostedAsync ? checkHostedAsyncLowering(mod) : null;
+  if (hostedLoweringError !== null) {
+    return fail([
+      libAsyncSurfaceDiag(
+        hostedLoweringError.surface,
+        hostedLoweringError.loc,
+      ),
+    ]);
+  }
+  const asyncSurface = moduleLibAsyncSurface(
+    mod,
+    hostedAsync
+      ? { allowPromiseCore: true, allowAsyncFunctions: true, allowAwait: true }
+      : {},
+  );
   if (asyncSurface !== null) {
     return fail([libAsyncSurfaceDiag(asyncSurface.surface, asyncSurface.loc)]);
   }
@@ -2915,6 +2940,9 @@ function libraryLocalizeSymbols(
         ...(profile.collectSymbol !== null ? [profile.collectSymbol] : []),
         ...(profile.resultResetSymbol !== null ? [profile.resultResetSymbol] : []),
         ...(profile.callbackRegisterSymbol !== null ? [profile.callbackRegisterSymbol] : []),
+        ...(profile.hostedSchedulerConfigureSymbol !== null
+          ? [profile.hostedSchedulerConfigureSymbol, profile.hostedSchedulerStopSymbol!]
+          : []),
         ...(profile.sidecar !== null
           ? [profile.sidecar.buildIdSymbol, profile.sidecar.abiVersionSymbol]
           : []),
@@ -2967,9 +2995,12 @@ function libraryNativeBuildPlan(
       (mod.nativeTypes ?? []).some((definition) => definition.kind === "handle"),
     retainedCallbacks: required.has("retained-callbacks") ||
       moduleUsesRetainedCallbacks(mod),
-    /* Only an embedder can ask: the module never references the
+    /* Only an embedder can ask: the module never references the ordinary
      * attached-source API, which is the whole reason the request exists. */
     attachedLoop: required.has("attached-loop"),
+    /* A renderer profile needs PromiseCore and hosted continuations, but must
+     * not inherit the ordinary loop's fibers, pollers, or child processes. */
+    hostedAsync: profile.hostedSchedulerConfigureSymbol !== null,
   });
 }
 

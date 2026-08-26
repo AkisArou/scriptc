@@ -466,6 +466,13 @@ export type NativeArgumentForm =
       readonly kind: "utf8Data" | "utf8ByteLength" | "bytesData";
       readonly argument: number;
     }
+  /** The source string's address only when the source is a direct immortal
+   * literal; zero for every value whose storage lifetime is not proven. */
+  | {
+      readonly kind: "utf8StaticIdentity";
+      readonly argument: number;
+      readonly available: boolean;
+    }
   /** A span argument's length, and what it counts. */
   | {
       readonly kind: "bytesLength";
@@ -483,6 +490,10 @@ export type NativeArgumentForm =
     }
   /** The closure slot, carrying a token when one was minted for it. */
   | { readonly kind: "callbackContext"; readonly argument: number }
+  /** A frame-bounded result transfers ownership of its direct callback
+   * context to native. Stable results pass null because their managed handle
+   * lifecycle owns the same context instead. */
+  | { readonly kind: "callbackContextRelease"; readonly argument: number }
   /** The callee takes the reference: the cell gives it up rather than holding
    * one nobody owns. */
   | {
@@ -521,6 +532,9 @@ export interface NativeArgumentContext {
   readonly argumentType: (argument: number) => IrType;
   /** The source expression behind each argument, for the proven-literal case. */
   readonly sourceLiteral: (argument: number) => number | undefined;
+  /** Whether the source expression is the compiler's immortal string-literal
+   * object, whose address is safe to retain as an opaque identity token. */
+  readonly sourceStringLiteral: (argument: number) => boolean;
   /** Argument positions the number facts proved whole and in range. */
   readonly provenCrossings: ReadonlySet<number> | undefined;
   readonly pointerBits: 32 | 64 | undefined;
@@ -648,8 +662,15 @@ export function nativeArgumentForm(
     case "utf8ByteLength":
     case "bytesData":
       return { kind: projection.kind, argument };
+    case "utf8StaticIdentity":
+      return {
+        kind: "utf8StaticIdentity",
+        argument,
+        available: context.sourceStringLiteral(argument),
+      };
     case "callbackFunction":
     case "callbackContext":
+    case "callbackContextRelease":
       return { kind: projection.kind, argument };
     case "argument": {
       if (parameter.type.kind !== "nativeHandle") return { kind: "direct", argument };

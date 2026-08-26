@@ -28,7 +28,7 @@ import type {
   IrUnionDef,
   SrcLoc,
 } from "./nodes.js";
-import { nullableNativeHandleUnion, arrayOf, BIGINT, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, ffiClassType, ffiSourceParamTypes, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, isFfiCallbackParam, isFfiContextParam, isFfiReleaseParam, isJsonSafeType, islandPromisePayloadTag, isRefCounted, isSupportedArrayElem, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, nativeArgumentScriptType, nativeCallbackIsOwnerScoped, nativeFailureReadsResult, nativeIntegerInfo, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, shapeHasAccessorSlots, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
+import { nullableNativeHandleUnion, arrayOf, BIGINT, BOOL, BYTES_U8, bytesOf, canAdaptDynFuncTo, canConvertToDyn, canExitIslandToType, canMarshalIntoIsland, canMarshalTypedFuncIntoIsland, CHILD_T, CHILDSTREAM_T, DATE_T, DGRAMSOCK_T, DYN, DYN_HANDLE_KINDS, F64, ffiClassType, ffiSourceParamTypes, FILEHANDLE_T, FSWATCHER_T, HTTP2SESSION_T, HTTP2STREAM_T, HTTPCLIENTREQ_T, HTTPREQ_T, HTTPRES_T, isJsonSafeType, islandPromisePayloadTag, isRefCounted, isSupportedArrayElem, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, jsOpResultKind, JSVAL, nativeArgumentScriptType, nativeCallbackIsOwnerScoped, nativeFailureReadsResult, nativeIntegerInfo, NETSERVER_T, NETSOCKET_T, PROCSTREAM_T, REF_TRUTHY_KINDS, REGEX, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, SEARCH_PARAMS_T, SECURECTX_T, shapeHasAccessorSlots, SPAWNRES_T, STATS_T, STRING, SYMBOL_T, TESTCTX_T, typeEquals, typeKey, unionFuncSetArmsOk, URL_T, VOID } from "./nodes.js";
 import { validateNativeFrameResources } from "./native-frame-resources.js";
 
 /**
@@ -2380,10 +2380,12 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       utf8CStringArray: 0,
       utf8Data: 0,
       utf8ByteLength: 0,
+      utf8StaticIdentity: 0,
       bytesData: 0,
       bytesLength: 0,
       callbackFunction: 0,
       callbackContext: 0,
+      callbackContextRelease: 0,
       callbackRelease: 0,
       /* Set from the callback's own signature when its function projection is
        * read: a C API that takes no userdata has no context slot, and then
@@ -2679,6 +2681,20 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           ) {
             errors.push({
               message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an invalid UTF-8 byte-length projection`,
+              loc: moduleLoc,
+            });
+          }
+          break;
+        case "utf8StaticIdentity":
+          projectionCounts.utf8StaticIdentity++;
+          if (
+            sourceArgument.type.kind !== "string" ||
+            parameter.type.kind !== "nativeScalar" ||
+            parameter.type.scalar !== "usize" ||
+            parameter.ownership.kind !== "value"
+          ) {
+            errors.push({
+              message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an invalid UTF-8 static-identity projection`,
               loc: moduleLoc,
             });
           }
@@ -3017,6 +3033,34 @@ export function validateModule(mod: IrModule): IrValidationError[] {
             });
           }
           break;
+        case "callbackContextRelease": {
+          projectionCounts.callbackContextRelease++;
+          const signature = parameter.type.kind === "nativeCallback"
+            ? parameter.type.signature
+            : undefined;
+          const callback = sourceArgument.type.kind === "func"
+            ? sourceArgument.callback
+            : undefined;
+          if (
+            Object.keys(parameter.projection).sort().join(",") !== "argument,kind" ||
+            sourceArgument.type.kind !== "func" ||
+            callback?.owner.kind !== "result" ||
+            callback.synchronousReturn !== true ||
+            binding.result.frameBounded === undefined ||
+            parameter.type.kind !== "nativeCallback" ||
+            !validNativeCallback(parameter.type) ||
+            signature?.parameters.length !== 1 ||
+            signature.parameters[0]?.kind !== "nativeContext" ||
+            signature.result.kind !== "void" ||
+            parameter.ownership.kind !== "callback"
+          ) {
+            errors.push({
+              message: `Native IR binding "${binding.id}" parameter "${parameter.name}" has an invalid frame callback-context-release projection`,
+              loc: moduleLoc,
+            });
+          }
+          break;
+        }
         default: {
           /* A projection arm the contract carries and this switch does not.
            *
@@ -3045,9 +3089,11 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       const valid =
         argument.type.kind === "string" || argument.type.kind === "nullableString"
           ? (projections.total === 1 && projections.utf8CString === 1) ||
-            (argument.type.kind === "string" && projections.total === 2 &&
+            (argument.type.kind === "string" &&
+              (projections.total === 2 || projections.total === 3) &&
               projections.utf8Data === 1 &&
-              projections.utf8ByteLength === 1)
+              projections.utf8ByteLength === 1 &&
+              projections.utf8StaticIdentity === projections.total - 2)
           : argument.type.kind === "bool"
             ? projections.total === 1 && projections.boolean === 1
             : argument.type.kind === "f64"
@@ -3069,8 +3115,10 @@ export function validateModule(mod: IrModule): IrValidationError[] {
                 ? projections.callbackFunction + projections.callbackRelease === 1 &&
                   projections.callbackContext ===
                     (projections.callbackTakesContext ? 1 : 0) &&
+                  projections.callbackContextRelease <= 1 &&
                   projections.total ===
-                    (projections.callbackTakesContext ? 2 : 1)
+                    (projections.callbackTakesContext ? 2 : 1) +
+                      projections.callbackContextRelease
                 : projections.total === 1 && projections.direct === 1;
       if (!valid) {
         errors.push({
@@ -3629,6 +3677,15 @@ export function validateModule(mod: IrModule): IrValidationError[] {
     if ((cbs.length > 0) !== (mod.lib.callbackRegisterSymbol !== undefined)) {
       errors.push({ message: "library callbacks and callbackRegisterSymbol must be present together", loc: entryLoc });
     }
+    if (
+      (mod.lib.hostedSchedulerConfigureSymbol !== undefined) !==
+      (mod.lib.hostedSchedulerStopSymbol !== undefined)
+    ) {
+      errors.push({
+        message: "library hosted scheduler configure/stop symbols must be present together",
+        loc: entryLoc,
+      });
+    }
     const cbNames = new Set<string>();
     cbs.forEach((cb, i) => {
       if (cb.slot !== i) {
@@ -3648,6 +3705,9 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       ...(mod.lib.collectSymbol === null ? [] : [mod.lib.collectSymbol]),
       ...(mod.lib.resultResetSymbol === null ? [] : [mod.lib.resultResetSymbol]),
       ...(mod.lib.callbackRegisterSymbol === undefined ? [] : [mod.lib.callbackRegisterSymbol]),
+      ...(mod.lib.hostedSchedulerConfigureSymbol === undefined
+        ? []
+        : [mod.lib.hostedSchedulerConfigureSymbol, mod.lib.hostedSchedulerStopSymbol!]),
       ...mod.lib.exports.map((entry) => entry.symbol),
     ]);
     const nativeExportIds = new Set<string>();

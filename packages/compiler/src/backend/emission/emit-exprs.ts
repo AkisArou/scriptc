@@ -2,13 +2,12 @@
  * expression lands in a fresh C temp, with RC ownership tracked on the
  * emitter's frames (see the discipline comment in emitter core). */
 import type { CEmitter, Temp } from "./emitter.js";
-import { arrayOf, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, IrRecordShape, IrType, isFfiCallbackParam, isFfiContextParam, isFfiReleaseParam, islandPromisePayloadTag, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, nativeIntegerInfo, nativeIntegerOpTraps, nativeScalarWidensToNumber, provenNumberLiteral, RUNTIME_ERROR_CLASSES, STRING, typeEquals, typeKey } from "../../ir/nodes.js";
+import { arrayOf, BOOL, BYTES_U8, bytesOf, canMarshalFuncIntoIsland, CHILDSTREAM_T, DYN, F64, IrExpr, IrRecordShape, IrType, islandPromisePayloadTag, isRefCounted, isUnitType, MAY_THROW_LIB_FNS, nativeIntegerOpTraps, nativeScalarWidensToNumber, RUNTIME_ERROR_CLASSES, STRING, typeEquals, typeKey } from "../../ir/nodes.js";
 import { boxAccess, BYTES_NUM_KIND_C, BYTES_NUM_VAR_C, bytesElemByteSize, bytesElemKindC, cDecl, cFnPtrCast, cNativeScalarLiteral, cNumberLiteral, cStringLiteral, cType, DV_GET_KIND_C, DV_SET_KIND_C, elemAccess, mapKeyAccess, mapKeyKindC, mapValKindC, releaseCallC, retainCallC, vAdapters } from "./emit-types.js";
 import { mangleClassNew, mangleClassRetain, mangleClassStruct, mangleField, mangleFnClosure, mangleFunction, mangleGlobal, mangleLocal, mangleNativeField, mangleNativeHandleTag, mangleRecordClone, mangleRecordNew, mangleRecordStruct, mangleVtStruct } from "../mangle.js";
 import { OVERFLOW_MEMBER } from "./emit-shapes.js";
 import { dynDestrCheckHelper, dynIterNHelper, dynKeyGetHelper } from "./emit-walkers.js";
 import { genResultThunkFor } from "./emit-async.js";
-import { nativeCallbackCancellationArgument } from "../native-callbacks.js";
 import { nativeCallLifecycle } from "../native-callbacks.js";
 import { nativeArgumentBorrow, nativeArgumentHandle, nativeArgumentForm, nativeCallDisposal, nativeCallHandleBorrowSource, nativeCallIsThrowCheckpoint, nativeFailureForm, nativeResultAcquisition, nativeResultCopy, nativeResultForm, nativeResultHandle, type NativeArgumentFormExhausted } from "../native-call-plan.js";
 import { expressionResultIsImmortal } from "../immortal-values.js";
@@ -2332,13 +2331,18 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           nativeTypesById: E.nativeTypesById,
           nativeById: E.nativeById,
         });
+        const acquisition = nativeResultAcquisition(binding, resultForm, e.resultMode);
         for (const step of lifecycle.setup) {
           const closure = args[step.argument]!.name;
           const token = `sc_t${E.tempCounter++}`;
           if (step.kind === "registerOwned") {
             const adapter = E.nativeCallbackAdapter(binding.id, step.argument);
             if (step.direct) {
-              E.line(`ScrDirectCallback *${token};`);
+              E.line(
+                acquisition.kind === "frameBounded"
+                  ? `ScrClosure *${token};`
+                  : `ScrDirectCallback *${token};`,
+              );
               directOwnedCallbacks.add(step.argument);
             } else {
               E.line(
@@ -2386,8 +2390,25 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           E.nativeDestructorBindings.has(binding.id),
         );
         if (disposal !== null) {
+          const argument = args[disposal.argument]!;
+          if (argument.nativeFrame !== undefined) {
+            const source = e.args[disposal.argument];
+            if (source?.kind !== "varRef" || argument.nativeFrame.nullable !== undefined) {
+              throw new Error(
+                `emitter bug: frame-bounded disposal is not an exact local in ${binding.id}`,
+              );
+            }
+            E.line(
+              `${argument.nativeFrame.release}(${argument.name});${E.srcComment(e.loc)}`,
+            );
+            /* The cancellation call consumes the foreign frame resource. Null
+             * its lexical owner so ordinary scope cleanup is a no-op. */
+            E.line(`${mangleLocal(source.localId)} = NULL;`);
+            releaseArguments();
+            return { name: "", type: e.type };
+          }
           E.line(
-            `scr_native_handle_dispose(${args[disposal.argument]!.name}, ` +
+            `scr_native_handle_dispose(${argument.name}, ` +
               `&${mangleNativeHandleTag(disposal.typeId)}, ${operation});${E.srcComment(e.loc)}`,
           );
           E.emitPendingCheck();
@@ -2416,6 +2437,8 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             const source = e.args[argument];
             return source?.kind === "numLit" ? source.value : undefined;
           },
+          sourceStringLiteral: (argument: number) =>
+            e.args[argument]?.kind === "strLit",
           provenCrossings,
           pointerBits: E.mod.nativeTarget?.pointerBits,
           tables: {
@@ -2557,6 +2580,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               return `(const void *)${args[form.argument]!.name}->data`;
             case "utf8ByteLength":
               return `${args[form.argument]!.name}->len`;
+            case "utf8StaticIdentity":
+              return form.available
+                ? `(size_t)(uintptr_t)(const void *)${args[form.argument]!.name}`
+                : `(size_t)0`;
             case "bytesLength": {
               /* `->len` is an ELEMENT count. A signature asking for bytes gets
                * the multiplication here rather than a differently-named
@@ -2568,8 +2595,19 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
                 ? count
                 : `(${count} * ${size})`;
             }
-            case "callbackFunction":
-              return `&${E.nativeCallbackAdapter(binding.id, form.argument).symbol}`;
+            case "callbackFunction": {
+              const adapter = E.nativeCallbackAdapter(binding.id, form.argument);
+              const symbol = acquisition.kind === "frameBounded" &&
+                  directOwnedCallbacks.has(form.argument)
+                ? adapter.frameSymbol
+                : adapter.symbol;
+              if (symbol === null) {
+                throw new Error(
+                  `emitter bug: frame-bounded callback ${binding.id}:${form.argument} has no direct trampoline`,
+                );
+              }
+              return `&${symbol}`;
+            }
             case "callbackRelease":
               return `&${
                 E.nativeCallbackAdapter(
@@ -2581,6 +2619,10 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
               return `(void *)${
                 retainedTokens.get(form.argument) ?? args[form.argument]!.name
               }`;
+            case "callbackContextRelease":
+              return acquisition.kind === "frameBounded"
+                ? `&scr_closure_release_v`
+                : "NULL";
             /* The four handle arms: the three nullabilities every value family
              * crosses, plus whether the callee takes the reference. */
             case "handleNull":
@@ -2646,6 +2688,19 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
            * switch with no argument produced. Both backends carry this line. */
           return form satisfies NativeArgumentFormExhausted;
         });
+        /* A scoped direct callback transfers one closure retain only after
+         * every argument conversion has succeeded. The frame trampoline reads
+         * that closure directly, so no standalone lifecycle wrapper is
+         * allocated. The native result owns the retain through its exact
+         * release hook from the instant the frame entry is called. */
+        if (acquisition.kind === "frameBounded") {
+          for (const argument of directOwnedCallbacks) {
+            E.line(
+              `${retainedTokens.get(argument)} = ` +
+                `scr_closure_retain(${args[argument]!.name});`,
+            );
+          }
+        }
         const cancellation = lifecycle.cancellation;
         let cancellationStarted: string | undefined;
         if (cancellation !== null) {
@@ -2657,7 +2712,6 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           );
           emitConversionPendingCheck();
         }
-        const acquisition = nativeResultAcquisition(binding, resultForm, e.resultMode);
         let call = `${acquisition.symbol}(${nativeArgs.join(", ")})`;
         /* A callback whose C signature has no userdata slot cannot be handed
          * its closure, so the call lends one through the adapter's
@@ -2995,11 +3049,24 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           const { definition, destructor } = plan;
           const raw = `sc_t${E.tempCounter++}`;
           const prepared = `sc_t${E.tempCounter++}`;
-          E.line(
-            `ScrNativeHandle *${prepared} = scr_native_handle_prepare(` +
-              `&${destructor}, &${mangleNativeHandleTag(definition.id)}, ` +
-              `${cStringLiteral(Buffer.from(definition.nativeName, "utf8"))});`,
+          const directArguments = [...retainedTokens.keys()].filter((argument) =>
+            directOwnedCallbacks.has(argument)
           );
+          const fusedDirectArgument = directArguments[0];
+          if (fusedDirectArgument === undefined) {
+            E.line(
+              `ScrNativeHandle *${prepared} = scr_native_handle_prepare(` +
+                `&${destructor}, &${mangleNativeHandleTag(definition.id)}, ` +
+                `${cStringLiteral(Buffer.from(definition.nativeName, "utf8"))});`,
+            );
+          } else {
+            E.line(
+              `ScrNativeHandle *${prepared} = scr_native_handle_prepare_direct_callback_fused(` +
+                `&${destructor}, &${mangleNativeHandleTag(definition.id)}, ` +
+                `${cStringLiteral(Buffer.from(definition.nativeName, "utf8"))}, ` +
+                `${args[fusedDirectArgument]!.name}, &${retainedTokens.get(fusedDirectArgument)});`,
+            );
+          }
           const retainedOwnerArgument = plan.prepareBeforeCall!.ownerArgument;
           if (retainedOwnerArgument !== null) {
             E.line(
@@ -3009,6 +3076,7 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
           }
           for (const [argument, token] of retainedTokens) {
             if (directOwnedCallbacks.has(argument)) {
+              if (argument === fusedDirectArgument) continue;
               E.line(
                 `${token} = scr_native_handle_prepare_direct_callback(` +
                   `${prepared}, ${args[argument]!.name});`,
@@ -3144,6 +3212,31 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
             e.type,
             retainCallC(e.type, `(ScrClosure *)&${mangleFnClosure(e.fnName)}`),
           );
+        }
+        if (e.nativeFrameContext === true) {
+          for (const localId of e.captures) {
+            if (E.currentLocals.get(localId)?.nativeFrameCapture !== true) {
+              throw new Error(
+                `emitter bug: frame callback closure ${e.fnName} captures non-frame local ${localId}`,
+              );
+            }
+          }
+          const storage = E.frameClosureStorage.get(e);
+          if (storage === undefined) {
+            throw new Error(
+              `emitter bug: frame callback closure ${e.fnName} has no function-entry storage`,
+            );
+          }
+          const t = E.newImmortalTemp(
+            e.type,
+            `scr_closure_init_frame(` +
+              `${storage}, ` +
+              `(void *)&${E.callTargetC(e.fnName)}, ${e.captures.length})`,
+          );
+          e.captures.forEach((localId, i) => {
+            E.line(`${t.name}->caps[${i}] = ${mangleLocal(localId)};`);
+          });
+          return t;
         }
         const t = E.newTemp(
           e.type,

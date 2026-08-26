@@ -55,6 +55,8 @@ static void scr_direct_callback_collect_complete(void *opaque) {
 
 static void scr_direct_callback_destroy(void *opaque) { free(opaque); }
 
+static void scr_direct_callback_destroy_inline(void *opaque) { (void)opaque; }
+
 ScrDirectCallback *scr_native_handle_prepare_direct_callback(
     ScrNativeHandle *handle, ScrClosure *closure) {
   if (handle == NULL || closure == NULL) {
@@ -71,6 +73,27 @@ ScrDirectCallback *scr_native_handle_prepare_direct_callback(
       scr_direct_callback_trace, scr_direct_callback_collect_begin,
       scr_direct_callback_collect_complete, scr_direct_callback_destroy);
   return callback;
+}
+
+ScrNativeHandle *scr_native_handle_prepare_direct_callback_fused(
+    ScrNativeDestructor destructor, const ScrNativeHandleType *type,
+    const char *type_name, ScrClosure *closure,
+    ScrDirectCallback **out_callback) {
+  if (closure == NULL || out_callback == NULL) {
+    scr_trap("scriptc: invalid fused direct callback lifecycle\n");
+  }
+  ScrDirectCallback *callback = NULL;
+  ScrNativeHandle *handle = scr_native_handle_prepare_inline_lifecycle(
+      destructor, type, type_name, SCR_NATIVE_LIFECYCLE_CALLBACK,
+      sizeof *callback, scr_direct_callback_commit,
+      scr_direct_callback_abandon, scr_direct_callback_begin,
+      scr_direct_callback_complete, scr_direct_callback_trace,
+      scr_direct_callback_collect_begin, scr_direct_callback_collect_complete,
+      scr_direct_callback_destroy_inline, (void **)&callback);
+  callback->closure = scr_closure_retain(closure);
+  callback->active = true;
+  *out_callback = callback;
+  return handle;
 }
 
 ScrClosure *scr_direct_callback_acquire(ScrDirectCallback *callback) {
