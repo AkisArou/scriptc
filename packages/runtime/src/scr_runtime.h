@@ -3534,9 +3534,23 @@ typedef enum {
    * stream. Unlike an ordinary typed→unknown conversion, this capsule
    * retains the original value so a statically typed reader can recover
    * its identity. `materialize` supplies the ordinary deep-copy view for
-   * consumers such as fetch request bodies that need a dyn chunk. Enum
-   * position: LAST — LLVM hardcodes every preceding kind number. */
+   * consumers such as fetch request bodies that need a dyn chunk. */
   SCR_DYN_TYPED_REF,
+  /* An ES Symbol VALUE. Never produced by the parser (JSON text has no
+   * symbols) — it enters the checked-dynamic tree through the compiler's
+   * static→dyn converters, which is how a branded record (React's
+   * `$$typeof`) survives entering an untyped array or object. Boxes by
+   * REFERENCE (a retained ScrSym): a symbol IS its identity, so a deep
+   * copy would forge a new one and break the brand that makes the box
+   * worth having — the SCR_DYN_HANDLE stance, for the same reason.
+   * typeof answers "symbol", truthiness is true, JSON serialization
+   * treats it like undefined (dropped from objects, null in array slots
+   * — exactly Node), util.inspect prints Symbol(desc), and dynCheck
+   * against a symbol target unwraps the retained identity. String() is
+   * NOT defined here: JS throws a TypeError on implicit symbol→string
+   * coercion, and the tree's String() path answers that throw.
+   * Enum position: LAST — LLVM hardcodes every preceding kind number. */
+  SCR_DYN_SYMBOL,
 } ScrDynKind;
 
 /* The handle-type tags the checked-dynamic tree can carry. The set is deliberately the
@@ -3617,6 +3631,7 @@ struct ScrDyn {
     bool b;
     double num;
     ScrStr *str; /* owned */
+    ScrSym *sym; /* owned (SCR_DYN_SYMBOL) — the identity, never copied */
     ScrBytes *bytes; /* owned (SCR_DYN_BYTES) */
     struct { size_t len; size_t cap; ScrDyn **items; } arr;      /* owned */
     struct {
@@ -3735,6 +3750,15 @@ ScrDyn *scr_dyn_new_null(void);
 ScrDyn *scr_dyn_new_bool(bool b);
 ScrDyn *scr_dyn_new_num(double n);
 ScrDyn *scr_dyn_new_str(ScrStr *s);
+/* Borrows `sym` and retains it: the box shares the caller's identity
+ * rather than copying, which is the whole point of boxing a symbol.
+ * Lives in scr_symbol.c — the gated unit — so a program with no symbol
+ * surface never links it. */
+ScrDyn *scr_dyn_new_symbol(ScrSym *sym);
+/* The allocator view scr_dyn_new_symbol builds through, and the release
+ * edge it installs. `sym` moves in already retained. */
+ScrDyn *scr_dyn_alloc_symbol(ScrSym *sym, void (*release_fn)(ScrSym *s));
+extern void (*scr_dyn_symbol_release_fn)(ScrSym *s);
 ScrDyn *scr_dyn_new_arr(void);
 ScrDyn *scr_dyn_new_obj(void);
 /* The ordinary deep-copy object plus a retained typed source. source_access
@@ -3972,6 +3996,9 @@ ScrDyn *scr_dyn_new_handle(void *h, ScrDynHandleTag tag);
  * identity, no copy); anything else throws the path-annotated catchable
  * TypeError and returns NULL. */
 void *scr_dyn_handle_unbox(const ScrDyn *d, ScrDynHandleTag tag, const ScrDynPath *path, const char *want);
+/* dynCheck's symbol target: kind-checked identity unwrap (+1), or the
+ * shared path-annotated TypeError. Also scr_symbol.c. */
+ScrSym *scr_dyn_symbol_unbox(const ScrDyn *d, const ScrDynPath *path, const char *want);
 /* Keyed read on a HANDLE box (the emitted sc_dyn_key_get's arm): the
  * tag's modeled properties answer boxed values; everything else answers
  * the undefined singleton (the checked-dynamic tree's own-property stance — SEMANTICS.md)

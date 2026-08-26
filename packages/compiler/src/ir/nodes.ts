@@ -6307,6 +6307,12 @@ export function canConvertToDyn(
   if (t.kind === "object" && t.className === "%Error") return true;
   if (t.kind === "func") return canBoxFuncIntoDyn(t, getRecord, getUnion);
   if (DYN_HANDLE_KINDS.has(t.kind)) return true;
+  // A symbol boxes by REFERENCE (SCR_DYN_SYMBOL): the pointer IS the
+  // identity, so a deep copy would forge a different symbol and destroy
+  // the only property a symbol has. This arm is what lets a branded
+  // record survive entering an untyped array or object — the shape every
+  // JS framework uses to mark its own values.
+  if (t.kind === "symbol") return true;
   // Promises box by REFERENCE (SCR_DYN_PROMISE): promise<dyn> carries its
   // ScrPromise directly (the payload is already a dyn value), any other
   // convertible-or-void inner boxes an ADAPTER promise whose emitted
@@ -6358,6 +6364,13 @@ function canBoxDynComposite(
       return t.elem === "u8";
     case "func":
       return canBoxFuncIntoDyn(t, getRecord, getUnion);
+    // A symbol FIELD travels with its record: the walker boxes it by
+    // reference at the field's own to-dyn helper, so a branded record is
+    // as boxable as its other members. Without this arm the brand — the
+    // one field that makes the record recognisable — is what stops the
+    // whole value from entering a dynamic slot.
+    case "symbol":
+      return true;
     case "array":
       return canBoxDynComposite(t.elem, getRecord, getUnion, visiting);
     case "record": {

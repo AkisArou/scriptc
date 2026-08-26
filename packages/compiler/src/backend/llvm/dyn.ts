@@ -53,6 +53,7 @@ export const DK = {
   PROMISE: 10,
   JSVAL: 11, /* SCR_DYN_JSVAL — island values held by reference */
   TYPED_REF: 12, /* SCR_DYN_TYPED_REF — static Web-stream transit capsule */
+  SYMBOL: 13, /* SCR_DYN_SYMBOL — ES Symbol held by reference (identity) */
 } as const;
 
 /** What the dyn helpers need beyond the walker host: interned immortal
@@ -323,6 +324,8 @@ export class LlDyn {
       }
       case "func":
         return "function";
+      case "symbol":
+        return "symbol";
       default: {
         const h = DYN_HANDLE_KINDS.get(t.kind);
         if (h) return h.cls;
@@ -1186,6 +1189,14 @@ export class LlDyn {
         // Runtime HANDLE targets: a tag-checked reference unwrap (+1 —
         // identity, no copy; the runtime throws the path-annotated
         // TypeError on any other kind or tag).
+        if (t.kind === "symbol") {
+          // Identity unwrap, never a copy — the handle stance.
+          host.declare(`declare ptr @scr_dyn_symbol_unbox(ptr, ptr, ptr)`);
+          const r = B.tmp();
+          B.line(`${r} = call ptr @scr_dyn_symbol_unbox(ptr %d, ptr %path, ptr ${want})`);
+          B.terminate(`ret ptr ${r}`);
+          break;
+        }
         const h = DYN_HANDLE_KINDS.get(t.kind);
         if (h) {
           host.declare(`declare ptr @scr_dyn_handle_unbox(ptr, i32, ptr, ptr)`);
@@ -1585,6 +1596,14 @@ export class LlDyn {
         // Runtime HANDLE kinds box by REFERENCE (identity — no copy):
         // scr_dyn_new_handle retains the borrowed operand through the
         // tag's installed ops.
+        if (t.kind === "symbol") {
+          // Boxes by REFERENCE: the box shares the caller's identity.
+          host.declare(`declare ptr @scr_dyn_new_symbol(ptr)`);
+          const r = B.tmp();
+          B.line(`${r} = call ptr @scr_dyn_new_symbol(ptr %v)`);
+          B.terminate(`ret ptr ${r}`);
+          break;
+        }
         const h = DYN_HANDLE_KINDS.get(t.kind);
         if (h) {
           host.declare(`declare ptr @scr_dyn_new_handle(ptr, i32)`);
