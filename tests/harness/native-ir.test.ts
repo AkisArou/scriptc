@@ -3654,6 +3654,27 @@ function borrowedUtf8StaticIdentityModule(dynamic = false): IrModule {
   return mod;
 }
 
+function borrowedUtf8ConditionalStaticIdentityModule(): IrModule {
+  const mod = borrowedUtf8StaticIdentityModule();
+  const exit = mod.functions[0]!.body[0]!;
+  if (exit.kind !== "exprStmt" || exit.expr.kind !== "nativeCall") {
+    throw new Error("test fixture lost its Native IR exit call");
+  }
+  const call = exit.expr.args[0]!;
+  if (call.kind !== "nativeCall") {
+    throw new Error("test fixture lost its nested native call");
+  }
+  call.args = [{
+    kind: "ternary",
+    cond: { kind: "boolLit", value: true, type: { kind: "bool" }, loc },
+    then: { kind: "strLit", value: "hello", type: { kind: "string" }, loc },
+    else_: { kind: "strLit", value: "world", type: { kind: "string" }, loc },
+    type: { kind: "string" },
+    loc,
+  }];
+  return mod;
+}
+
 function borrowedCStringModule(): IrModule {
   const mod = borrowedUtf8Module();
   mod.nativeBindings![0]!.parameters = [
@@ -4594,20 +4615,30 @@ test("Native IR rejects malformed or ambiguous UTF-8 projections", () => {
   );
 });
 
-test("C and LLVM expose identity only for direct immortal string literals", () => {
+test("C and LLVM expose identity for every selected immortal string literal", () => {
   const literal = borrowedUtf8StaticIdentityModule();
+  const conditional = borrowedUtf8ConditionalStaticIdentityModule();
   const dynamic = borrowedUtf8StaticIdentityModule(true);
   expect(validateModule(literal)).toEqual([]);
+  expect(validateModule(conditional)).toEqual([]);
   expect(validateModule(dynamic)).toEqual([]);
 
   const literalC = emitModule(literal);
+  const conditionalC = emitModule(conditional);
   const dynamicC = emitModule(dynamic);
   expect(literalC).toContain("(size_t)(uintptr_t)(const void *)");
+  expect(conditionalC).toContain("(size_t)(uintptr_t)(const void *)");
+  expect(conditionalC).not.toContain("(size_t)0");
   expect(dynamicC).toContain("(size_t)0");
 
   const literalLlvm = emitLlvmModule(literal, { pointerBits: 64 });
+  const conditionalLlvm = emitLlvmModule(conditional, { pointerBits: 64 });
   const dynamicLlvm = emitLlvmModule(dynamic, { pointerBits: 64 });
   expect(literalLlvm).toContain("ptrtoint ptr");
+  expect(conditionalLlvm).toContain("ptrtoint ptr");
+  expect(conditionalLlvm).not.toMatch(
+    /call i32 @nts_i32_identity\(ptr [^,]+, i64 [^,]+, i64 0\)/u,
+  );
   expect(dynamicLlvm).toMatch(/call i32 @nts_i32_identity\(ptr [^,]+, i64 [^,]+, i64 0\)/u);
 });
 

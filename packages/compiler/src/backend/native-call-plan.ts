@@ -532,9 +532,10 @@ export interface NativeArgumentContext {
   readonly argumentType: (argument: number) => IrType;
   /** The source expression behind each argument, for the proven-literal case. */
   readonly sourceLiteral: (argument: number) => number | undefined;
-  /** Whether the source expression is the compiler's immortal string-literal
-   * object, whose address is safe to retain as an opaque identity token. */
-  readonly sourceStringLiteral: (argument: number) => boolean;
+  /** Whether every result of the source expression is a compiler-owned
+   * immortal string object whose selected address is safe to retain as an
+   * opaque identity token. */
+  readonly sourceStringIdentityAvailable: (argument: number) => boolean;
   /** Argument positions the number facts proved whole and in range. */
   readonly provenCrossings: ReadonlySet<number> | undefined;
   readonly pointerBits: 32 | 64 | undefined;
@@ -666,7 +667,7 @@ export function nativeArgumentForm(
       return {
         kind: "utf8StaticIdentity",
         argument,
-        available: context.sourceStringLiteral(argument),
+        available: context.sourceStringIdentityAvailable(argument),
       };
     case "callbackFunction":
     case "callbackContext":

@@ -8377,8 +8377,10 @@ class LlEmitter {
             const source = e.args[argument];
             return source?.kind === "numLit" ? source.value : undefined;
           },
-          sourceStringLiteral: (argument: number) =>
-            e.args[argument]?.kind === "strLit",
+          sourceStringIdentityAvailable: (argument: number) => {
+            const source = e.args[argument];
+            return source !== undefined && expressionResultIsImmortal(source);
+          },
           provenCrossings,
           pointerBits: this.mod.nativeTarget?.pointerBits,
           tables: {

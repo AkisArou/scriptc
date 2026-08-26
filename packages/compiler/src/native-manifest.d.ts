@@ -466,8 +466,9 @@ export type IrNativeParameterProjection =
   | { kind: "utf8Data"; argument: number }
   | { kind: "utf8ByteLength"; argument: number }
   /** Opaque process-lifetime identity for a compiler-proven immutable string.
-   * The emitted usize is non-zero for a direct literal and zero otherwise;
-   * native code may retain/compare it as a cache key but never dereference it. */
+   * The emitted usize is non-zero for a literal or a runtime choice composed
+   * exclusively of literals, and zero otherwise; native code may
+   * retain/compare it as a cache key but never dereference it. */
   | { kind: "utf8StaticIdentity"; argument: number }
   | { kind: "bytesData"; argument: number }
   /** The sibling position carrying a span argument's extent, and what it
