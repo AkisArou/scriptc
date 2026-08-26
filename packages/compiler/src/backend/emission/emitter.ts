@@ -2362,7 +2362,7 @@ export class CEmitter {
             : []),
         );
         const variants = [
-          { symbol: adapter.symbol, acquire: stableAcquire },
+          { symbol: adapter.symbol, acquire: stableAcquire, release: true },
           ...(ownerContext && adapter.frameSymbol !== null
             ? [{
                 symbol: adapter.frameSymbol,
@@ -2370,8 +2370,13 @@ export class CEmitter {
                   `  ScrClosure *sc_cb = (ScrClosure *)sc_ctx;`,
                   `  if (sc_cb == NULL) ${bail}`,
                   `  if (scr_exc_pending()) ${bail}`,
-                  `  sc_cb = scr_closure_retain(sc_cb);`,
                 ],
+                /* nativeFrameContext validation proves this is the immortal
+                 * stack closure owned by the declaring synchronous frame.
+                 * Its result-owned registration cannot outlive that frame,
+                 * so retaining and releasing it per delivery are both
+                 * semantically inert and needless hot-path traffic. */
+                release: false,
               }]
             : []),
         ];
@@ -2386,10 +2391,14 @@ export class CEmitter {
             ...promotionLines,
             ...handleCells,
             ...(voids
-              ? [`  ${call};`, `  scr_closure_release(sc_cb);`, `  return;`]
+              ? [
+                  `  ${call};`,
+                  ...(variant.release ? [`  scr_closure_release(sc_cb);`] : []),
+                  `  return;`,
+                ]
               : [
                   `  ${answerType} sc_answer = ${call};`,
-                  `  scr_closure_release(sc_cb);`,
+                  ...(variant.release ? [`  scr_closure_release(sc_cb);`] : []),
                   /* An exception stays pending and the toolkit gets the ABI
                    * zero: it has no frame to unwind through, and the next
                    * runtime turn reports an uncaught error either way. */

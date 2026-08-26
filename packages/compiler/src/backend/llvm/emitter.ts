@@ -2036,11 +2036,8 @@ class LlEmitter {
          * which value each one is. */
         const answer = sourceType.ret;
         const answerType = answer.kind === "bool" ? "i1" : this.llType(answer);
-        if (ownerContext && adapter.frameSymbol !== null) {
-          this.declare(`declare ptr @scr_closure_retain_v(ptr)`);
-        }
         const variants = [
-          { symbol: adapter.symbol, acquire: stableAcquire },
+          { symbol: adapter.symbol, acquire: stableAcquire, release: true },
           ...(ownerContext && adapter.frameSymbol !== null
             ? [{
                 symbol: adapter.frameSymbol,
@@ -2053,9 +2050,15 @@ class LlEmitter {
                   `skip:`,
                   `  ${bail}`,
                   `acquire:`,
-                  `  %cb = call ptr @scr_closure_retain_v(ptr %ctx)`,
+                  /* nativeFrameContext validation proves the physical
+                   * context is an immortal stack closure whose result-owned
+                   * registration ends within the declaring frame. Borrow it
+                   * directly instead of executing an inert RC pair for every
+                   * callback delivery. */
+                  `  %cb = getelementptr i8, ptr %ctx, i64 0`,
                   `  br label %invoke`,
                 ],
+                release: false,
               }]
             : []),
         ];
@@ -2073,7 +2076,7 @@ class LlEmitter {
           if (voids) {
             defs.push(
               `  call void %fn(${callArgs})`,
-              `  call void @scr_closure_release(ptr %cb)`,
+              ...(variant.release ? [`  call void @scr_closure_release(ptr %cb)`] : []),
               `  ret void`,
               `}`,
               ``,
@@ -2082,7 +2085,7 @@ class LlEmitter {
           }
           defs.push(
             `  %answer = call ${answerType} %fn(${callArgs})`,
-            `  call void @scr_closure_release(ptr %cb)`,
+            ...(variant.release ? [`  call void @scr_closure_release(ptr %cb)`] : []),
             /* An exception stays pending and the toolkit gets the ABI zero:
              * it has no frame to unwind through, and the next runtime turn
              * reports an uncaught error either way. */

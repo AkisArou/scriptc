@@ -251,10 +251,22 @@ describe("frame-bounded native callback contexts", () => {
     );
     expect(c).toMatch(/scr_closure_init_frame\(sc_frame_closure_storage_0,/u);
     expect(c).not.toMatch(/scr_closure_init_frame\(SCR_STACK_ALLOC/u);
+    const cFrameTrampoline = c.match(
+      /static void sc_native_cb_\d+_frame\([^)]*\) \{([\s\S]*?)\n\}/u,
+    )?.[1];
+    expect(cFrameTrampoline).toBeDefined();
+    expect(cFrameTrampoline).not.toContain("scr_closure_retain");
+    expect(cFrameTrampoline).not.toContain("scr_closure_release");
 
     const llvm = emitLlvmModule(mod);
     expect(llvm).toMatch(/alloca \[5 x ptr\]/u);
     expect(llvm).toMatch(/call ptr @scr_closure_init_frame/u);
+    const llvmFrameTrampoline = llvm.match(
+      /define internal void @sc_native_cb_\d+_frame\([^)]*\)[^{]*\{([\s\S]*?)\n\}/u,
+    )?.[1];
+    expect(llvmFrameTrampoline).toBeDefined();
+    expect(llvmFrameTrampoline).not.toContain("scr_closure_retain");
+    expect(llvmFrameTrampoline).not.toContain("scr_closure_release");
   });
 
   test.each([
