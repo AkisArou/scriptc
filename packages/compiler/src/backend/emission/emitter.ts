@@ -933,8 +933,10 @@ export class CEmitter {
         out.push(
           `extern ${nativeAbiType(binding.result.type)} ${binding.result.frameBounded.entry.symbol}(` +
             `${params.length > 0 ? params.join(", ") : "void"});`,
-          `extern void ${binding.result.frameBounded.release.symbol}(void *);`,
         );
+        if (binding.result.frameBounded.release !== null) {
+          out.push(`extern void ${binding.result.frameBounded.release.symbol}(void *);`);
+        }
       }
       for (const argument of binding.arguments) {
         for (const source of argument.callback?.sourceArguments ?? []) {
@@ -1902,9 +1904,10 @@ export class CEmitter {
     return { name, type, immortal: true };
   }
 
-  /** A raw foreign pointer whose exact release is part of the legalized
+  /** A raw foreign pointer whose exact cleanup is part of the legalized
    * result plan. It joins the statement frame before any pending check, just
-   * like an ordinary owned temp, but never allocates a managed handle cell. */
+   * like an ordinary owned temp, but never allocates a managed handle cell.
+   * The cleanup may explicitly be null for a foreign-owned borrow. */
   newNativeFrameTemp(
     type: IrType,
     init: string,
@@ -1967,7 +1970,9 @@ export class CEmitter {
     for (const t of frame) {
       if (t.boxed) this.line(`scr_box_release(${t.name});`);
       else if (t.nativeFrame !== undefined) {
-        this.line(`${t.nativeFrame.release}(${t.name});`);
+        if (t.nativeFrame.release !== null) {
+          this.line(`${t.nativeFrame.release}(${t.name});`);
+        }
       }
       else this.releaseValue(t.name, t.type);
     }

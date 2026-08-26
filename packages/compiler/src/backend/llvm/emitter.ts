@@ -4493,6 +4493,7 @@ class LlEmitter {
   private releaseFrame(frame: LlValue[]): void {
     for (const v of frame) {
       if (v.nativeFrame !== undefined) {
+        if (v.nativeFrame.release === null) continue;
         this.declare(`declare void @${v.nativeFrame.release}(ptr)`);
         let value = v.name;
         if (v.slot) {
@@ -4514,14 +4515,15 @@ class LlEmitter {
 
   private releaseScope(scope: LlScopeEntry[]): void {
     for (const e of scope) {
+      if (e.nativeFrame?.release === null) continue;
       const t = this.B.tmp();
       this.B.line(`${t} = load ptr, ptr ${e.slot}`);
       if (e.boxed) {
         this.declare(`declare void @scr_box_release(ptr)`);
         this.B.line(`call void @scr_box_release(ptr ${t})`);
       } else if (e.nativeFrame !== undefined) {
-        this.declare(`declare void @${e.nativeFrame.release}(ptr)`);
-        this.B.line(`call void @${e.nativeFrame.release}(ptr ${t})`);
+        this.declare(`declare void @${e.nativeFrame.release!}(ptr)`);
+        this.B.line(`call void @${e.nativeFrame.release!}(ptr ${t})`);
       } else {
         this.releaseValue(t, e.type); // runtime releases are NULL-tolerant
       }
@@ -8267,6 +8269,11 @@ class LlEmitter {
             if (owner.kind !== "local") {
               throw new Error(
                 `llvm emitter bug: frame-bounded disposal has no lexical slot in ${binding.id}`,
+              );
+            }
+            if (argument.nativeFrame.release === null) {
+              throw new Error(
+                `llvm emitter bug: cleanup-free frame resource reaches disposal in ${binding.id}`,
               );
             }
             this.declare(`declare void @${argument.nativeFrame.release}(ptr)`);

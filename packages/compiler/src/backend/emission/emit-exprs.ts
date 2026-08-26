@@ -2398,6 +2398,11 @@ export function emitExpr(E: CEmitter, e: IrExpr): Temp {
                 `emitter bug: frame-bounded disposal is not an exact local in ${binding.id}`,
               );
             }
+            if (argument.nativeFrame.release === null) {
+              throw new Error(
+                `emitter bug: cleanup-free frame resource reaches disposal in ${binding.id}`,
+              );
+            }
             E.line(
               `${argument.nativeFrame.release}(${argument.name});${E.srcComment(e.loc)}`,
             );

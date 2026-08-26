@@ -998,8 +998,9 @@ export type NativeResultHandleForm = Extract<
 
 /** Which mechanics entry acquires this call site's result. The binding's
  * ordinary entry returns a stable resource; a compiler-selected frame result
- * uses the alternate entry and carries the exact release symbol into scope
- * cleanup. Selection is made once here so C and LLVM cannot infer escape
+ * uses the alternate entry and carries its exact physical cleanup into scope
+ * cleanup. A null cleanup is explicit foreign ownership, not missing
+ * metadata. Selection is made once here so C and LLVM cannot infer escape
  * independently. */
 export type NativeResultAcquisition =
   | { readonly kind: "stable"; readonly symbol: string }
@@ -1027,7 +1028,7 @@ export function nativeResultAcquisition(
     kind: "frameBounded",
     symbol: frame.entry.symbol,
     resource: {
-      release: frame.release.symbol,
+      release: frame.release?.symbol ?? null,
       ...(form.kind === "handleOrNull"
         ? {
             nullable: {

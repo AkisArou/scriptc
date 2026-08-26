@@ -1557,7 +1557,9 @@ export function materializeNativeBinding(binding: NativeInputBinding): IrNativeB
         : {
             frameBounded: {
               entry: { ...binding.result.frameBounded.entry },
-              release: { ...binding.result.frameBounded.release },
+              release: binding.result.frameBounded.release === null
+                ? null
+                : { ...binding.result.frameBounded.release },
             },
           }),
     },

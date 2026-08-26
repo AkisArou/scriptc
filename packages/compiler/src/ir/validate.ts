@@ -2085,17 +2085,20 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         const entry = typeof shape?.entry === "object" && shape.entry !== null
           ? shape.entry as { symbol?: unknown }
           : null;
-        const release = typeof shape?.release === "object" && shape.release !== null
-          ? shape.release as { symbol?: unknown }
+        const releaseValue = shape?.release;
+        const release = typeof releaseValue === "object" && releaseValue !== null
+          ? releaseValue as { symbol?: unknown }
           : null;
         const entrySymbol = entry?.symbol;
         const releaseSymbol = release?.symbol;
+        const validRelease = releaseValue === null ||
+          (Object.keys(release ?? {}).join(",") === "symbol" &&
+            typeof releaseSymbol === "string" && cIdentifier.test(releaseSymbol));
         const valid =
           Object.keys(shape ?? {}).sort().join(",") === "entry,release" &&
           Object.keys(entry ?? {}).join(",") === "symbol" &&
-          Object.keys(release ?? {}).join(",") === "symbol" &&
           typeof entrySymbol === "string" && cIdentifier.test(entrySymbol) &&
-          typeof releaseSymbol === "string" && cIdentifier.test(releaseSymbol) &&
+          validRelease &&
           entrySymbol !== binding.entry.symbol && entrySymbol !== releaseSymbol &&
           binding.result.type.kind === "nativeHandle" &&
           binding.result.passMode === "pointer" &&
@@ -2119,10 +2122,10 @@ export function validateModule(mod: IrModule): IrValidationError[] {
           });
         } else {
           nativeFrameEntrySymbols.add(entrySymbol);
-          if (
+          if (typeof releaseSymbol === "string" && (
             declaredNativeEntrySymbols.has(releaseSymbol) ||
             ffiSymbols.has(releaseSymbol)
-          ) {
+          )) {
             errors.push({
               message: `Native IR frame-bounded release symbol "${releaseSymbol}" conflicts with a call entry`,
               loc: moduleLoc,

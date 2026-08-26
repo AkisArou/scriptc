@@ -1764,7 +1764,10 @@ export interface IrGlobal {
  * raw pointer too: NULL is its null arm and a present pointer is its handle
  * arm, so neither case needs a managed union box. */
 export interface IrNativeFrameResource {
-  release: string;
+  /** Exact physical cleanup for the raw foreign value. `null` means the
+   * foreign owner controls its lifetime and the compiler enforces the borrow
+   * boundary without emitting a cleanup call. */
+  release: string | null;
   nullable?: {
     unionId: string;
     handleTag: number;
@@ -1801,8 +1804,9 @@ export interface IrLocal {
    * managed handle cell. Its source type remains `nativeHandle` or the exact
    * `nativeHandle | null` union; the storage fact is compiler-only and
    * validated so the value can appear solely in null tests and synchronous
-   * borrowed native arguments. Scope cleanup calls `release` exactly once on
-   * every exit; release entries are NULL-tolerant. */
+   * borrowed native arguments. When `release` is a symbol, scope cleanup calls
+   * it exactly once on every exit and it is NULL-tolerant. A null release
+   * needs no physical cleanup but retains the same non-escape proof. */
   nativeFrame?: IrNativeFrameResource;
 }
 

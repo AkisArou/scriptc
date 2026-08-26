@@ -245,7 +245,7 @@ function candidatesFor(
       resultType.typeId === local.type.typeId &&
       init.type.typeId === local.type.typeId
     ) {
-      resource = { release: frame.release.symbol };
+      resource = { release: frame.release?.symbol ?? null };
     } else if (
       binding.result.projection.kind === "nullableHandle" &&
       local.type.kind === "union" &&
@@ -257,7 +257,7 @@ function candidatesFor(
         resultType.typeId,
       );
       if (nullable === null || nullable.unionId !== local.type.unionId) continue;
-      resource = { release: frame.release.symbol, nullable };
+      resource = { release: frame.release?.symbol ?? null, nullable };
     } else {
       continue;
     }
